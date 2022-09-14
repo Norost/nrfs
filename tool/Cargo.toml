@@ -1,0 +1,11 @@
+[package]
+name = "tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies.clap]
+version = "3.2.21"
+features = ["derive"]
+
+[dependencies.nrfs]
+path = "../nrfs"
