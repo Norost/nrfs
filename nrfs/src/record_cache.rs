@@ -139,7 +139,7 @@ impl<'a, S: Storage> Write<'a, S> {
 }
 
 fn calc_block_count(len: u32, block_size_p2: u8, max_record_size_p2: u8) -> usize {
-	debug_assert!(len <= 1 << max_record_size_p2);
+	debug_assert!(len <= 1 << max_record_size_p2, "{:?}", len);
 	let bs = 1 << block_size_p2;
 	((len + bs - 1) / bs) as _
 }

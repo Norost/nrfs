@@ -69,17 +69,21 @@ impl<S: Storage> Nrfs<S> {
 	}
 
 	pub fn read_object(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
-		self.object_root(id)?.read(&mut self.storage, offset, buf)
+		let obj = self.object_root(id)?;
+		let l = (buf.len() as u64).min(obj.len() - offset);
+		let buf = &mut buf[..l as _];
+		obj.read(&mut self.storage, offset, buf)?;
+		Ok(buf.len())
 	}
 
-	pub fn write_object(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<usize, Error<S>> {
+	pub fn write_object(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
 		let mut rec = self.object_root(id)?;
-		let l = rec.write(&mut self.storage, offset, data)?;
+		rec.write(&mut self.storage, offset, data)?;
 		eprintln!("{:02x?}", rec.0.as_ref());
 		self.header
 			.object_list
 			.write(&mut self.storage, id * 64, rec.0.as_ref())?;
-		Ok(l)
+		Ok(())
 	}
 
 	pub fn finish_transaction(&mut self) -> Result<(), Error<S>> {
@@ -93,11 +97,9 @@ impl<S: Storage> Nrfs<S> {
 
 	fn object_root(&mut self, id: u64) -> Result<record_tree::RecordTree, Error<S>> {
 		let mut rec = record::Record::default();
-		let l = self
-			.header
+		self.header
 			.object_list
 			.read(&mut self.storage, id * 64, rec.as_mut())?;
-		assert_eq!(l, 64);
 		Ok(record_tree::RecordTree(rec))
 	}
 }

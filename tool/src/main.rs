@@ -49,8 +49,7 @@ fn make(args: Args) {
 				Ok(f) if f.metadata().unwrap().is_file() => {
 					let f = fs::read(f.path()).unwrap();
 					let id = nrfs.new_object().unwrap();
-					let l = nrfs.write_object(id, 0, &f).unwrap();
-					assert_eq!(nrfs.object_len(id).unwrap(), l as u64);
+					nrfs.write_object(id, 0, &f).unwrap();
 				}
 				Ok(_) => {}
 				Err(e) => todo!("{:?}", e),
@@ -72,7 +71,7 @@ fn dump(args: Args) {
 		let l = nrfs.read_object(id, 0, &mut buf).unwrap();
 		assert_eq!(l, len as usize);
 		dbg!();
-		std::io::stderr().write_all(&buf).unwrap();
+		std::io::stdout().write_all(&buf).unwrap();
 		dbg!();
 	}
 }
@@ -101,7 +100,8 @@ impl nrfs::Storage for S {
 	}
 
 	fn read(&mut self, lba: u64, blocks: usize) -> Result<Box<dyn nrfs::Read + '_>, Self::Error> {
-		self.file.seek(SeekFrom::Start(lba << self.block_size_p2()))?;
+		self.file
+			.seek(SeekFrom::Start(lba << self.block_size_p2()))?;
 		let mut buf = vec![0; blocks << self.block_size_p2()];
 		self.file.read_exact(&mut buf)?;
 		Ok(Box::new(R { buf }))
