@@ -2,5 +2,6 @@
 members = [
 	#"fuse",
 	"tool",
+	"nros",
 	"nrfs",
 ]

@@ -1,5 +1,5 @@
 [package]
-name = "nrfs"
+name = "nros"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,3 +7,5 @@ edition = "2021"
 package = "nora_endian"
 version = "0.1"
 
+[dependencies.rangemap]
+version = "1.0"
