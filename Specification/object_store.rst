@@ -1,12 +1,11 @@
-Specification
-=============
+Object store
+============
 
 Features
 --------
 
 * Error detection & correction (with mirrors only!)
 * Compression
-* Out of band deduplication (+ copy-on-write)
 * Transactional updates
 * Mirroring
 * Defragmentation
@@ -125,12 +124,12 @@ Record
 +------+-------------------------------------------------------+
 |   32 |                          LBA                          |
 +------+------+------+------+------+---------------------------+
-|   40 | Flgs | Type | CAlg | HAlg |          Length           |
+|   40 | Flgs | Refs | CAlg | HAlg |          Length           |
 +------+------+------+------+------+---------------------------+
-|   48 |                      Total length²                    |
-+------+------+------------------------------------------------+
-|   56 | Refs |            Modification Time³                  |
-+------+------+------------------------------------------------+
+|   48 |                     Total length²                     |
++------+-------------------------------------------------------+
+|   56 |                  Modification Time³                   |
++------+-------------------------------------------------------+
 
 Flgs:
 
@@ -158,47 +157,6 @@ Object list
 ~~~~~~~~~~~
 
 The object list keeps track of record trees (except for itself).
-
-
-File
-~~~~
-
-A file has type 1.
-
-
-Directory
-~~~~~~~~~
-
-A directory is a special type of file that points to other files.
-
-A directory has type 2.
-
-A hash map/tree is used to keep track of files.
-
-Every directory begins with a 16 byte header.
-
-+------+------+------+------+------+------+------+------+------+
-| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 |             |            Free block offset            |
-+------+-------------+-----------------------------------------+
-|    8 |                                                       |
-+------+-------------------------------------------------------+
-
-+------+------+------+------+------+------+------+------+------+
-| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 | Flgs | KLen |     Key Offset or Next Table Length     |
-+------+------+------+-----------------------------------------+
-|    8 |           Object index or Next Table Offset           |
-+------+-------------------------------------------------------+
-
-Flgs:
-
-If bit 0 is set, an entry is present. Otherwise, it is empty.
-
-If bit 1 is set, the value points to another hashmap.
-Otherwise, it points to an object.
 
 
 Log
