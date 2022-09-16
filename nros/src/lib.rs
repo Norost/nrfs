@@ -77,6 +77,12 @@ impl<S: Storage> Nros<S> {
 		Ok(l / 64)
 	}
 
+	pub fn move_object(&mut self, to_id: u64, from_id: u64) -> Result<(), Error<S>> {
+		let r = self.object_root(from_id)?;
+		self.set_object_root(to_id, &r)?;
+		self.set_object_root(from_id, &Default::default())
+	}
+
 	pub fn object_count(&mut self) -> u64 {
 		self.header.object_list.len() / 64
 	}
@@ -130,6 +136,12 @@ impl<S: Storage> Nros<S> {
 			.object_list
 			.read(&mut self.storage, id * 64, rec.as_mut())?;
 		Ok(record_tree::RecordTree(rec))
+	}
+
+	fn set_object_root(&mut self, id: u64, rec: &record_tree::RecordTree) -> Result<(), Error<S>> {
+		self.header
+			.object_list
+			.write(&mut self.storage, id * 64, rec.0.as_ref())
 	}
 }
 

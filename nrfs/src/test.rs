@@ -71,7 +71,7 @@ impl Storage for S {
 }
 
 fn new() -> Nrfs<S> {
-	let s = S(vec![0; 512 * 512].into());
+	let s = S(vec![0; 1 << 24].into());
 	//Nrfs::new(s, 10).unwrap()
 	Nrfs::new(s, 17).unwrap()
 }
@@ -111,6 +111,7 @@ fn create_file() {
 fn create_many_files() {
 	let mut fs = new();
 
+	// Create & read
 	for i in 0..100 {
 		let name = format!("{}.txt", i);
 		let contents = format!("This is file #{}", i);
@@ -134,6 +135,37 @@ fn create_many_files() {
 
 		let g = d.find(&mut fs, name.as_bytes()).unwrap().unwrap();
 		dbg!(f, &g);
+
+		let mut buf = [0; 32];
+		let l = g.read(&mut fs, 0, &mut buf).unwrap();
+		assert_eq!(
+			core::str::from_utf8(&buf[..l]),
+			Ok(&*contents),
+			"file #{}",
+			i
+		);
+	}
+
+	// Test iteration
+	let d = fs.root_dir().unwrap();
+	let mut i = 0;
+	let mut count = 0;
+	while let Some((e, ni)) = d.next_from(&mut fs, i).unwrap() {
+		dbg!(e);
+		count += 1;
+		i = if let Some(i) = ni { i } else { break };
+	}
+	assert_eq!(count, 100);
+
+	// Read only
+	for i in 0..100 {
+		let name = format!("{}.txt", i);
+		let contents = format!("This is file #{}", i);
+
+		let mut d = fs.root_dir().unwrap();
+		dbg!();
+
+		let g = d.find(&mut fs, name.as_bytes()).unwrap().unwrap();
 
 		let mut buf = [0; 32];
 		let l = g.read(&mut fs, 0, &mut buf).unwrap();

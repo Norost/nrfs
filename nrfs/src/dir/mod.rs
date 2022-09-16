@@ -35,31 +35,43 @@ impl Dir {
 		S: Storage,
 	{
 		// Allocate map & storage
-		let id = fs.storage.new_object().map_err(Error::Nros)?;
+		let s = Self::new_map(fs, 3, 2, 0, &key)?;
 		let alloc = fs.storage.new_object().map_err(Error::Nros)?;
-		assert_eq!(id + 1, alloc);
+		assert_eq!(s.id + 1, alloc);
+		Ok(s)
+	}
 
-		// Initialize map
+	/// Allocate a new hashmap object.
+	fn new_map<S>(fs: &mut Nrfs<S>, header_len8: u8, entry_len8: u8, map_size_p2: u8, key: &[u8; 16]) -> Result<Self, Error<S>>
+	where
+		S: Storage,
+	{
+		let id = fs.storage.new_object().map_err(Error::Nros)?;
+		let hashmap_base = u16::from(header_len8) * 8;
+		let entry_size = u16::from(entry_len8) * 8;
 		let s = Self {
 			id,
-			hashmap_base: 24,
-			hashmap_size_p2: 0,
-			hash_keys: key,
+			hashmap_base,
+			hashmap_size_p2: map_size_p2,
+			hash_keys: *key,
 			hash_algorithm: HashAlgorithm::SipHasher13,
-			entry_size: 16,
+			entry_size,
 			entry_count: 0,
 			unix: None,
 			embedded: None,
 			alloc_map: Some(Default::default()),
 		};
-		let mut buf = [0; 24 + 16 * 16];
-		buf[0] = 3; // 24 bytes
-		buf[1] = 2; // 16 bytes
+		let mut buf = [0; 24];
+		buf[0] = header_len8;
+		buf[1] = entry_len8;
 		buf[2] = 1; // SipHasher13
-		buf[3] = 0; // 1 entry
-		buf[3] = 4; // 16 entries
-		buf[8..24].copy_from_slice(&key);
+		buf[3] = map_size_p2;
+		buf[8..].copy_from_slice(key);
 		fs.write_all(id, 0, &buf)?;
+		// FIXME gap should be added automatically
+		for i in 0..1 << map_size_p2 {
+			fs.write_all(id, u64::from(hashmap_base) + i * u64::from(entry_size), &[0; 16])?;
+		}
 		Ok(s)
 	}
 
@@ -132,6 +144,7 @@ impl Dir {
 		S: Storage,
 	{
 		while u64::from(index) < self.capacity() {
+			dbg!();
 			// Get standard info
 			let (e, offt) = self.get(fs, index)?;
 
@@ -144,7 +157,7 @@ impl Dir {
 			// Get key
 			let mut key = [0; 255];
 			let key = &mut key[..e.key_len.into()];
-			fs.read_exact(self.id, e.key_offset, key)?;
+			self.read_heap(fs, e.key_offset, key)?;
 
 			// Get extension info
 			return self
@@ -179,6 +192,7 @@ impl Dir {
 
 		let mut index = self.hash(entry.name) & self.index_mask();
 		loop {
+			dbg!(self.entry_count, self.capacity());
 			let (e, _) = self.get(fs, index)?;
 			if e.ty == 0 {
 				break;
@@ -288,9 +302,7 @@ impl Dir {
 		dbg!(index, offt);
 		let mut buf = [0; 16];
 		fs.read_exact(self.id, offt, &mut buf)?;
-		dbg!(self.should_grow(), self.entry_count, self.index_mask());
-		dbg!();
-		let [a, b, c, d, e, f, ty, key_len, id @ ..] = buf;
+		let [a, b, c, d, e, f, key_len, ty, id @ ..] = buf;
 		let key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
 		let id_or_offset = u64::from_le_bytes(id);
 		Ok((RawEntry { key_offset, key_len, id_or_offset, ty }, offt))
@@ -370,8 +382,8 @@ impl Dir {
 		let offt = self.get_offset(index);
 		let mut buf = [0; 16];
 		buf[..8].copy_from_slice(&entry.key_offset.to_le_bytes());
-		buf[6] = entry.ty;
-		buf[7] = entry.key_len;
+		buf[6] = entry.key_len;
+		buf[7] = entry.ty;
 		buf[8..].copy_from_slice(&entry.id_or_offset.to_le_bytes());
 		fs.write_all(self.id, offt, &buf)?;
 		Ok(offt)
@@ -555,12 +567,78 @@ impl Dir {
 		dbg!(u64::from(self.hashmap_base) + u64::from(self.entry_size) * self.capacity())
 	}
 
+	/// Read a heap value.
+	fn read_heap<S>(&self, fs: &mut Nrfs<S>, offset: u64, buf: &mut [u8]) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		fs.read_exact(self.id + 1, offset, buf)
+	}
+
+	/// Write a heap value.
+	fn write_heap<S>(&self, fs: &mut Nrfs<S>, offset: u64, data: &[u8]) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		fs.write_all(self.id + 1, offset, data)
+	}
+
 	/// Grow the hashmap
 	fn grow<S>(&mut self, fs: &mut Nrfs<S>) -> Result<(), Error<S>>
 	where
 		S: Storage,
 	{
-		todo!()
+		dbg!();
+		let new_map = Self::new_map(fs, 3, 2, self.hashmap_size_p2 + 1, &self.hash_keys)?;
+
+		// Copy entries
+		for index in 0..self.capacity() {
+			let mut buf = [0; 16];
+			fs.read_exact(self.id, 24 + 16 * u64::from(index), &mut buf)?; 
+			let [a, b, c, d, e, f, key_len, ty, ..] = buf;
+			if ty == 0 {
+				continue;
+			}
+
+			let key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
+			let mut key = [0; 255];
+			fs.read_exact(self.id + 1, key_offset, &mut key[..key_len.into()])?;
+
+			let mut i = self.hash(&key[..key_len.into()]);
+			println!("> {:08x} - {:?}", i, String::from_utf8_lossy(&key[..key_len.into()]));
+
+			loop {
+				let mut c = [0];
+				let new_i = i & new_map.index_mask();
+				fs.read_exact(new_map.id, 24 + 16 * u64::from(new_i) + 7, &mut c)?; 
+				if c[0] == 0 {
+					fs.write_all(new_map.id, 24 + 16 * u64::from(new_i), &buf)?;
+					break;
+				}
+				i += 1;
+			}
+		}
+
+		// Copy alloc log
+		let old_base = self.alloc_log_base();
+		let new_base = new_map.alloc_log_base();
+		let old_end = fs.length(self.id)?;
+		for offt in (old_base..old_end).step_by(16) {
+			let mut buf = [0; 16];
+			fs.read_exact(self.id, offt, &mut buf)?; 
+			fs.write_all(new_map.id, new_base - old_base + offt, &buf)?;
+		}
+
+		fs.storage.move_object(self.id, new_map.id).map_err(Error::Nros)?;
+		dbg!(&self.alloc_map);
+		*self = Self {
+			id: self.id,
+			entry_count: self.entry_count,
+			alloc_map: core::mem::take(&mut self.alloc_map),
+			..new_map
+		};
+
+		Ok(())
 	}
 
 	/// Update the entry count.
