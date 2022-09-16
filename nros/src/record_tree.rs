@@ -51,6 +51,7 @@ impl RecordTree {
 	where
 		S: Storage,
 	{
+		dbg!(self.len());
 		let (depth, lvl_shift) = self.depth_shift(sto);
 		let chunk_size = 1 << depth * lvl_shift + sto.max_record_size_p2;
 
@@ -79,6 +80,7 @@ impl RecordTree {
 		}
 
 		self.0.total_length = self.0.total_length.max(end.into());
+		dbg!(self.len());
 
 		Ok(())
 	}
@@ -105,7 +107,7 @@ impl RecordTree {
 	{
 		let mut w = sto.modify(&self.0)?;
 		write_to(w.as_mut(), (index * 64) as _, rec.0.as_ref());
-		self.0 = w.finish()?;
+		self.0 = Record { total_length: self.0.total_length, ..w.finish()? };
 		Ok(())
 	}
 

@@ -124,7 +124,7 @@ impl<'a, S: Storage> Write<'a, S> {
 			.storage
 			.write(lba, blks)
 			.map_err(Error::Storage)?;
-		w.set_blocks(len as _);
+		w.set_blocks(blks);
 		let mut rec = Record::pack(&self.data, w.get_mut()).map_err(Error::RecordPack)?;
 		rec.lba = lba.into();
 		w.set_blocks(calc_block_count(
