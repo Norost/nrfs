@@ -54,6 +54,13 @@ A directory is a special type of file that points to other files.
 
 A directory has type 2.
 
+It consists of two objects: one object with a header and hashmap at ID
+and one object for "heap" data at ID + 1 [#two_objects]_
+
+.. [#two_objects] The map and heap are split so the map can grow without
+   needing to shift the heap data or leave large holes.
+   Fixing the heap ID relative to the map's ID allows loading it concurrently.
+
 A hashmap [#hashmap]_ is used to keep track of files.
 
 .. [#hashmap] Hashmaps are used as they are very simple to implement, scale
@@ -85,18 +92,19 @@ Header
 +------+------+------+------+------+------+------+------+------+
 | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
 +======+======+======+======+======+======+======+======+======+
-|    0 |  Header len |            Free block offset            |
-+------+-------------+------+----------------------------------+
-|    8 |  Entry len  | HLen | HAlg |        Entry count        |
-+------+-------------+------+----------------------------------+
-|   16 |                                                       |
+|    0 |        Entry count        | MLen | HAlg | ELen | HLen |
++------+---------------------------+------+------+------+------+
+|    8 |                                                       |
 +------+                          Key                          |
-|   24 |                                                       |
+|   16 |                                                       |
 +------+-------------------------------------------------------+
-|   32 |                      Extensions                       |
+|   24 |                      Extensions                       |
 +------+-------------------------------------------------------+
 |  ... |                          ...                          |
 +------+-------------------------------------------------------+
+
+HLen and ELen are in units of 8 bytes.
+MLen represents a power of 2.
 
 Extensions define metadata to be attached to entries.
 Each extension is prefixed with a 4 byte header.
@@ -120,16 +128,33 @@ Entry
 +------+------+------+------+------+------+------+------+------+
 | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
 +======+======+======+======+======+======+======+======+======+
-|    0 | Type | KLen |               Key Offset                |
+|    0 | Type | KLen |               Key offset                |
 +------+------+------+-----------------------------------------+
-|    8 |           Object index or Next Table Offset           |
+|    8 |                     Object index                      |
 +------+-------------------------------------------------------+
-|   16 |                     Extension data                    |
+|   16 |                    Extension data                     |
 +------+-------------------------------------------------------+
 |  ... |                          ...                          |
 +------+-------------------------------------------------------+
 
 If the object index or next table offset is 0, the entry is empty.
+
+After the hashmap comes an allocation log.
+Each entry in the log indicates a single allocation or deallocation.
+
+Log entry
++------+------+------+------+------+------+------+------+------+
+| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
++======+======+======+======+======+======+======+======+======+
+|    0 |                        Offset                         |
++------+-------------------------------------------------------+
+|    8 |                        Length                         |
++------+-------------------------------------------------------+
+
+The high bit of length indicates whether the entry is an allocation (0)
+or deallocation (1).
+
+The size of the log is determined by the total size of the map object.
 
 
 Extensions

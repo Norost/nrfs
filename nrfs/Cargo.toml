@@ -10,5 +10,8 @@ version = "0.1"
 [dependencies.nros]
 path = "../nros"
 
+[dependencies.rangemap]
+version = "1.0"
+
 [dependencies.siphasher]
 version = "0.3"

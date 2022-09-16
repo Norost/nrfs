@@ -2,6 +2,7 @@ use {
 	crate::{Error, Nrfs, Storage},
 	core::{fmt, num::NonZeroU8},
 	siphasher::sip::SipHasher13,
+	rangemap::RangeSet,
 };
 
 pub mod ext;
@@ -22,9 +23,10 @@ pub struct Dir {
 	hash_algorithm: HashAlgorithm,
 	entry_size: u16,
 	entry_count: u32,
-	free_offset: u64,
 	unix: Option<u16>,
 	embedded: Option<(u16, ext::embedded::Dir)>,
+	// Lazily load the allocation map to save time when only reading.
+	alloc_map: Option<RangeSet<u64>>,
 }
 
 impl Dir {
@@ -32,30 +34,33 @@ impl Dir {
 	where
 		S: Storage,
 	{
-		// Reserve space for header + 16 entries
-		let mut buf = [0; 32 + 16 * 16];
-		let free_offset = buf.len() as u64;
-		buf[..8].copy_from_slice(&free_offset.to_le_bytes());
-		buf[6..8].copy_from_slice(&32u16.to_le_bytes());
-		buf[12] = 1;
-		buf[13] = 4;
-		buf[14..16].copy_from_slice(&16u16.to_le_bytes());
-		buf[16..32].copy_from_slice(&key);
-		dbg!(&buf[..32]);
+		// Allocate map & storage
 		let id = fs.storage.new_object().map_err(Error::Nros)?;
-		fs.write_all(id, 0, &buf)?;
-		Ok(Self {
+		let alloc = fs.storage.new_object().map_err(Error::Nros)?;
+		assert_eq!(id + 1, alloc);
+
+		// Initialize map
+		let s = Self {
 			id,
-			hashmap_base: 32,
-			hashmap_size_p2: 4,
+			hashmap_base: 24,
+			hashmap_size_p2: 0,
 			hash_keys: key,
 			hash_algorithm: HashAlgorithm::SipHasher13,
 			entry_size: 16,
 			entry_count: 0,
-			free_offset,
 			unix: None,
 			embedded: None,
-		})
+			alloc_map: Some(Default::default()),
+		};
+		let mut buf = [0; 24 + 16 * 16];
+		buf[0] = 3; // 24 bytes
+		buf[1] = 2; // 16 bytes
+		buf[2] = 1; // SipHasher13
+		buf[3] = 0; // 1 entry
+		buf[3] = 4; // 16 entries
+		buf[8..24].copy_from_slice(&key);
+		fs.write_all(id, 0, &buf)?;
+		Ok(s)
 	}
 
 	pub(crate) fn load<S>(fs: &mut Nrfs<S>, id: u64) -> Result<Self, Error<S>>
@@ -63,14 +68,12 @@ impl Dir {
 		S: Storage,
 	{
 		// Get basic info
-		let mut buf = [0; 32];
+		let mut buf = [0; 24];
 		fs.read_exact(id, 0, &mut buf)?;
-		let [a, b, c, d, e, f, g, h, buf @ ..] = buf;
-		let free_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
-		let header_len = u16::from_le_bytes([g, h]);
-		let [a, b, c, d, hash_algorithm, hashmap_size_p2, g, h, hash_keys @ ..] = buf;
+		let [hlen, elen, hash_algorithm, hashmap_size_p2, a, b, c, d, hash_keys @ ..] = buf;
+		let header_len = u16::from(hlen) * 8;
+		let entry_size = u16::from(elen) * 8;
 		let entry_count = u32::from_le_bytes([a, b, c, d]);
-		let entry_size = u16::from_le_bytes([g, h]);
 
 		// Get extensions
 		let mut unix = None;
@@ -78,7 +81,7 @@ impl Dir {
 		let mut offt = 0;
 		while offt < header_len {
 			let mut buf = [0; 4];
-			fs.read_exact(id, 8 + u64::from(offt), &mut buf)?;
+			fs.read_exact(id, offt.into(), &mut buf)?;
 			let [name_len, data_len, entry_offset @ ..] = buf;
 			let entry_offset = u16::from_le_bytes(entry_offset);
 			let total_len = u16::from(name_len) + u16::from(data_len);
@@ -114,9 +117,9 @@ impl Dir {
 			hash_keys,
 			entry_size,
 			entry_count,
-			free_offset,
 			unix,
 			embedded,
+			alloc_map: None,
 		})
 	}
 
@@ -171,7 +174,7 @@ impl Dir {
 
 		// Check if we should grow the hashmap
 		if self.should_grow() {
-			self.grow(fs);
+			self.grow(fs)?;
 		}
 
 		let mut index = self.hash(entry.name) & self.index_mask();
@@ -199,11 +202,7 @@ impl Dir {
 			unix: None,
 		};
 		self.set_ext(fs, index, &e)?;
-
-		self.entry_count += 1;
-		fs.write_all(self.id, 8, &self.entry_count.to_le_bytes())?;
-
-		Ok(())
+		self.set_entry_count(fs, self.entry_count + 1)
 	}
 
 	pub fn remove<S>(&mut self, fs: &mut Nrfs<S>, name: &[u8]) -> Result<bool, Error<S>>
@@ -223,9 +222,7 @@ impl Dir {
 		}
 		let offt = self.get_offset(i);
 		fs.write_all(self.id, offt, &[0])?;
-
-		self.entry_count -= 1;
-		fs.write_all(self.id, 8, &self.entry_count.to_le_bytes())?;
+		self.set_entry_count(fs, self.entry_count - 1)?;
 
 		// Check if we should shrink the hashmap
 		if self.should_shrink() {
@@ -395,7 +392,7 @@ impl Dir {
 		// Store key
 		dbg!();
 		let key_offset = self.alloc(fs, entry.key_len.into())?;
-		fs.write_all(self.id, key_offset, &entry.key[..entry.key_len.into()])?;
+		fs.write_all(self.id + 1, key_offset, &entry.key[..entry.key_len.into()])?;
 		dbg!();
 
 		let (id_or_offset, embed) = match &entry.location {
@@ -478,25 +475,84 @@ impl Dir {
 			return Ok(false);
 		}
 		let mut buf = [0; 255];
-		fs.read_exact(self.id, x.1, &mut buf[..y.len()])?;
+		fs.read_exact(self.id + 1, x.1, &mut buf[..y.len()])?;
 		dbg!(String::from_utf8_lossy(&buf[..y.len()]));
 		dbg!(String::from_utf8_lossy(&y[..y.len()]));
 		Ok(&buf[..y.len()] == y)
 	}
 
-	/// Allocate space for arbitrary data.
+	/// Allocate heap space for arbitrary data.
 	///
 	/// The returned region is not readable until it is written to.
 	fn alloc<S>(&mut self, fs: &mut Nrfs<S>, len: u64) -> Result<u64, Error<S>>
 	where
 		S: Storage,
 	{
-		let o = self.free_offset;
-		dbg!(o);
-		self.free_offset += len;
-		let [offt @ .., _, _] = self.free_offset.to_le_bytes();
-		fs.write_all(self.id, 0, &offt)?;
-		Ok(o)
+		let log = self.alloc_log(fs)?;
+		dbg!(&log);
+		for r in log.gaps(&(0..u64::MAX)) {
+			if r.end - r.start >= len {
+				log.insert(r.start..r.start + len);
+				dbg!(fs.length(self.id)?);
+				self.save_alloc_log(fs)?;
+				dbg!(fs.length(self.id)?);
+				return Ok(r.start);
+			}
+		}
+		// This is unreachable in practice.
+		unreachable!("all 2^64 bytes are allocated");
+	}
+
+	/// Write a full, minimized allocation log.
+	fn save_alloc_log<S>(&mut self, fs: &mut Nrfs<S>) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		let id = self.id;
+		let mut log_offt = self.alloc_log_base();
+		let log = self.alloc_log(fs)?;
+		for r in log.iter() {
+			let mut buf = [0; 16];
+			buf[..8].copy_from_slice(&r.start.to_le_bytes());
+			buf[8..].copy_from_slice(&(r.end - r.start).to_le_bytes());
+			fs.write_all(id, log_offt, &buf)?;
+			log_offt += 16;
+		}
+		dbg!(log_offt);
+		fs.truncate(self.id, log_offt)
+	}
+
+	/// Get or load the allocation map.
+	fn alloc_log<'a, S>(&'a mut self, fs: &mut Nrfs<S>) -> Result<&'a mut RangeSet<u64>, Error<S>>
+	where
+		S: Storage,
+	{
+		// I'd use as_mut() but the borrow checker has a bug :(
+		if self.alloc_map.is_some() {
+			return Ok(self.alloc_map.as_mut().unwrap());
+		}
+		let mut m = RangeSet::new();
+		let l = fs.length(self.id)?;
+		for offt in (self.alloc_log_base()..l).step_by(16) {
+			let mut buf = [0; 16];
+			fs.read_exact(self.id, offt, &mut buf)?;
+			let [a, b, c, d, e, f, g, h, buf @ ..] = buf;
+			let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+			let len = u64::from_le_bytes(buf);
+			if len & 1 << 63 != 0 {
+				// Dealloc
+				m.remove(offset..offset + (len ^ 1 << 63));
+			} else {
+				// Alloc
+				m.insert(offset..offset + len);
+			}
+		}
+		Ok(self.alloc_map.insert(m))
+	}
+
+	/// The base address of the allocation log.
+	fn alloc_log_base(&self) -> u64 {
+		dbg!(u64::from(self.hashmap_base) + u64::from(self.entry_size) * self.capacity())
 	}
 
 	/// Grow the hashmap
@@ -505,6 +561,16 @@ impl Dir {
 		S: Storage,
 	{
 		todo!()
+	}
+
+	/// Update the entry count.
+	fn set_entry_count<S>(&mut self, fs: &mut Nrfs<S>, count: u32) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		fs.write_all(self.id, 4, &count.to_le_bytes())?;
+		self.entry_count = count;
+		Ok(())
 	}
 }
 

@@ -106,6 +106,15 @@ impl<S: Storage> Nros<S> {
 		Ok(())
 	}
 
+	pub fn truncate_object(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
+		let mut rec = self.object_root(id)?;
+		rec.truncate(&mut self.storage, len)?;
+		self.header
+			.object_list
+			.write(&mut self.storage, id * 64, rec.0.as_ref())?;
+		Ok(())
+	}
+
 	pub fn finish_transaction(&mut self) -> Result<(), Error<S>> {
 		let mut w = self.storage.storage.write(0, 1).map_err(Error::Storage)?;
 		w.set_blocks(1);

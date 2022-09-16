@@ -85,6 +85,18 @@ impl RecordTree {
 		Ok(())
 	}
 
+	pub fn truncate<S>(&mut self, sto: &mut RecordCache<S>, len: u64) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		dbg!(len);
+		// FIXME adjust depth if necessary.
+		assert_eq!(self.depth_shift(sto).0, 0);
+		assert_eq!(u64::from(self.0.total_length), len);
+		self.0.total_length = len.into();
+		Ok(())
+	}
+
 	pub fn len(&self) -> u64 {
 		self.0.total_length.into()
 	}

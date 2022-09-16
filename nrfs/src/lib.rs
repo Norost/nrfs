@@ -68,6 +68,18 @@ impl<S: Storage> Nrfs<S> {
 			.write_object(id, offset, data)
 			.map_err(Error::Nros)
 	}
+
+	fn truncate(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
+		self.storage
+			.truncate_object(id, len)
+			.map_err(Error::Nros)
+	}
+
+	fn length(&mut self, id: u64) -> Result<u64, Error<S>> {
+		self.storage
+			.object_len(id)
+			.map_err(Error::Nros)
+	}
 }
 
 pub enum Error<S>
