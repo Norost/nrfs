@@ -14,6 +14,8 @@ const MIN_LOAD_FACTOR_MILLI: u64 = 500;
 const TY_FILE: u8 = 1;
 const TY_DIR: u8 = 2;
 const TY_SYM: u8 = 3;
+const TY_EMBED_FILE: u8 = 4;
+const TY_EMBED_SYM: u8 = 5;
 
 pub struct Dir {
 	id: u64,
@@ -24,7 +26,6 @@ pub struct Dir {
 	entry_size: u16,
 	entry_count: u32,
 	unix: Option<u16>,
-	embedded: Option<(u16, ext::embedded::Dir)>,
 	// Lazily load the allocation map to save time when only reading.
 	alloc_map: Option<RangeSet<u64>>,
 }
@@ -64,7 +65,6 @@ impl Dir {
 			entry_size,
 			entry_count: 0,
 			unix: None,
-			embedded: None,
 			alloc_map: Some(Default::default()),
 		};
 		let mut buf = [0; 24];
@@ -99,7 +99,6 @@ impl Dir {
 
 		// Get extensions
 		let mut unix = None;
-		let mut embedded = None;
 		let mut offt = 0;
 		while offt < header_len {
 			let mut buf = [0; 4];
@@ -112,17 +111,6 @@ impl Dir {
 			let (name, data) = buf.split_at(name_len.into());
 			match name {
 				b"unix" => unix = Some(entry_offset),
-				b"embedded" => {
-					let f = |i| {
-						data.get(i)
-							.and_then(|n| NonZeroU8::new(*n))
-							.ok_or(Error::CorruptExtension)
-					};
-					embedded = Some((
-						entry_offset,
-						ext::embedded::Dir { file_ty: f(0)?, sym_ty: f(1)? },
-					));
-				}
 				_ => {}
 			}
 			offt += 4 + total_len;
@@ -140,7 +128,6 @@ impl Dir {
 			entry_size,
 			entry_count,
 			unix,
-			embedded,
 			alloc_map: None,
 		})
 	}
@@ -148,16 +135,20 @@ impl Dir {
 	/// Create a new file.
 	///
 	/// This fails if an entry with the given name already exists.
-	pub fn create_file<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<Option<File>, Error<S>>
+	pub fn create_file<S>(
+		&mut self,
+		fs: &mut Nrfs<S>,
+		name: &Name,
+	) -> Result<Option<File>, Error<S>>
 	where
 		S: Storage,
 	{
 		let id = fs.storage.new_object().map_err(Error::Nros)?;
-		self.insert(fs, NewEntry {
-			data: Data::Object(id),
-			name,
-			ty: Type::File,
-		}).map(|r| r.then_some(File::from_raw(id)))
+		self.insert(
+			fs,
+			NewEntry { data: Data::Object(id), name, ty: Type::File { id } },
+		)
+		.map(|r| r.then_some(File::from_raw(id)))
 	}
 
 	/// Create a new directory.
@@ -168,11 +159,11 @@ impl Dir {
 		S: Storage,
 	{
 		let d = Dir::new(fs, [0; 16])?;
-		self.insert(fs, NewEntry {
-			data: Data::Object(d.id),
-			name,
-			ty: Type::Dir,
-		}).map(|r| r.then_some(d))
+		self.insert(
+			fs,
+			NewEntry { data: Data::Object(d.id), name, ty: Type::Dir { id: d.id } },
+		)
+		.map(|r| r.then_some(d))
 	}
 
 	/// Create a new symbolic link.
@@ -183,11 +174,11 @@ impl Dir {
 		S: Storage,
 	{
 		let id = fs.storage.new_object().map_err(Error::Nros)?;
-		self.insert(fs, NewEntry {
-			data: Data::Object(id),
-			name,
-			ty: Type::Sym,
-		}).map(|r| r.then_some(File::from_raw(id)))
+		self.insert(
+			fs,
+			NewEntry { data: Data::Object(id), name, ty: Type::Sym { id } },
+		)
+		.map(|r| r.then_some(File::from_raw(id)))
 	}
 
 	pub fn next_from<S>(
@@ -260,17 +251,7 @@ impl Dir {
 		let mut key = [0; 255];
 		key[..entry.name.len()].copy_from_slice(entry.name);
 
-		let e = Entry {
-			location: match entry.data {
-				Data::Object(id) => Location::Object { id },
-				Data::Data(d) if d.len() <= 1024 => todo!("embed data"),
-				Data::Data(d) => todo!("create object"),
-			},
-			ty: entry.ty,
-			key,
-			key_len: entry.name.len_u8(),
-			unix: None,
-		};
+		let e = Entry { ty: Ok(entry.ty), key, key_len: entry.name.len_u8(), unix: None };
 		self.set_ext(fs, index, &e)?;
 		self.set_entry_count(fs, self.entry_count + 1)?;
 		Ok(true)
@@ -394,33 +375,25 @@ impl Dir {
 			})
 			.transpose()?;
 
-		// Get embedded info
-		let embedded = self
-			.embedded
-			.as_ref()
-			.map(|(o, _)| {
-				let mut buf = [0; 2];
-				fs.read_exact(self.id, offt + u64::from(*o), &mut buf)?;
-				Ok(u16::from_le_bytes(buf))
-			})
-			.transpose()?;
-
 		let mut key = [0; 255];
 		key[..name.len()].copy_from_slice(name);
 		let key_len = name.len().try_into().unwrap();
 
-		let location = embedded.map_or(Location::Object { id: entry.id_or_offset }, |length| {
-			Location::Embedded { offset: entry.id_or_offset, length }
-		});
 		let ty = match entry.ty {
-			TY_FILE => Type::File,
-			TY_DIR => Type::Dir,
-			TY_SYM => Type::Sym,
-			n if Some(n) == self.embedded.as_ref().map(|d| d.1.file_ty.get()) => Type::File,
-			n if Some(n) == self.embedded.as_ref().map(|d| d.1.sym_ty.get()) => Type::Sym,
-			n => Type::Unknown(n),
+			TY_FILE => Ok(Type::File { id: entry.id_or_offset }),
+			TY_DIR => Ok(Type::Dir { id: entry.id_or_offset }),
+			TY_SYM => Ok(Type::Sym { id: entry.id_or_offset }),
+			TY_EMBED_FILE => Ok(Type::EmbedFile {
+				offset: entry.id_or_offset & 0xff_ffff,
+				length: (entry.id_or_offset >> 48) as _,
+			}),
+			TY_EMBED_SYM => Ok(Type::EmbedSym {
+				offset: entry.id_or_offset & 0xff_ffff,
+				length: (entry.id_or_offset >> 48) as _,
+			}),
+			n => Err(n),
 		};
-		Ok(Entry { location, ty, key_len, key, unix })
+		Ok(Entry { ty, key_len, key, unix })
 	}
 
 	/// Set the raw standard info for an entry.
@@ -462,25 +435,17 @@ impl Dir {
 		fs.write_all(self.id + 1, key_offset, &entry.key[..entry.key_len.into()])?;
 		dbg!();
 
-		let (id_or_offset, embed) = match &entry.location {
-			Location::Object { id } => (*id, None),
-			Location::Embedded { offset, length } => (*offset, Some(*length)),
-		};
-
-		let ty = if embed.is_some() {
-			let (_, d) = self.embedded.as_ref().unwrap();
-			match entry.ty {
-				Type::File => d.file_ty.get(),
-				Type::Sym => d.sym_ty.get(),
-				_ => panic!("cannot be embedded"),
+		let (ty, id_or_offset) = match entry.ty {
+			Ok(Type::File { id }) => (TY_FILE, id),
+			Ok(Type::Dir { id }) => (TY_DIR, id),
+			Ok(Type::Sym { id }) => (TY_SYM, id),
+			Ok(Type::EmbedFile { offset, length }) => {
+				(TY_EMBED_FILE, offset | u64::from(length) << 48)
 			}
-		} else {
-			match entry.ty {
-				Type::File => TY_FILE,
-				Type::Dir => TY_DIR,
-				Type::Sym => TY_SYM,
-				Type::Unknown(n) => n,
+			Ok(Type::EmbedSym { offset, length }) => {
+				(TY_EMBED_SYM, offset | u64::from(length) << 48)
 			}
+			Err(n) => (n, 0),
 		};
 
 		// Set entry itself
@@ -491,11 +456,6 @@ impl Dir {
 		if let Some(o) = self.unix {
 			let u = entry.unix.as_ref().map_or(0, |u| u.permissions);
 			fs.write_all(self.id, offt + u64::from(o), &u.to_le_bytes())?;
-		}
-
-		// Set embedded info
-		if let (Some((o, _)), Some(l)) = (self.embedded.as_ref(), embed) {
-			fs.write_all(self.id, offt + u64::from(*o), &l.to_le_bytes())?;
 		}
 
 		Ok(())
@@ -721,8 +681,7 @@ struct RawEntry {
 }
 
 pub struct Entry {
-	location: Location,
-	ty: Type,
+	ty: Result<Type, u8>,
 	key_len: u8,
 	key: [u8; 255],
 	unix: Option<ext::unix::Entry>,
@@ -733,8 +692,8 @@ impl Entry {
 	where
 		S: Storage,
 	{
-		match &self.location {
-			Location::Object { id } => fs.read(*id, offset, buf),
+		match &self.ty {
+			Ok(Type::File { id }) => fs.read(*id, offset, buf),
 			_ => todo!(),
 		}
 	}
@@ -743,7 +702,6 @@ impl Entry {
 impl fmt::Debug for Entry {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Entry))
-			.field("location", &self.location)
 			.field("ty", &self.ty)
 			// TODO use Utf8Lossy when it is stable.
 			.field(
@@ -756,25 +714,18 @@ impl fmt::Debug for Entry {
 }
 
 #[derive(Debug)]
-enum Location {
-	Object { id: u64 },
-	Embedded { offset: u64, length: u16 },
-}
-
-#[derive(Debug, Default)]
 enum Type {
-	#[default]
-	File,
-	Dir,
-	Sym,
-	Unknown(u8),
+	File { id: u64 },
+	Dir { id: u64 },
+	Sym { id: u64 },
+	EmbedFile { offset: u64, length: u16 },
+	EmbedSym { offset: u64, length: u16 },
 }
 
-#[derive(Default)]
 struct NewEntry<'a> {
-	pub data: Data<'a>,
-	pub name: &'a Name,
-	pub ty: Type,
+	data: Data<'a>,
+	name: &'a Name,
+	ty: Type,
 }
 
 pub enum Data<'a> {

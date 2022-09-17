@@ -24,8 +24,14 @@ File types
 +------+-----------------------------+
 |    3 | Symbolic link               |
 +------+-----------------------------+
+|    4 | Embedded regular file       |
++------+-----------------------------+
+|    5 | Embedded symbolic link      |
++------+-----------------------------+
 
 Remaining IDs are free for use by extensions.
+Entries with unrecognized IDs may be shown and moved but no other operations
+may be performed on them.
 
 
 Copy-on-write
@@ -37,22 +43,17 @@ If a write is made to an object with a reference count higher than 1 a copy
 will be made first.
 
 
-Data structures
----------------
+Embedded data
+-------------
 
-File
-~~~~
-
-A file has type 1.
-It contains arbitrary data.
+To reduce space usage and improve performance files with less than 64KiB of
+data can be placed directly on a directory's heap.
 
 
 Directory
-~~~~~~~~~
+---------
 
 A directory is a special type of file that points to other files.
-
-A directory has type 2.
 
 It consists of two objects: one object with a header and hashmap at ID
 and one object for "heap" data at ID + 1 [#two_objects]_
@@ -124,7 +125,7 @@ Extension header
 |  N+4 |           Data            |
 +------+---------------------------+
 
-Entry
+Regular entry
 +------+------+------+------+------+------+------+------+------+
 | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
 +======+======+======+======+======+======+======+======+======+
@@ -137,7 +138,20 @@ Entry
 |  ... |                          ...                          |
 +------+-------------------------------------------------------+
 
-If the object index or next table offset is 0, the entry is empty.
+Embedded entry
++------+------+------+------+------+------+------+------+------+
+| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
++======+======+======+======+======+======+======+======+======+
+|    0 | Type | KLen |               Key offset                |
++------+------+------+-----------------------------------------+
+|    8 | Data Length |               Data offset               |
++------+-------------------------------------------------------+
+|   16 |                    Extension data                     |
++------+-------------------------------------------------------+
+|  ... |                          ...                          |
++------+-------------------------------------------------------+
+
+If the type is 0, the entry is empty.
 
 After the hashmap comes an allocation log.
 Each entry in the log indicates a single allocation or deallocation.
@@ -180,31 +194,3 @@ Entry data
 +------+------+------+----------------------------------+------+
 |    8 |                                                | U. R |
 +------+------------------------------------------------+------+
-
-
-Embedded files
-~~~~~~~~~~~~~~
-
-name: "embedded"
-
-The embedded files extension allow storing small files directly in the
-directory object, reducing space use and potentially speeding up loading of
-small files.
-
-Extension data
-+------+------+------+------+------+------+------+------+------+
-| Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 |              Embedded regular file type               |
-+------+-------------------------------------------------------+
-|    8 |              Embedded symbolic link type              |
-+------+-------------------------------------------------------+
-
-Entry data
-+------+------+------+------+------+------+------+------+------+
-| Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 |                                                       |
-+------+                        Length                         |
-|    8 |                                                       |
-+------+-------------------------------------------------------+
