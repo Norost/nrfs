@@ -143,12 +143,9 @@ impl Dir {
 	where
 		S: Storage,
 	{
-		let id = fs.storage.new_object().map_err(Error::Nros)?;
-		self.insert(
-			fs,
-			NewEntry { data: Data::Object(id), name, ty: Type::File { id } },
-		)
-		.map(|r| r.then_some(File::from_raw(id)))
+		let e = NewEntry { name, ty: Type::EmbedFile { offset: 0, length: 0 } };
+		self.insert(fs, e)
+			.map(|r| r.map(|i| File::from_embed(false, i, 0, 0)))
 	}
 
 	/// Create a new directory.
@@ -159,11 +156,8 @@ impl Dir {
 		S: Storage,
 	{
 		let d = Dir::new(fs, [0; 16])?;
-		self.insert(
-			fs,
-			NewEntry { data: Data::Object(d.id), name, ty: Type::Dir { id: d.id } },
-		)
-		.map(|r| r.then_some(d))
+		let e = NewEntry { name, ty: Type::Dir { id: d.id } };
+		self.insert(fs, e).map(|r| r.map(|_| d))
 	}
 
 	/// Create a new symbolic link.
@@ -173,12 +167,9 @@ impl Dir {
 	where
 		S: Storage,
 	{
-		let id = fs.storage.new_object().map_err(Error::Nros)?;
-		self.insert(
-			fs,
-			NewEntry { data: Data::Object(id), name, ty: Type::Sym { id } },
-		)
-		.map(|r| r.then_some(File::from_raw(id)))
+		let e = NewEntry { name, ty: Type::EmbedSym { offset: 0, length: 0 } };
+		self.insert(fs, e)
+			.map(|r| r.map(|i| File::from_embed(true, i, 0, 0)))
 	}
 
 	pub fn next_from<S>(
@@ -226,7 +217,7 @@ impl Dir {
 	/// Try to insert a new entry.
 	///
 	/// Returns `true` if succesful, `false` if an entry with the same name already exists.
-	fn insert<S>(&mut self, fs: &mut Nrfs<S>, entry: NewEntry) -> Result<bool, Error<S>>
+	fn insert<S>(&mut self, fs: &mut Nrfs<S>, entry: NewEntry) -> Result<Option<u32>, Error<S>>
 	where
 		S: Storage,
 	{
@@ -254,7 +245,7 @@ impl Dir {
 		let e = Entry { ty: Ok(entry.ty), key, key_len: entry.name.len_u8(), unix: None };
 		self.set_ext(fs, index, &e)?;
 		self.set_entry_count(fs, self.entry_count + 1)?;
-		Ok(true)
+		Ok(Some(index))
 	}
 
 	pub fn remove<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<bool, Error<S>>
@@ -394,6 +385,20 @@ impl Dir {
 			n => Err(n),
 		};
 		Ok(Entry { ty, key_len, key, unix })
+	}
+
+	/// Set the type and offset of an entry.
+	///
+	/// The entry must not be empty, i.e. type is not 0.
+	pub(crate) fn set_ty<S>(&mut self, fs: &mut Nrfs<S>, index: u32, ty: Type) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		let (mut e, _) = self.get(fs, index)?;
+		debug_assert!(e.ty != 0);
+		e.ty = ty.to_ty();
+		e.id_or_offset = ty.to_data();
+		self.set(fs, index, e).map(|_: u64| ())
 	}
 
 	/// Set the raw standard info for an entry.
@@ -583,7 +588,12 @@ impl Dir {
 	}
 
 	/// Read a heap value.
-	fn read_heap<S>(&self, fs: &mut Nrfs<S>, offset: u64, buf: &mut [u8]) -> Result<(), Error<S>>
+	pub(crate) fn read_heap<S>(
+		&self,
+		fs: &mut Nrfs<S>,
+		offset: u64,
+		buf: &mut [u8],
+	) -> Result<(), Error<S>>
 	where
 		S: Storage,
 	{
@@ -591,7 +601,12 @@ impl Dir {
 	}
 
 	/// Write a heap value.
-	fn write_heap<S>(&self, fs: &mut Nrfs<S>, offset: u64, data: &[u8]) -> Result<(), Error<S>>
+	pub(crate) fn write_heap<S>(
+		&self,
+		fs: &mut Nrfs<S>,
+		offset: u64,
+		data: &[u8],
+	) -> Result<(), Error<S>>
 	where
 		S: Storage,
 	{
@@ -714,7 +729,7 @@ impl fmt::Debug for Entry {
 }
 
 #[derive(Debug)]
-enum Type {
+pub(crate) enum Type {
 	File { id: u64 },
 	Dir { id: u64 },
 	Sym { id: u64 },
@@ -722,21 +737,30 @@ enum Type {
 	EmbedSym { offset: u64, length: u16 },
 }
 
+impl Type {
+	fn to_ty(&self) -> u8 {
+		match self {
+			Self::File { .. } => TY_FILE,
+			Self::Dir { .. } => TY_DIR,
+			Self::Sym { .. } => TY_SYM,
+			Self::EmbedFile { .. } => TY_EMBED_FILE,
+			Self::EmbedSym { .. } => TY_EMBED_SYM,
+		}
+	}
+
+	fn to_data(&self) -> u64 {
+		match self {
+			Self::File { id } | Self::Dir { id } | Self::Sym { id } => *id,
+			Self::EmbedFile { offset, length } | Self::EmbedSym { offset, length } => {
+				*offset | u64::from(*length) << 48
+			}
+		}
+	}
+}
+
 struct NewEntry<'a> {
-	data: Data<'a>,
 	name: &'a Name,
 	ty: Type,
-}
-
-pub enum Data<'a> {
-	Data(&'a [u8]),
-	Object(u64),
-}
-
-impl Default for Data<'_> {
-	fn default() -> Self {
-		Self::Data(&[])
-	}
 }
 
 enum HashAlgorithm {

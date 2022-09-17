@@ -88,7 +88,7 @@ fn create_file() {
 	dbg!();
 	let mut f = d.create_file(&mut fs, b"test.txt".into()).unwrap().unwrap();
 	dbg!();
-	f.write_all(&mut fs, 0, b"Hello, world!").unwrap();
+	f.write_all(&mut fs, &mut d, 0, b"Hello, world!").unwrap();
 	dbg!();
 
 	assert!(d.find(&mut fs, b"I do not exist".into()).unwrap().is_none());
@@ -115,7 +115,8 @@ fn create_many_files() {
 			.create_file(&mut fs, (&*name).try_into().unwrap())
 			.unwrap()
 			.unwrap();
-		f.write_all(&mut fs, 0, contents.as_bytes()).unwrap();
+		f.write_all(&mut fs, &mut d, 0, contents.as_bytes())
+			.unwrap();
 		dbg!();
 
 		let g = d
