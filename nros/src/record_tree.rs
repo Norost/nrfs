@@ -22,8 +22,7 @@ impl RecordTree {
 			self.0.total_length
 		);
 
-		let (depth, lvl_shift) = self.depth_shift(sto);
-		let chunk_size = 1 << depth * lvl_shift + sto.max_record_size_p2;
+		let (chunk_size, is_leaf) = self.chunk_size(sto);
 
 		let mut i = offset / chunk_size;
 		let mut offt = offset % chunk_size;
@@ -31,10 +30,10 @@ impl RecordTree {
 			let d;
 			(d, buf) = buf.split_at_mut(buf.len().min((chunk_size - offt) as _));
 			let rec = self.get(sto, i)?;
-			if depth > 0 {
-				rec.read(sto, offt, d)?
-			} else {
+			if is_leaf {
 				d.copy_from_slice(&sto.read(&rec.0)?[offt as _..][..d.len()])
+			} else {
+				rec.read(sto, offt, d)?
 			}
 			offt = 0;
 			i += 1;
@@ -51,9 +50,7 @@ impl RecordTree {
 	where
 		S: Storage,
 	{
-		dbg!(self.len());
-		let (depth, lvl_shift) = self.depth_shift(sto);
-		let chunk_size = 1 << depth * lvl_shift + sto.max_record_size_p2;
+		let (chunk_size, is_leaf) = self.chunk_size(sto);
 
 		let end = offset + data.len() as u64;
 
@@ -63,16 +60,16 @@ impl RecordTree {
 			let d;
 			(d, data) = data.split_at(data.len().min((chunk_size - offt) as _));
 			let mut rec = self.get(sto, i)?;
-			if depth > 0 {
-				rec.write(sto, offt, d)?;
-			} else {
+			if is_leaf {
 				let mut w = if offt == 0 && data.len() == 1 << sto.max_record_size_p2 {
-					sto.write()
+					sto.write(&rec.0)
 				} else {
 					sto.modify(&rec.0)
 				}?;
 				write_to(&mut w, offt as _, d);
 				rec = Self(w.finish()?);
+			} else {
+				rec.write(sto, offt, d)?;
 			}
 			self.set(sto, i, &rec)?;
 			offt = 0;
@@ -80,7 +77,6 @@ impl RecordTree {
 		}
 
 		self.0.total_length = self.0.total_length.max(end.into());
-		dbg!(self.len());
 
 		Ok(())
 	}
@@ -89,11 +85,25 @@ impl RecordTree {
 	where
 		S: Storage,
 	{
-		dbg!(len);
-		// FIXME adjust depth if necessary.
-		assert_eq!(self.depth_shift(sto).0, 0);
-		assert_eq!(u64::from(self.0.total_length), len);
-		self.0.total_length = len.into();
+		let old_len = u64::from(self.0.total_length);
+		if len < old_len {
+			let (chunk_size, is_leaf) = self.chunk_size(sto);
+			if !is_leaf {
+				let mut clen = len % chunk_size;
+				for i in len / chunk_size..old_len / chunk_size {
+					let mut rec = self.get(sto, i)?;
+					rec.truncate(sto, clen)?;
+					if clen > 0 {
+						self.set(sto, i, &rec)?;
+					}
+					clen = 0;
+				}
+			}
+			if len == 0 {
+				self.0 = sto.write(&self.0)?.finish()?;
+			}
+			self.0.total_length = len.into();
+		}
 		Ok(())
 	}
 
@@ -123,8 +133,9 @@ impl RecordTree {
 		Ok(())
 	}
 
-	/// Calculate the depth and the amount of bits per index.
-	fn depth_shift<S>(&self, sto: &RecordCache<S>) -> (u8, u8)
+	/// Calculate the amount of data each chunk / child can hold.
+	/// Also returns `true` if this record is a leaf.
+	fn chunk_size<S>(&self, sto: &RecordCache<S>) -> (u64, bool)
 	where
 		S: Storage,
 	{
@@ -143,7 +154,7 @@ impl RecordTree {
 			d - 1
 		};
 
-		(depth, lvl_shift)
+		(1 << depth * lvl_shift + sto.max_record_size_p2, depth == 0)
 	}
 }
 

@@ -39,6 +39,10 @@ impl<S: Storage> Nrfs<S> {
 		Dir::load(self, 0)
 	}
 
+	pub fn finish_transaction(&mut self) -> Result<(), Error<S>> {
+		self.storage.finish_transaction().map_err(Error::Nros)
+	}
+
 	fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
 		self.storage
 			.read_object(id, offset, buf)

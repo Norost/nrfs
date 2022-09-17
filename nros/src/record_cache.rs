@@ -1,5 +1,5 @@
 use {
-	crate::{allocator::Allocator, Error, Read as _, Record, Storage, Write as _},
+	crate::{allocator::Allocator, Error, LoadError, Read as _, Record, Storage, Write as _},
 	alloc::{
 		collections::{BTreeMap, BTreeSet},
 		vec::Vec,
@@ -19,14 +19,29 @@ pub struct RecordCache<S: Storage> {
 }
 
 impl<S: Storage> RecordCache<S> {
-	pub fn new(storage: S, max_record_size_p2: u8) -> Self {
+	pub fn new(mut storage: S, max_record_size_p2: u8) -> Self {
 		Self {
+			allocator: Allocator::default(),
 			storage,
 			max_record_size_p2,
 			cache: Default::default(),
 			dirty: Default::default(),
-			allocator: Default::default(),
 		}
+	}
+
+	pub fn load(
+		mut storage: S,
+		max_record_size_p2: u8,
+		alloc_log_lba: u64,
+		alloc_log_len: u64,
+	) -> Result<Self, LoadError<S>> {
+		Ok(Self {
+			allocator: Allocator::load(&mut storage, alloc_log_lba, alloc_log_len)?,
+			storage,
+			max_record_size_p2,
+			cache: Default::default(),
+			dirty: Default::default(),
+		})
 	}
 
 	pub fn read<'a>(&'a mut self, record: &Record) -> Result<Read<'a, S>, Error<S>> {
@@ -36,12 +51,27 @@ impl<S: Storage> RecordCache<S> {
 
 	pub fn modify<'a>(&'a mut self, record: &Record) -> Result<Write<'a, S>, Error<S>> {
 		self.read_inner(record)?;
+		self.free(record);
 		let data = self.cache.remove(&record.lba.into()).unwrap_or_default();
 		Ok(Write { data, cache: self })
 	}
 
-	pub fn write<'a>(&'a mut self) -> Result<Write<'a, S>, Error<S>> {
-		Ok(Write { data: Vec::new(), cache: self })
+	pub fn write<'a>(&'a mut self, record: &Record) -> Result<Write<'a, S>, Error<S>> {
+		self.free(record);
+		let mut data = self.cache.remove(&record.lba.into()).unwrap_or_default();
+		data.clear();
+		Ok(Write { data, cache: self })
+	}
+
+	fn free(&mut self, record: &Record) {
+		self.allocator.free(
+			record.lba.into(),
+			self.calc_block_count(record.length.into()) as _,
+		);
+	}
+
+	pub fn finish_transaction(&mut self) -> Result<(u64, u64), Error<S>> {
+		self.allocator.serialize_full(&mut self.storage)
 	}
 
 	fn read_inner<'a>(&'a mut self, record: &Record) -> Result<Option<&'a mut Vec<u8>>, Error<S>> {

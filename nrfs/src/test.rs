@@ -71,7 +71,7 @@ impl Storage for S {
 }
 
 fn new() -> Nrfs<S> {
-	let s = S(vec![0; 1 << 24].into());
+	let s = S(vec![0; 1 << 18].into());
 	Nrfs::new(s, 10).unwrap()
 }
 
@@ -123,6 +123,8 @@ fn create_many_files() {
 			"file #{}",
 			i
 		);
+
+		fs.finish_transaction().unwrap();
 	}
 
 	// Test iteration

@@ -1,7 +1,7 @@
 use {
-	crate::{record::Record, RecordTree},
-	core::{fmt, mem},
-	endian::u32le,
+	crate::RecordTree,
+	core::fmt,
+	endian::{u32le, u64le},
 };
 
 #[repr(C, align(64))]
@@ -12,9 +12,10 @@ pub struct Header {
 	pub compression_algorithm: u8,
 	pub max_record_length_p2: u8,
 	pub block_length_p2: u8,
-	pub _reserved: [u64; 5],
+	pub allocation_log_lba: u64le,
+	pub allocation_log_length: u64le,
+	pub _reserved: [u64; 3],
 	pub object_list: RecordTree,
-	pub allocation_log: RecordTree,
 }
 
 raw!(Header);
@@ -28,9 +29,10 @@ impl Default for Header {
 			compression_algorithm: 0,
 			max_record_length_p2: 17,
 			block_length_p2: 9,
-			_reserved: [0; 5],
+			allocation_log_lba: 0.into(),
+			allocation_log_length: 0.into(),
+			_reserved: [0; 3],
 			object_list: RecordTree::default(),
-			allocation_log: RecordTree::default(),
 		}
 	}
 }
@@ -53,8 +55,9 @@ impl fmt::Debug for Header {
 				"block_length_p2",
 				&format_args!("2**{}", self.block_length_p2),
 			)
+			.field("allocation_log_lba", &self.allocation_log_lba)
+			.field("allocation_log_length", &self.allocation_log_length)
 			.field("object_list", &self.object_list)
-			.field("allocation_log", &self.allocation_log)
 			.finish_non_exhaustive()
 	}
 }

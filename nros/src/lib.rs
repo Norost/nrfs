@@ -58,18 +58,26 @@ impl<S: Storage> Nros<S> {
 
 	pub fn load(mut storage: S) -> Result<Self, LoadError<S>> {
 		let r = storage.read(0, 1).map_err(LoadError::Storage)?;
-		let mut header = header::Header::default();
-		let l = header.as_ref().len();
-		header.as_mut().copy_from_slice(&r.get()[..l]);
+		let mut h = header::Header::default();
+		let l = h.as_ref().len();
+		h.as_mut().copy_from_slice(&r.get()[..l]);
 		drop(r);
-		if header.magic != *b"Nora Reliable FS" {
+		if h.magic != *b"Nora Reliable FS" {
 			return Err(LoadError::InvalidMagic);
 		}
 		// Mandate at least 128 byte records, otherwise it's impossible to construct a record tree.
-		if header.max_record_length_p2 < 7 {
+		if h.max_record_length_p2 < 7 {
 			return Err(LoadError::RecordSizeTooSmall);
 		}
-		Ok(Self { storage: RecordCache::new(storage, header.max_record_length_p2), header })
+		Ok(Self {
+			storage: RecordCache::load(
+				storage,
+				h.max_record_length_p2,
+				h.allocation_log_lba.into(),
+				h.allocation_log_length.into(),
+			)?,
+			header: h,
+		})
 	}
 
 	pub fn new_object(&mut self) -> Result<u64, Error<S>> {
@@ -80,8 +88,9 @@ impl<S: Storage> Nros<S> {
 	}
 
 	pub fn move_object(&mut self, to_id: u64, from_id: u64) -> Result<(), Error<S>> {
-		let r = self.object_root(from_id)?;
-		self.set_object_root(to_id, &r)?;
+		self.object_root(to_id)?.truncate(&mut self.storage, 0)?;
+		let f = self.object_root(from_id)?;
+		self.set_object_root(to_id, &f)?;
 		self.set_object_root(from_id, &Default::default())
 	}
 
@@ -124,6 +133,12 @@ impl<S: Storage> Nros<S> {
 	}
 
 	pub fn finish_transaction(&mut self) -> Result<(), Error<S>> {
+		// Save allocation log
+		let (lba, len) = self.storage.finish_transaction()?;
+		self.header.allocation_log_lba = lba.into();
+		self.header.allocation_log_length = len.into();
+
+		// Write header
 		let mut w = self.storage.storage.write(0, 1).map_err(Error::Storage)?;
 		w.set_blocks(1);
 		let (a, b) = w.get_mut().split_at_mut(self.header.as_ref().len());
