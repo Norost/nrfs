@@ -46,6 +46,9 @@ impl Allocator {
 		for r in rd.get()[..len as _].chunks_exact(16) {
 			let start = u64::from_le_bytes(r[..8].try_into().unwrap());
 			let len = u64::from_le_bytes(r[8..].try_into().unwrap());
+			if len & !(1 << 63) == 0 {
+				continue;
+			}
 			if len & 1 << 63 != 0 {
 				alloc_map.remove(start..start + len ^ 1 << 63);
 			} else {
