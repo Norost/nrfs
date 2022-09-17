@@ -26,6 +26,8 @@ mod record;
 mod record_cache;
 mod record_tree;
 mod storage;
+#[cfg(test)]
+mod test;
 
 pub use storage::{Read, Storage, Write};
 

@@ -72,8 +72,7 @@ impl Storage for S {
 
 fn new() -> Nrfs<S> {
 	let s = S(vec![0; 1 << 24].into());
-	//Nrfs::new(s, 10).unwrap()
-	Nrfs::new(s, 17).unwrap()
+	Nrfs::new(s, 10).unwrap()
 }
 
 #[test]

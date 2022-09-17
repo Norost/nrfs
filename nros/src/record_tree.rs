@@ -29,7 +29,7 @@ impl RecordTree {
 		let mut offt = offset % chunk_size;
 		while !buf.is_empty() {
 			let d;
-			(d, buf) = buf.split_at_mut(buf.len().min((chunk_size - offset) as _));
+			(d, buf) = buf.split_at_mut(buf.len().min((chunk_size - offt) as _));
 			let rec = self.get(sto, i)?;
 			if depth > 0 {
 				rec.read(sto, offt, d)?
@@ -61,7 +61,7 @@ impl RecordTree {
 		let mut offt = offset % chunk_size;
 		while !data.is_empty() {
 			let d;
-			(d, data) = data.split_at(data.len().min((chunk_size - offset % chunk_size) as _));
+			(d, data) = data.split_at(data.len().min((chunk_size - offt) as _));
 			let mut rec = self.get(sto, i)?;
 			if depth > 0 {
 				rec.write(sto, offt, d)?;
