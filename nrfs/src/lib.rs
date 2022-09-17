@@ -1,10 +1,14 @@
 //#![cfg_attr(not(test), no_std)]
 pub mod dir;
+mod file;
+mod name;
 #[cfg(test)]
 mod test;
 
 pub use {
 	dir::Dir,
+	file::File,
+	name::Name,
 	nros::{Read, Storage, Write},
 };
 
@@ -33,18 +37,6 @@ impl<S: Storage> Nrfs<S> {
 		Dir::load(self, 0)
 	}
 
-	pub fn create_file(&mut self) -> Result<u64, Error<S>> {
-		self.storage.new_object().map_err(Error::Nros)
-	}
-
-	pub fn create_dir(&mut self) -> Result<Dir, Error<S>> {
-		Dir::new(self, [0; 16])
-	}
-
-	pub fn create_symlink(&mut self) -> Result<u64, Error<S>> {
-		self.storage.new_object().map_err(Error::Nros)
-	}
-
 	fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
 		self.storage
 			.read_object(id, offset, buf)
@@ -70,15 +62,11 @@ impl<S: Storage> Nrfs<S> {
 	}
 
 	fn truncate(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
-		self.storage
-			.truncate_object(id, len)
-			.map_err(Error::Nros)
+		self.storage.truncate_object(id, len).map_err(Error::Nros)
 	}
 
 	fn length(&mut self, id: u64) -> Result<u64, Error<S>> {
-		self.storage
-			.object_len(id)
-			.map_err(Error::Nros)
+		self.storage.object_len(id).map_err(Error::Nros)
 	}
 }
 
@@ -89,7 +77,6 @@ where
 	Nros(nros::Error<S>),
 	Truncated,
 	CorruptExtension,
-	NameTooLong,
 	UnknownHashAlgorithm(u8),
 }
 
@@ -103,7 +90,6 @@ where
 			Self::Nros(e) => f.debug_tuple("Nros").field(e).finish(),
 			Self::Truncated => f.debug_tuple("Truncated").finish(),
 			Self::CorruptExtension => f.debug_tuple("CorruptExtension").finish(),
-			Self::NameTooLong => f.debug_tuple("NameTooLong").finish(),
 			Self::UnknownHashAlgorithm(n) => {
 				f.debug_tuple("UnknownHashAlgorithm").field(&n).finish()
 			}

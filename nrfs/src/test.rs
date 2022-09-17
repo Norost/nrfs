@@ -83,22 +83,17 @@ fn create_fs() {
 #[test]
 fn create_file() {
 	let mut fs = new();
-	let f = fs.create_file().unwrap();
-	fs.storage.write_object(f, 0, b"Hello, world!").unwrap();
-	dbg!();
 
 	let mut d = fs.root_dir().unwrap();
 	dbg!();
-	d.insert(
-		&mut fs,
-		dir::NewEntry { data: dir::Data::Object(f), ty: dir::Type::File, name: b"test.txt" },
-	)
-	.unwrap();
+	let mut f = d.create_file(&mut fs, b"test.txt".into()).unwrap().unwrap();
+	dbg!();
+	f.write_all(&mut fs, 0, b"Hello, world!").unwrap();
 	dbg!();
 
-	assert!(d.find(&mut fs, b"I do not exist").unwrap().is_none());
+	assert!(d.find(&mut fs, b"I do not exist".into()).unwrap().is_none());
 	dbg!();
-	let g = d.find(&mut fs, b"test.txt").unwrap().unwrap();
+	let g = d.find(&mut fs, b"test.txt".into()).unwrap().unwrap();
 	dbg!();
 
 	let mut buf = [0; 32];
@@ -115,24 +110,18 @@ fn create_many_files() {
 		let name = format!("{}.txt", i);
 		let contents = format!("This is file #{}", i);
 
-		let f = fs.create_file().unwrap();
-		fs.storage.write_object(f, 0, contents.as_bytes()).unwrap();
-		dbg!();
-
 		let mut d = fs.root_dir().unwrap();
-		dbg!();
-		d.insert(
-			&mut fs,
-			dir::NewEntry {
-				data: dir::Data::Object(f),
-				ty: dir::Type::File,
-				name: name.as_bytes(),
-			},
-		)
-		.unwrap();
+		let mut f = d
+			.create_file(&mut fs, (&*name).try_into().unwrap())
+			.unwrap()
+			.unwrap();
+		f.write_all(&mut fs, 0, contents.as_bytes()).unwrap();
 		dbg!();
 
-		let g = d.find(&mut fs, name.as_bytes()).unwrap().unwrap();
+		let g = d
+			.find(&mut fs, (&*name).try_into().unwrap())
+			.unwrap()
+			.unwrap();
 		dbg!(f, &g);
 
 		let mut buf = [0; 32];
@@ -164,7 +153,10 @@ fn create_many_files() {
 		let mut d = fs.root_dir().unwrap();
 		dbg!();
 
-		let g = d.find(&mut fs, name.as_bytes()).unwrap().unwrap();
+		let g = d
+			.find(&mut fs, (&*name).try_into().unwrap())
+			.unwrap()
+			.unwrap();
 
 		let mut buf = [0; 32];
 		let l = g.read(&mut fs, 0, &mut buf).unwrap();

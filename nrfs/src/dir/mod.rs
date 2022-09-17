@@ -1,8 +1,8 @@
 use {
-	crate::{Error, Nrfs, Storage},
+	crate::{Error, File, Name, Nrfs, Storage},
 	core::{fmt, num::NonZeroU8},
-	siphasher::sip::SipHasher13,
 	rangemap::RangeSet,
+	siphasher::sip::SipHasher13,
 };
 
 pub mod ext;
@@ -42,7 +42,13 @@ impl Dir {
 	}
 
 	/// Allocate a new hashmap object.
-	fn new_map<S>(fs: &mut Nrfs<S>, header_len8: u8, entry_len8: u8, map_size_p2: u8, key: &[u8; 16]) -> Result<Self, Error<S>>
+	fn new_map<S>(
+		fs: &mut Nrfs<S>,
+		header_len8: u8,
+		entry_len8: u8,
+		map_size_p2: u8,
+		key: &[u8; 16],
+	) -> Result<Self, Error<S>>
 	where
 		S: Storage,
 	{
@@ -70,7 +76,11 @@ impl Dir {
 		fs.write_all(id, 0, &buf)?;
 		// FIXME gap should be added automatically
 		for i in 0..1 << map_size_p2 {
-			fs.write_all(id, u64::from(hashmap_base) + i * u64::from(entry_size), &[0; 16])?;
+			fs.write_all(
+				id,
+				u64::from(hashmap_base) + i * u64::from(entry_size),
+				&[0; 16],
+			)?;
 		}
 		Ok(s)
 	}
@@ -135,6 +145,51 @@ impl Dir {
 		})
 	}
 
+	/// Create a new file.
+	///
+	/// This fails if an entry with the given name already exists.
+	pub fn create_file<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<Option<File>, Error<S>>
+	where
+		S: Storage,
+	{
+		let id = fs.storage.new_object().map_err(Error::Nros)?;
+		self.insert(fs, NewEntry {
+			data: Data::Object(id),
+			name,
+			ty: Type::File,
+		}).map(|r| r.then_some(File::from_raw(id)))
+	}
+
+	/// Create a new directory.
+	///
+	/// This fails if an entry with the given name already exists.
+	pub fn create_dir<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<Option<Dir>, Error<S>>
+	where
+		S: Storage,
+	{
+		let d = Dir::new(fs, [0; 16])?;
+		self.insert(fs, NewEntry {
+			data: Data::Object(d.id),
+			name,
+			ty: Type::Dir,
+		}).map(|r| r.then_some(d))
+	}
+
+	/// Create a new symbolic link.
+	///
+	/// This fails if an entry with the given name already exists.
+	pub fn create_sym<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<Option<File>, Error<S>>
+	where
+		S: Storage,
+	{
+		let id = fs.storage.new_object().map_err(Error::Nros)?;
+		self.insert(fs, NewEntry {
+			data: Data::Object(id),
+			name,
+			ty: Type::Sym,
+		}).map(|r| r.then_some(File::from_raw(id)))
+	}
+
 	pub fn next_from<S>(
 		&self,
 		fs: &mut Nrfs<S>,
@@ -167,23 +222,24 @@ impl Dir {
 		Ok(None)
 	}
 
-	pub fn find<S>(&mut self, fs: &mut Nrfs<S>, name: &[u8]) -> Result<Option<Entry>, Error<S>>
+	pub fn find<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<Option<Entry>, Error<S>>
 	where
 		S: Storage,
 	{
 		dbg!();
-		u8::try_from(name.len()).map_err(|_| Error::NameTooLong)?;
 		self.find_index(fs, name)?
 			.map(|(i, e)| self.get_ext(fs, i, e, name))
 			.transpose()
 	}
 
-	pub fn insert<S>(&mut self, fs: &mut Nrfs<S>, entry: NewEntry) -> Result<(), Error<S>>
+	/// Try to insert a new entry.
+	///
+	/// Returns `true` if succesful, `false` if an entry with the same name already exists.
+	fn insert<S>(&mut self, fs: &mut Nrfs<S>, entry: NewEntry) -> Result<bool, Error<S>>
 	where
 		S: Storage,
 	{
 		dbg!();
-		let key_len = u8::try_from(entry.name.len()).map_err(|_| Error::NameTooLong)?;
 
 		// Check if we should grow the hashmap
 		if self.should_grow() {
@@ -212,19 +268,18 @@ impl Dir {
 			},
 			ty: entry.ty,
 			key,
-			key_len,
+			key_len: entry.name.len_u8(),
 			unix: None,
 		};
 		self.set_ext(fs, index, &e)?;
-		self.set_entry_count(fs, self.entry_count + 1)
+		self.set_entry_count(fs, self.entry_count + 1)?;
+		Ok(true)
 	}
 
-	pub fn remove<S>(&mut self, fs: &mut Nrfs<S>, name: &[u8]) -> Result<bool, Error<S>>
+	pub fn remove<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<bool, Error<S>>
 	where
 		S: Storage,
 	{
-		u8::try_from(name.len()).map_err(|_| Error::NameTooLong)?;
-
 		let (i, e) = if let Some(r) = self.find_index(fs, name)? {
 			r
 		} else {
@@ -359,10 +414,10 @@ impl Dir {
 		});
 		let ty = match entry.ty {
 			TY_FILE => Type::File,
-			TY_DIR => Type::Directory,
-			TY_SYM => Type::Symlink,
+			TY_DIR => Type::Dir,
+			TY_SYM => Type::Sym,
 			n if Some(n) == self.embedded.as_ref().map(|d| d.1.file_ty.get()) => Type::File,
-			n if Some(n) == self.embedded.as_ref().map(|d| d.1.sym_ty.get()) => Type::Symlink,
+			n if Some(n) == self.embedded.as_ref().map(|d| d.1.sym_ty.get()) => Type::Sym,
 			n => Type::Unknown(n),
 		};
 		Ok(Entry { location, ty, key_len, key, unix })
@@ -416,14 +471,14 @@ impl Dir {
 			let (_, d) = self.embedded.as_ref().unwrap();
 			match entry.ty {
 				Type::File => d.file_ty.get(),
-				Type::Symlink => d.sym_ty.get(),
+				Type::Sym => d.sym_ty.get(),
 				_ => panic!("cannot be embedded"),
 			}
 		} else {
 			match entry.ty {
 				Type::File => TY_FILE,
-				Type::Directory => TY_DIR,
-				Type::Symlink => TY_SYM,
+				Type::Dir => TY_DIR,
+				Type::Sym => TY_SYM,
 				Type::Unknown(n) => n,
 			}
 		};
@@ -594,7 +649,7 @@ impl Dir {
 		// Copy entries
 		for index in 0..self.capacity() {
 			let mut buf = [0; 16];
-			fs.read_exact(self.id, 24 + 16 * u64::from(index), &mut buf)?; 
+			fs.read_exact(self.id, 24 + 16 * u64::from(index), &mut buf)?;
 			let [a, b, c, d, e, f, key_len, ty, ..] = buf;
 			if ty == 0 {
 				continue;
@@ -605,12 +660,16 @@ impl Dir {
 			fs.read_exact(self.id + 1, key_offset, &mut key[..key_len.into()])?;
 
 			let mut i = self.hash(&key[..key_len.into()]);
-			println!("> {:08x} - {:?}", i, String::from_utf8_lossy(&key[..key_len.into()]));
+			println!(
+				"> {:08x} - {:?}",
+				i,
+				String::from_utf8_lossy(&key[..key_len.into()])
+			);
 
 			loop {
 				let mut c = [0];
 				let new_i = i & new_map.index_mask();
-				fs.read_exact(new_map.id, 24 + 16 * u64::from(new_i) + 7, &mut c)?; 
+				fs.read_exact(new_map.id, 24 + 16 * u64::from(new_i) + 7, &mut c)?;
 				if c[0] == 0 {
 					fs.write_all(new_map.id, 24 + 16 * u64::from(new_i), &buf)?;
 					break;
@@ -625,11 +684,13 @@ impl Dir {
 		let old_end = fs.length(self.id)?;
 		for offt in (old_base..old_end).step_by(16) {
 			let mut buf = [0; 16];
-			fs.read_exact(self.id, offt, &mut buf)?; 
+			fs.read_exact(self.id, offt, &mut buf)?;
 			fs.write_all(new_map.id, new_base - old_base + offt, &buf)?;
 		}
 
-		fs.storage.move_object(self.id, new_map.id).map_err(Error::Nros)?;
+		fs.storage
+			.move_object(self.id, new_map.id)
+			.map_err(Error::Nros)?;
 		dbg!(&self.alloc_map);
 		*self = Self {
 			id: self.id,
@@ -701,18 +762,18 @@ enum Location {
 }
 
 #[derive(Debug, Default)]
-pub enum Type {
+enum Type {
 	#[default]
 	File,
-	Directory,
-	Symlink,
+	Dir,
+	Sym,
 	Unknown(u8),
 }
 
 #[derive(Default)]
-pub struct NewEntry<'a> {
+struct NewEntry<'a> {
 	pub data: Data<'a>,
-	pub name: &'a [u8],
+	pub name: &'a Name,
 	pub ty: Type,
 }
 
