@@ -183,7 +183,7 @@ impl Dir {
 		while u64::from(index) < self.capacity() {
 			dbg!();
 			// Get standard info
-			let (e, offt) = self.get(fs, index)?;
+			let e = self.get(fs, index)?;
 
 			if e.ty == 0 {
 				// Is empty, so skip
@@ -231,7 +231,7 @@ impl Dir {
 		let mut index = self.hash(entry.name) & self.index_mask();
 		loop {
 			dbg!(self.entry_count, self.capacity());
-			let (e, _) = self.get(fs, index)?;
+			let e = self.get(fs, index)?;
 			if e.ty == 0 {
 				break;
 			}
@@ -284,7 +284,7 @@ impl Dir {
 		let mut index @ last_index = self.hash(name) & self.index_mask();
 		loop {
 			dbg!(index);
-			let (e, _) = self.get(fs, index)?;
+			let e = self.get(fs, index)?;
 			dbg!();
 			if e.ty == 0 {
 				return Ok(None);
@@ -321,7 +321,7 @@ impl Dir {
 	/// # Panics
 	///
 	/// If the index is out of range.
-	fn get<S>(&self, fs: &mut Nrfs<S>, index: u32) -> Result<(RawEntry, u64), Error<S>>
+	fn get<S>(&self, fs: &mut Nrfs<S>, index: u32) -> Result<RawEntry, Error<S>>
 	where
 		S: Storage,
 	{
@@ -332,7 +332,7 @@ impl Dir {
 		let [a, b, c, d, e, f, key_len, ty, id @ ..] = buf;
 		let key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
 		let id_or_offset = u64::from_le_bytes(id);
-		Ok((RawEntry { key_offset, key_len, id_or_offset, ty }, offt))
+		Ok(RawEntry { key_offset, key_len, id_or_offset, ty })
 	}
 
 	/// Get an entry with extension data.
@@ -394,7 +394,7 @@ impl Dir {
 	where
 		S: Storage,
 	{
-		let (mut e, _) = self.get(fs, index)?;
+		let mut e = self.get(fs, index)?;
 		debug_assert!(e.ty != 0);
 		e.ty = ty.to_ty();
 		e.id_or_offset = ty.to_data();
