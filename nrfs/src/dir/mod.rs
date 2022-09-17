@@ -1,6 +1,10 @@
 use {
 	crate::{Error, File, Name, Nrfs, Storage},
-	core::{fmt, num::NonZeroU8},
+	core::{
+		fmt,
+		num::NonZeroU8,
+		ops::{Deref, DerefMut},
+	},
 	rangemap::RangeSet,
 	siphasher::sip::SipHasher13,
 };
@@ -17,7 +21,13 @@ const TY_SYM: u8 = 3;
 const TY_EMBED_FILE: u8 = 4;
 const TY_EMBED_SYM: u8 = 5;
 
-pub struct Dir {
+pub struct Dir<'a, S: Storage> {
+	pub(crate) fs: &'a mut Nrfs<S>,
+	data: DirData,
+}
+
+/// Directory data only, which has no lifetimes.
+pub struct DirData {
 	id: u64,
 	hashmap_base: u16,
 	hashmap_size_p2: u8,
@@ -30,42 +40,53 @@ pub struct Dir {
 	alloc_map: Option<RangeSet<u64>>,
 }
 
-impl Dir {
-	pub(crate) fn new<S>(fs: &mut Nrfs<S>, key: [u8; 16]) -> Result<Self, Error<S>>
-	where
-		S: Storage,
-	{
+impl<S: Storage> Deref for Dir<'_, S> {
+	type Target = DirData;
+
+	fn deref(&self) -> &Self::Target {
+		&self.data
+	}
+}
+
+impl<S: Storage> DerefMut for Dir<'_, S> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.data
+	}
+}
+
+impl<'a, S: Storage> Dir<'a, S> {
+	pub(crate) fn new(fs: &'a mut Nrfs<S>, key: [u8; 16]) -> Result<Self, Error<S>> {
 		// Allocate map & storage
 		let s = Self::new_map(fs, 3, 2, 0, &key)?;
-		let alloc = fs.storage.new_object().map_err(Error::Nros)?;
+		let alloc = s.fs.storage.new_object().map_err(Error::Nros)?;
 		assert_eq!(s.id + 1, alloc);
 		Ok(s)
 	}
 
 	/// Allocate a new hashmap object.
-	fn new_map<S>(
-		fs: &mut Nrfs<S>,
+	fn new_map(
+		fs: &'a mut Nrfs<S>,
 		header_len8: u8,
 		entry_len8: u8,
 		map_size_p2: u8,
 		key: &[u8; 16],
-	) -> Result<Self, Error<S>>
-	where
-		S: Storage,
-	{
+	) -> Result<Self, Error<S>> {
 		let id = fs.storage.new_object().map_err(Error::Nros)?;
 		let hashmap_base = u16::from(header_len8) * 8;
 		let entry_size = u16::from(entry_len8) * 8;
 		let s = Self {
-			id,
-			hashmap_base,
-			hashmap_size_p2: map_size_p2,
-			hash_keys: *key,
-			hash_algorithm: HashAlgorithm::SipHasher13,
-			entry_size,
-			entry_count: 0,
-			unix: None,
-			alloc_map: Some(Default::default()),
+			fs,
+			data: DirData {
+				id,
+				hashmap_base,
+				hashmap_size_p2: map_size_p2,
+				hash_keys: *key,
+				hash_algorithm: HashAlgorithm::SipHasher13,
+				entry_size,
+				entry_count: 0,
+				unix: None,
+				alloc_map: Some(Default::default()),
+			},
 		};
 		let mut buf = [0; 24];
 		buf[0] = header_len8;
@@ -73,10 +94,10 @@ impl Dir {
 		buf[2] = 1; // SipHasher13
 		buf[3] = map_size_p2;
 		buf[8..].copy_from_slice(key);
-		fs.write_all(id, 0, &buf)?;
+		s.fs.write_all(id, 0, &buf)?;
 		// FIXME gap should be added automatically
 		for i in 0..1 << map_size_p2 {
-			fs.write_all(
+			s.fs.write_all(
 				id,
 				u64::from(hashmap_base) + i * u64::from(entry_size),
 				&[0; 16],
@@ -85,10 +106,7 @@ impl Dir {
 		Ok(s)
 	}
 
-	pub(crate) fn load<S>(fs: &mut Nrfs<S>, id: u64) -> Result<Self, Error<S>>
-	where
-		S: Storage,
-	{
+	pub(crate) fn load(fs: &'a mut Nrfs<S>, id: u64) -> Result<Self, Error<S>> {
 		// Get basic info
 		let mut buf = [0; 24];
 		fs.read_exact(id, 0, &mut buf)?;
@@ -117,73 +135,56 @@ impl Dir {
 		}
 
 		Ok(Self {
-			id,
-			hashmap_base: header_len.into(),
-			hashmap_size_p2,
-			hash_algorithm: match hash_algorithm {
-				1 => HashAlgorithm::SipHasher13,
-				n => return Err(Error::UnknownHashAlgorithm(n)),
+			fs,
+			data: DirData {
+				id,
+				hashmap_base: header_len.into(),
+				hashmap_size_p2,
+				hash_algorithm: match hash_algorithm {
+					1 => HashAlgorithm::SipHasher13,
+					n => return Err(Error::UnknownHashAlgorithm(n)),
+				},
+				hash_keys,
+				entry_size,
+				entry_count,
+				unix,
+				alloc_map: None,
 			},
-			hash_keys,
-			entry_size,
-			entry_count,
-			unix,
-			alloc_map: None,
 		})
 	}
 
 	/// Create a new file.
 	///
 	/// This fails if an entry with the given name already exists.
-	pub fn create_file<S>(
-		&mut self,
-		fs: &mut Nrfs<S>,
-		name: &Name,
-	) -> Result<Option<File>, Error<S>>
-	where
-		S: Storage,
-	{
+	pub fn create_file<'b>(&'b mut self, name: &Name) -> Result<Option<File<'a, 'b, S>>, Error<S>> {
 		let e = NewEntry { name, ty: Type::EmbedFile { offset: 0, length: 0 } };
-		self.insert(fs, e)
-			.map(|r| r.map(|i| File::from_embed(false, i, 0, 0)))
+		self.insert(e)
+			.map(|r| r.map(|i| File::from_embed(self, false, i, 0, 0)))
 	}
 
 	/// Create a new directory.
 	///
 	/// This fails if an entry with the given name already exists.
-	pub fn create_dir<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<Option<Dir>, Error<S>>
-	where
-		S: Storage,
-	{
-		let d = Dir::new(fs, [0; 16])?;
+	pub fn create_dir(&'a mut self, name: &Name) -> Result<Option<Self>, Error<S>> {
+		let d = Dir::new(self.fs, [0; 16])?.data;
 		let e = NewEntry { name, ty: Type::Dir { id: d.id } };
-		self.insert(fs, e).map(|r| r.map(|_| d))
+		self.insert(e).map(|r| r.map(|_| Dir { fs: self.fs, data: d }))
 	}
 
 	/// Create a new symbolic link.
 	///
 	/// This fails if an entry with the given name already exists.
-	pub fn create_sym<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<Option<File>, Error<S>>
-	where
-		S: Storage,
-	{
+	pub fn create_sym<'b>(&'b mut self, name: &Name) -> Result<Option<File<'a, 'b, S>>, Error<S>> {
 		let e = NewEntry { name, ty: Type::EmbedSym { offset: 0, length: 0 } };
-		self.insert(fs, e)
-			.map(|r| r.map(|i| File::from_embed(true, i, 0, 0)))
+		self.insert(e)
+			.map(|r| r.map(|i| File::from_embed(self, true, i, 0, 0)))
 	}
 
-	pub fn next_from<S>(
-		&self,
-		fs: &mut Nrfs<S>,
-		mut index: u32,
-	) -> Result<Option<(Entry, Option<u32>)>, Error<S>>
-	where
-		S: Storage,
-	{
+	pub fn next_from(&mut self, mut index: u32) -> Result<Option<(Entry, Option<u32>)>, Error<S>> {
 		while u64::from(index) < self.capacity() {
 			dbg!();
 			// Get standard info
-			let e = self.get(fs, index)?;
+			let e = self.get(index)?;
 
 			if e.ty == 0 {
 				// Is empty, so skip
@@ -194,44 +195,38 @@ impl Dir {
 			// Get key
 			let mut key = [0; 255];
 			let key = &mut key[..e.key_len.into()];
-			self.read_heap(fs, e.key_offset, key)?;
+			self.read_heap(e.key_offset, key)?;
 
 			// Get extension info
 			return self
-				.get_ext(fs, index, e, key)
+				.get_ext(index, e, key)
 				.map(|e| Some((e, index.checked_add(1))));
 		}
 		Ok(None)
 	}
 
-	pub fn find<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<Option<Entry>, Error<S>>
-	where
-		S: Storage,
-	{
+	pub fn find(&mut self, name: &Name) -> Result<Option<Entry>, Error<S>> {
 		dbg!();
-		self.find_index(fs, name)?
-			.map(|(i, e)| self.get_ext(fs, i, e, name))
+		self.find_index(name)?
+			.map(|(i, e)| self.get_ext(i, e, name))
 			.transpose()
 	}
 
 	/// Try to insert a new entry.
 	///
 	/// Returns `true` if succesful, `false` if an entry with the same name already exists.
-	fn insert<S>(&mut self, fs: &mut Nrfs<S>, entry: NewEntry) -> Result<Option<u32>, Error<S>>
-	where
-		S: Storage,
-	{
+	fn insert(&mut self, entry: NewEntry<'_>) -> Result<Option<u32>, Error<S>> {
 		dbg!();
 
 		// Check if we should grow the hashmap
 		if self.should_grow() {
-			self.grow(fs)?;
+			self.grow()?;
 		}
 
 		let mut index = self.hash(entry.name) & self.index_mask();
 		loop {
 			dbg!(self.entry_count, self.capacity());
-			let e = self.get(fs, index)?;
+			let e = self.get(index)?;
 			if e.ty == 0 {
 				break;
 			}
@@ -243,16 +238,13 @@ impl Dir {
 		key[..entry.name.len()].copy_from_slice(entry.name);
 
 		let e = Entry { ty: Ok(entry.ty), key, key_len: entry.name.len_u8(), unix: None };
-		self.set_ext(fs, index, &e)?;
-		self.set_entry_count(fs, self.entry_count + 1)?;
+		self.set_ext(index, &e)?;
+		self.set_entry_count(self.entry_count + 1)?;
 		Ok(Some(index))
 	}
 
-	pub fn remove<S>(&mut self, fs: &mut Nrfs<S>, name: &Name) -> Result<bool, Error<S>>
-	where
-		S: Storage,
-	{
-		let (i, e) = if let Some(r) = self.find_index(fs, name)? {
+	pub fn remove(&mut self, name: &Name) -> Result<bool, Error<S>> {
+		let (i, e) = if let Some(r) = self.find_index(name)? {
 			r
 		} else {
 			return Ok(false);
@@ -262,8 +254,8 @@ impl Dir {
 			todo!("remove dir");
 		}
 		let offt = self.get_offset(i);
-		fs.write_all(self.id, offt, &[0])?;
-		self.set_entry_count(fs, self.entry_count - 1)?;
+		self.fs.write_all(self.id, offt, &[0])?;
+		self.set_entry_count(self.entry_count - 1)?;
 
 		// Check if we should shrink the hashmap
 		if self.should_shrink() {
@@ -272,25 +264,18 @@ impl Dir {
 		Ok(true)
 	}
 
-	fn find_index<S>(
-		&mut self,
-		fs: &mut Nrfs<S>,
-		name: &[u8],
-	) -> Result<Option<(u32, RawEntry)>, Error<S>>
-	where
-		S: Storage,
-	{
+	fn find_index(&mut self, name: &[u8]) -> Result<Option<(u32, RawEntry)>, Error<S>> {
 		dbg!();
 		let mut index @ last_index = self.hash(name) & self.index_mask();
 		loop {
 			dbg!(index);
-			let e = self.get(fs, index)?;
+			let e = self.get(index)?;
 			dbg!();
 			if e.ty == 0 {
 				return Ok(None);
 			}
 			dbg!(e.id_or_offset, e.key_len, e.key_offset);
-			if self.compare_names(fs, (e.key_len, e.key_offset), name)? {
+			if self.compare_names((e.key_len, e.key_offset), name)? {
 				dbg!();
 				break Ok(Some((index, e)));
 			}
@@ -321,14 +306,11 @@ impl Dir {
 	/// # Panics
 	///
 	/// If the index is out of range.
-	fn get<S>(&self, fs: &mut Nrfs<S>, index: u32) -> Result<RawEntry, Error<S>>
-	where
-		S: Storage,
-	{
+	fn get(&mut self, index: u32) -> Result<RawEntry, Error<S>> {
 		let offt = self.get_offset(index);
 		dbg!(index, offt);
 		let mut buf = [0; 16];
-		fs.read_exact(self.id, offt, &mut buf)?;
+		self.fs.read_exact(self.id, offt, &mut buf)?;
 		let [a, b, c, d, e, f, key_len, ty, id @ ..] = buf;
 		let key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
 		let id_or_offset = u64::from_le_bytes(id);
@@ -343,16 +325,7 @@ impl Dir {
 	///
 	/// If the index is out of range.
 	/// If the name is longer than 255 bytes.
-	fn get_ext<S>(
-		&self,
-		fs: &mut Nrfs<S>,
-		index: u32,
-		entry: RawEntry,
-		name: &[u8],
-	) -> Result<Entry, Error<S>>
-	where
-		S: Storage,
-	{
+	fn get_ext(&mut self, index: u32, entry: RawEntry, name: &[u8]) -> Result<Entry, Error<S>> {
 		dbg!(entry.id_or_offset);
 		let offt = self.get_offset(index);
 
@@ -361,7 +334,7 @@ impl Dir {
 			.unix
 			.map(|o| {
 				let mut buf = [0; 2];
-				fs.read_exact(self.id, offt + u64::from(o), &mut buf)?;
+				self.fs.read_exact(self.id, offt + u64::from(o), &mut buf)?;
 				Ok(ext::unix::Entry { permissions: u16::from_le_bytes(buf) })
 			})
 			.transpose()?;
@@ -390,15 +363,12 @@ impl Dir {
 	/// Set the type and offset of an entry.
 	///
 	/// The entry must not be empty, i.e. type is not 0.
-	pub(crate) fn set_ty<S>(&mut self, fs: &mut Nrfs<S>, index: u32, ty: Type) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
-		let mut e = self.get(fs, index)?;
+	pub(crate) fn set_ty(&mut self, index: u32, ty: Type) -> Result<(), Error<S>> {
+		let mut e = self.get(index)?;
 		debug_assert!(e.ty != 0);
 		e.ty = ty.to_ty();
 		e.id_or_offset = ty.to_data();
-		self.set(fs, index, e).map(|_: u64| ())
+		self.set(index, e).map(|_: u64| ())
 	}
 
 	/// Set the raw standard info for an entry.
@@ -408,17 +378,14 @@ impl Dir {
 	/// # Panics
 	///
 	/// If the index is out of range.
-	fn set<S>(&mut self, fs: &mut Nrfs<S>, index: u32, entry: RawEntry) -> Result<u64, Error<S>>
-	where
-		S: Storage,
-	{
+	fn set(&mut self, index: u32, entry: RawEntry) -> Result<u64, Error<S>> {
 		let offt = self.get_offset(index);
 		let mut buf = [0; 16];
 		buf[..8].copy_from_slice(&entry.key_offset.to_le_bytes());
 		buf[6] = entry.key_len;
 		buf[7] = entry.ty;
 		buf[8..].copy_from_slice(&entry.id_or_offset.to_le_bytes());
-		fs.write_all(self.id, offt, &buf)?;
+		self.fs.write_all(self.id, offt, &buf)?;
 		Ok(offt)
 	}
 
@@ -430,14 +397,12 @@ impl Dir {
 	///
 	/// If the index is out of range.
 	/// If the name is longer than 255 bytes.
-	fn set_ext<S>(&mut self, fs: &mut Nrfs<S>, index: u32, entry: &Entry) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
+	fn set_ext(&mut self, index: u32, entry: &Entry) -> Result<(), Error<S>> {
 		// Store key
 		dbg!();
-		let key_offset = self.alloc(fs, entry.key_len.into())?;
-		fs.write_all(self.id + 1, key_offset, &entry.key[..entry.key_len.into()])?;
+		let key_offset = self.alloc(entry.key_len.into())?;
+		self.fs
+			.write_all(self.id + 1, key_offset, &entry.key[..entry.key_len.into()])?;
 		dbg!();
 
 		let (ty, id_or_offset) = match entry.ty {
@@ -455,12 +420,13 @@ impl Dir {
 
 		// Set entry itself
 		let e = RawEntry { key_len: entry.key_len, key_offset, id_or_offset, ty };
-		let offt = self.set(fs, index, e)?;
+		let offt = self.set(index, e)?;
 
 		// Set unix info
 		if let Some(o) = self.unix {
 			let u = entry.unix.as_ref().map_or(0, |u| u.permissions);
-			fs.write_all(self.id, offt + u64::from(o), &u.to_le_bytes())?;
+			self.fs
+				.write_all(self.id, offt + u64::from(o), &u.to_le_bytes())?;
 		}
 
 		Ok(())
@@ -499,15 +465,12 @@ impl Dir {
 	}
 
 	/// Compare a stored name with the given name.
-	fn compare_names<S>(&self, fs: &mut Nrfs<S>, x: (u8, u64), y: &[u8]) -> Result<bool, Error<S>>
-	where
-		S: Storage,
-	{
+	fn compare_names(&mut self, x: (u8, u64), y: &[u8]) -> Result<bool, Error<S>> {
 		if usize::from(x.0) != y.len() {
 			return Ok(false);
 		}
 		let mut buf = [0; 255];
-		fs.read_exact(self.id + 1, x.1, &mut buf[..y.len()])?;
+		self.fs.read_exact(self.id + 1, x.1, &mut buf[..y.len()])?;
 		dbg!(String::from_utf8_lossy(&buf[..y.len()]));
 		dbg!(String::from_utf8_lossy(&y[..y.len()]));
 		Ok(&buf[..y.len()] == y)
@@ -516,18 +479,13 @@ impl Dir {
 	/// Allocate heap space for arbitrary data.
 	///
 	/// The returned region is not readable until it is written to.
-	fn alloc<S>(&mut self, fs: &mut Nrfs<S>, len: u64) -> Result<u64, Error<S>>
-	where
-		S: Storage,
-	{
-		let log = self.alloc_log(fs)?;
+	fn alloc(&mut self, len: u64) -> Result<u64, Error<S>> {
+		let log = self.alloc_log()?;
 		dbg!(&log);
 		for r in log.gaps(&(0..u64::MAX)) {
 			if r.end - r.start >= len {
 				log.insert(r.start..r.start + len);
-				dbg!(fs.length(self.id)?);
-				self.save_alloc_log(fs)?;
-				dbg!(fs.length(self.id)?);
+				self.save_alloc_log()?;
 				return Ok(r.start);
 			}
 		}
@@ -536,38 +494,34 @@ impl Dir {
 	}
 
 	/// Write a full, minimized allocation log.
-	fn save_alloc_log<S>(&mut self, fs: &mut Nrfs<S>) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
+	fn save_alloc_log(&mut self) -> Result<(), Error<S>> {
 		let id = self.id;
 		let mut log_offt = self.alloc_log_base();
-		let log = self.alloc_log(fs)?;
+		// Avoid mutable borrow issues
+		self.alloc_log()?;
+		let log = self.data.alloc_map.as_mut().unwrap();
 		for r in log.iter() {
 			let mut buf = [0; 16];
 			buf[..8].copy_from_slice(&r.start.to_le_bytes());
 			buf[8..].copy_from_slice(&(r.end - r.start).to_le_bytes());
-			fs.write_all(id, log_offt, &buf)?;
+			self.fs.write_all(id, log_offt, &buf)?;
 			log_offt += 16;
 		}
 		dbg!(log_offt);
-		fs.truncate(self.id, log_offt)
+		self.fs.truncate(self.id, log_offt)
 	}
 
 	/// Get or load the allocation map.
-	fn alloc_log<'a, S>(&'a mut self, fs: &mut Nrfs<S>) -> Result<&'a mut RangeSet<u64>, Error<S>>
-	where
-		S: Storage,
-	{
+	fn alloc_log(&mut self) -> Result<&mut RangeSet<u64>, Error<S>> {
 		// I'd use as_mut() but the borrow checker has a bug :(
 		if self.alloc_map.is_some() {
 			return Ok(self.alloc_map.as_mut().unwrap());
 		}
 		let mut m = RangeSet::new();
-		let l = fs.length(self.id)?;
+		let l = self.fs.length(self.id)?;
 		for offt in (self.alloc_log_base()..l).step_by(16) {
 			let mut buf = [0; 16];
-			fs.read_exact(self.id, offt, &mut buf)?;
+			self.fs.read_exact(self.id, offt, &mut buf)?;
 			let [a, b, c, d, e, f, g, h, buf @ ..] = buf;
 			let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
 			let len = u64::from_le_bytes(buf);
@@ -588,43 +542,28 @@ impl Dir {
 	}
 
 	/// Read a heap value.
-	pub(crate) fn read_heap<S>(
-		&self,
-		fs: &mut Nrfs<S>,
-		offset: u64,
-		buf: &mut [u8],
-	) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
-		fs.read_exact(self.id + 1, offset, buf)
+	pub(crate) fn read_heap(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error<S>> {
+		self.fs.read_exact(self.id + 1, offset, buf)
 	}
 
 	/// Write a heap value.
-	pub(crate) fn write_heap<S>(
-		&self,
-		fs: &mut Nrfs<S>,
-		offset: u64,
-		data: &[u8],
-	) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
-		fs.write_all(self.id + 1, offset, data)
+	pub(crate) fn write_heap(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
+		self.fs.write_all(self.id + 1, offset, data)
 	}
 
 	/// Grow the hashmap
-	fn grow<S>(&mut self, fs: &mut Nrfs<S>) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
+	fn grow(&mut self) -> Result<(), Error<S>> {
 		dbg!();
-		let new_map = Self::new_map(fs, 3, 2, self.hashmap_size_p2 + 1, &self.hash_keys)?;
+		let new_map = Dir::new_map(self.fs, 3, 2, self.hashmap_size_p2 + 1, &self.data.hash_keys)?;
+		let new_index_mask = new_map.index_mask();
+		let new_base = new_map.alloc_log_base();
+		let new_map = new_map.data;
 
 		// Copy entries
 		for index in 0..self.capacity() {
 			let mut buf = [0; 16];
-			fs.read_exact(self.id, 24 + 16 * u64::from(index), &mut buf)?;
+			self.fs
+				.read_exact(self.id, 24 + 16 * u64::from(index), &mut buf)?;
 			let [a, b, c, d, e, f, key_len, ty, ..] = buf;
 			if ty == 0 {
 				continue;
@@ -632,7 +571,8 @@ impl Dir {
 
 			let key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
 			let mut key = [0; 255];
-			fs.read_exact(self.id + 1, key_offset, &mut key[..key_len.into()])?;
+			self.fs
+				.read_exact(self.id + 1, key_offset, &mut key[..key_len.into()])?;
 
 			let mut i = self.hash(&key[..key_len.into()]);
 			println!(
@@ -643,10 +583,12 @@ impl Dir {
 
 			loop {
 				let mut c = [0];
-				let new_i = i & new_map.index_mask();
-				fs.read_exact(new_map.id, 24 + 16 * u64::from(new_i) + 7, &mut c)?;
+				let new_i = i & new_index_mask;
+				self.fs
+					.read_exact(new_map.id, 24 + 16 * u64::from(new_i) + 7, &mut c)?;
 				if c[0] == 0 {
-					fs.write_all(new_map.id, 24 + 16 * u64::from(new_i), &buf)?;
+					self.fs
+						.write_all(new_map.id, 24 + 16 * u64::from(new_i), &buf)?;
 					break;
 				}
 				i += 1;
@@ -655,19 +597,20 @@ impl Dir {
 
 		// Copy alloc log
 		let old_base = self.alloc_log_base();
-		let new_base = new_map.alloc_log_base();
-		let old_end = fs.length(self.id)?;
+		let old_end = self.fs.length(self.id)?;
 		for offt in (old_base..old_end).step_by(16) {
 			let mut buf = [0; 16];
-			fs.read_exact(self.id, offt, &mut buf)?;
-			fs.write_all(new_map.id, new_base - old_base + offt, &buf)?;
+			self.fs.read_exact(self.id, offt, &mut buf)?;
+			self.fs
+				.write_all(new_map.id, new_base - old_base + offt, &buf)?;
 		}
 
-		fs.storage
+		self.fs
+			.storage
 			.move_object(self.id, new_map.id)
 			.map_err(Error::Nros)?;
 		dbg!(&self.alloc_map);
-		*self = Self {
+		self.data = DirData {
 			id: self.id,
 			entry_count: self.entry_count,
 			alloc_map: core::mem::take(&mut self.alloc_map),
@@ -678,13 +621,32 @@ impl Dir {
 	}
 
 	/// Update the entry count.
-	fn set_entry_count<S>(&mut self, fs: &mut Nrfs<S>, count: u32) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
-		fs.write_all(self.id, 4, &count.to_le_bytes())?;
+	fn set_entry_count(&mut self, count: u32) -> Result<(), Error<S>> {
+		self.fs.write_all(self.id, 4, &count.to_le_bytes())?;
 		self.entry_count = count;
 		Ok(())
+	}
+}
+
+impl<S: Storage> fmt::Debug for Dir<'_, S>
+where
+	Nrfs<S>: fmt::Debug,
+{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(Dir))
+			.field("fs", &self.fs)
+			.field("id", &self.id)
+			.field("hashmap_base", &self.hashmap_base)
+			.field(
+				"hashmap_size_p2",
+				&format_args!("2**{}", self.hashmap_size_p2),
+			)
+			.field("hash_algorithm", &self.hash_algorithm)
+			.field("entry_size", &self.entry_size)
+			.field("entry_count", &self.entry_count)
+			.field("unix", &self.unix)
+			.field("alloc_map", &self.alloc_map)
+			.finish()
 	}
 }
 
@@ -763,6 +725,7 @@ struct NewEntry<'a> {
 	ty: Type,
 }
 
+#[derive(Debug)]
 enum HashAlgorithm {
 	SipHasher13,
 }

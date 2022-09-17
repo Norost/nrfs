@@ -1,7 +1,10 @@
-use crate::{Dir, dir::Type, Error, Nrfs, Storage};
+use {
+	crate::{dir::Type, Dir, Error, Nrfs, Storage},
+	core::fmt,
+};
 
-#[derive(Debug)]
-pub struct File {
+pub struct File<'a, 'b, S: Storage> {
+	dir: &'b mut Dir<'a, S>,
 	is_sym: bool,
 	inner: Inner,
 }
@@ -12,94 +15,81 @@ enum Inner {
 	Embed { index: u32, offset: u64, length: u16 },
 }
 
-impl File {
-	pub(crate) fn from_obj(is_sym: bool, id: u64, index: u32) -> Self {
-		Self { inner: Inner::Object { id, index }, is_sym }
+impl<'a, 'b, S: Storage> File<'a, 'b, S> {
+	pub(crate) fn from_obj(dir: &'b mut Dir<'a, S>, is_sym: bool, id: u64, index: u32) -> Self {
+		Self { dir, inner: Inner::Object { id, index }, is_sym }
 	}
 
-	pub(crate) fn from_embed(is_sym: bool, index: u32, offset: u64, length: u16) -> Self {
-		Self { inner: Inner::Embed { index, offset, length }, is_sym }
-	}
-
-	pub fn read<S>(
-		&mut self,
-		fs: &mut Nrfs<S>,
-		dir: &mut Dir,
+	pub(crate) fn from_embed(
+		dir: &'b mut Dir<'a, S>,
+		is_sym: bool,
+		index: u32,
 		offset: u64,
-		buf: &mut [u8],
-	) -> Result<usize, Error<S>>
-	where
-		S: Storage,
-	{
+		length: u16,
+	) -> Self {
+		Self { dir, inner: Inner::Embed { index, offset, length }, is_sym }
+	}
+
+	pub fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
 		match &self.inner {
-			Inner::Object { id, .. } => fs.read(*id, offset, buf),
+			Inner::Object { id, .. } => self.dir.fs.read(*id, offset, buf),
 			Inner::Embed { offset: offt, length, .. } => {
 				let l = u64::from(*length).saturating_sub(offset);
 				let l = buf.len().min(l as usize);
 				let buf = &mut buf[..l];
-				dir.read_heap(fs, offt + offset, buf).map(|_| l)
+				self.dir.read_heap(offt + offset, buf).map(|_| l)
 			}
 		}
 	}
 
-	pub fn read_exact<S>(
-		&mut self,
-		fs: &mut Nrfs<S>,
-		dir: &mut Dir,
-		offset: u64,
-		buf: &mut [u8],
-	) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
+	pub fn read_exact(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error<S>> {
 		match &self.inner {
-			Inner::Object { id, .. } => fs.read_exact(*id, offset, buf),
+			Inner::Object { id, .. } => self.dir.fs.read_exact(*id, offset, buf),
 			Inner::Embed { offset: offt, length, .. } => {
 				let l = u64::from(*length).saturating_sub(offset);
 				let l = buf.len().min(l as usize);
 				let buf = &mut buf[..l];
-				dir.read_heap(fs, offt + offset, buf)
+				self.dir.read_heap(offt + offset, buf)
 			}
 		}
 	}
 
-	pub fn write<S>(
-		&mut self,
-		fs: &mut Nrfs<S>,
-		dir: &mut Dir,
-		offset: u64,
-		data: &[u8],
-	) -> Result<usize, Error<S>>
-	where
-		S: Storage,
-	{
+	pub fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, Error<S>> {
 		// Same thing at the moment anyways
-		self.write_all(fs, dir, offset, data).map(|()| data.len())
+		self.write_all(offset, data).map(|()| data.len())
 	}
 
-	pub fn write_all<S>(
-		&mut self,
-		fs: &mut Nrfs<S>,
-		dir: &mut Dir,
-		offset: u64,
-		data: &[u8],
-	) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
+	pub fn write_all(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
 		match &self.inner {
-			Inner::Object { id, .. } => fs.write_all(*id, offset, data),
+			Inner::Object { id, .. } => self.dir.fs.write_all(*id, offset, data),
 			Inner::Embed { offset: 0, length: 0, index } => {
 				let index = *index;
-				let id = fs.storage.new_object().map_err(Error::Nros)?;
+				let id = self.dir.fs.storage.new_object().map_err(Error::Nros)?;
 				self.inner = Inner::Object { id, index };
-				let ty = if self.is_sym { Type::Sym { id } } else { Type::File { id } };
-				dir.set_ty(fs, index, ty)?;
-				fs.write_all(id, offset, data)
+				let ty = if self.is_sym {
+					Type::Sym { id }
+				} else {
+					Type::File { id }
+				};
+				self.dir.set_ty(index, ty)?;
+				self.dir.fs.write_all(id, offset, data)
 			}
 			Inner::Embed { offset: offt, length, .. } => {
 				todo!()
 			}
 		}
+	}
+}
+
+impl<S: Storage> fmt::Debug for File<'_, '_, S>
+where
+	for<'a> Dir<'a, S>: fmt::Debug,
+{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(File))
+			.field("dir", &self.dir)
+			.field("is_sym", &self.is_sym)
+			.field("inner", &self.inner)
+			.finish()
 	}
 }

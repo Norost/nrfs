@@ -169,10 +169,23 @@ pub enum LoadError<S: Storage> {
 	Storage(S::Error),
 }
 
-#[derive(Debug)]
 pub enum Error<S: Storage> {
 	Storage(S::Error),
 	RecordPack(record::PackError),
 	RecordUnpack(record::UnpackError),
 	NotEnoughSpace,
+}
+
+impl<S: Storage> fmt::Debug for Error<S>
+where
+	S::Error: fmt::Debug,
+{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Storage(e) => f.debug_tuple("Storage").field(&e).finish(),
+			Self::RecordPack(e) => f.debug_tuple("RecordPack").field(&e).finish(),
+			Self::RecordUnpack(e) => f.debug_tuple("RecordUnpack").field(&e).finish(),
+			Self::NotEnoughSpace => f.debug_tuple("NotEnoughSpace").finish(),
+		}
+	}
 }

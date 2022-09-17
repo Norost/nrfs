@@ -85,16 +85,11 @@ fn create_file() {
 	let mut fs = new();
 
 	let mut d = fs.root_dir().unwrap();
-	dbg!();
-	let mut f = d.create_file(&mut fs, b"test.txt".into()).unwrap().unwrap();
-	dbg!();
-	f.write_all(&mut fs, &mut d, 0, b"Hello, world!").unwrap();
-	dbg!();
+	let mut f = d.create_file(b"test.txt".into()).unwrap().unwrap();
+	f.write_all(0, b"Hello, world!").unwrap();
 
-	assert!(d.find(&mut fs, b"I do not exist".into()).unwrap().is_none());
-	dbg!();
-	let g = d.find(&mut fs, b"test.txt".into()).unwrap().unwrap();
-	dbg!();
+	assert!(d.find(b"I do not exist".into()).unwrap().is_none());
+	let g = d.find(b"test.txt".into()).unwrap().unwrap();
 
 	let mut buf = [0; 32];
 	let l = g.read(&mut fs, 0, &mut buf).unwrap();
@@ -112,18 +107,13 @@ fn create_many_files() {
 
 		let mut d = fs.root_dir().unwrap();
 		let mut f = d
-			.create_file(&mut fs, (&*name).try_into().unwrap())
+			.create_file((&*name).try_into().unwrap())
 			.unwrap()
 			.unwrap();
-		f.write_all(&mut fs, &mut d, 0, contents.as_bytes())
-			.unwrap();
+		f.write_all(0, contents.as_bytes()).unwrap();
 		dbg!();
 
-		let g = d
-			.find(&mut fs, (&*name).try_into().unwrap())
-			.unwrap()
-			.unwrap();
-		dbg!(f, &g);
+		let g = d.find((&*name).try_into().unwrap()).unwrap().unwrap();
 
 		let mut buf = [0; 32];
 		let l = g.read(&mut fs, 0, &mut buf).unwrap();
@@ -136,10 +126,10 @@ fn create_many_files() {
 	}
 
 	// Test iteration
-	let d = fs.root_dir().unwrap();
+	let mut d = fs.root_dir().unwrap();
 	let mut i = 0;
 	let mut count = 0;
-	while let Some((e, ni)) = d.next_from(&mut fs, i).unwrap() {
+	while let Some((e, ni)) = d.next_from(i).unwrap() {
 		dbg!(e);
 		count += 1;
 		i = if let Some(i) = ni { i } else { break };
@@ -154,10 +144,7 @@ fn create_many_files() {
 		let mut d = fs.root_dir().unwrap();
 		dbg!();
 
-		let g = d
-			.find(&mut fs, (&*name).try_into().unwrap())
-			.unwrap()
-			.unwrap();
+		let g = d.find((&*name).try_into().unwrap()).unwrap().unwrap();
 
 		let mut buf = [0; 32];
 		let l = g.read(&mut fs, 0, &mut buf).unwrap();

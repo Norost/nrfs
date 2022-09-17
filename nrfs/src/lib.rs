@@ -1,4 +1,6 @@
 //#![cfg_attr(not(test), no_std)]
+#![deny(elided_lifetimes_in_paths)]
+
 pub mod dir;
 mod file;
 mod name;
@@ -33,7 +35,7 @@ impl<S: Storage> Nrfs<S> {
 		Ok(Self { storage: nros::Nros::load(storage)? })
 	}
 
-	pub fn root_dir(&mut self) -> Result<Dir, Error<S>> {
+	pub fn root_dir(&mut self) -> Result<Dir<'_, S>, Error<S>> {
 		Dir::load(self, 0)
 	}
 
@@ -72,7 +74,7 @@ impl<S: Storage> Nrfs<S> {
 
 pub enum Error<S>
 where
-	S: nros::Storage,
+	S: Storage,
 {
 	Nros(nros::Error<S>),
 	Truncated,
@@ -82,7 +84,7 @@ where
 
 impl<S> fmt::Debug for Error<S>
 where
-	S: nros::Storage + fmt::Debug,
+	S: Storage,
 	S::Error: fmt::Debug,
 {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
