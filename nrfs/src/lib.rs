@@ -16,6 +16,7 @@ pub use {
 
 use core::fmt;
 
+#[derive(Debug)]
 pub struct Nrfs<S: Storage> {
 	storage: nros::Nros<S>,
 }

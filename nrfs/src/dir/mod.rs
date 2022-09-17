@@ -168,7 +168,8 @@ impl<'a, S: Storage> Dir<'a, S> {
 	pub fn create_dir(&'a mut self, name: &Name) -> Result<Option<Self>, Error<S>> {
 		let d = Dir::new(self.fs, [0; 16])?.data;
 		let e = NewEntry { name, ty: Type::Dir { id: d.id } };
-		self.insert(e).map(|r| r.map(|_| Dir { fs: self.fs, data: d }))
+		self.insert(e)
+			.map(|r| r.map(|_| Dir { fs: self.fs, data: d }))
 	}
 
 	/// Create a new symbolic link.
@@ -182,7 +183,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 	pub fn next_from(&mut self, mut index: u32) -> Result<Option<(Entry, Option<u32>)>, Error<S>> {
 		while u64::from(index) < self.capacity() {
-			dbg!();
 			// Get standard info
 			let e = self.get(index)?;
 
@@ -206,7 +206,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 	}
 
 	pub fn find(&mut self, name: &Name) -> Result<Option<Entry>, Error<S>> {
-		dbg!();
 		self.find_index(name)?
 			.map(|(i, e)| self.get_ext(i, e, name))
 			.transpose()
@@ -216,8 +215,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 	///
 	/// Returns `true` if succesful, `false` if an entry with the same name already exists.
 	fn insert(&mut self, entry: NewEntry<'_>) -> Result<Option<u32>, Error<S>> {
-		dbg!();
-
 		// Check if we should grow the hashmap
 		if self.should_grow() {
 			self.grow()?;
@@ -225,7 +222,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 		let mut index = self.hash(entry.name) & self.index_mask();
 		loop {
-			dbg!(self.entry_count, self.capacity());
 			let e = self.get(index)?;
 			if e.ty == 0 {
 				break;
@@ -265,21 +261,15 @@ impl<'a, S: Storage> Dir<'a, S> {
 	}
 
 	fn find_index(&mut self, name: &[u8]) -> Result<Option<(u32, RawEntry)>, Error<S>> {
-		dbg!();
 		let mut index @ last_index = self.hash(name) & self.index_mask();
 		loop {
-			dbg!(index);
 			let e = self.get(index)?;
-			dbg!();
 			if e.ty == 0 {
 				return Ok(None);
 			}
-			dbg!(e.id_or_offset, e.key_len, e.key_offset);
 			if self.compare_names((e.key_len, e.key_offset), name)? {
-				dbg!();
 				break Ok(Some((index, e)));
 			}
-			dbg!();
 			index += 1;
 			index &= self.index_mask();
 			if index == last_index {
@@ -308,7 +298,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// If the index is out of range.
 	fn get(&mut self, index: u32) -> Result<RawEntry, Error<S>> {
 		let offt = self.get_offset(index);
-		dbg!(index, offt);
 		let mut buf = [0; 16];
 		self.fs.read_exact(self.id, offt, &mut buf)?;
 		let [a, b, c, d, e, f, key_len, ty, id @ ..] = buf;
@@ -326,7 +315,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// If the index is out of range.
 	/// If the name is longer than 255 bytes.
 	fn get_ext(&mut self, index: u32, entry: RawEntry, name: &[u8]) -> Result<Entry, Error<S>> {
-		dbg!(entry.id_or_offset);
 		let offt = self.get_offset(index);
 
 		// Get unix info
@@ -399,11 +387,9 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// If the name is longer than 255 bytes.
 	fn set_ext(&mut self, index: u32, entry: &Entry) -> Result<(), Error<S>> {
 		// Store key
-		dbg!();
 		let key_offset = self.alloc(entry.key_len.into())?;
 		self.fs
 			.write_all(self.id + 1, key_offset, &entry.key[..entry.key_len.into()])?;
-		dbg!();
 
 		let (ty, id_or_offset) = match entry.ty {
 			Ok(Type::File { id }) => (TY_FILE, id),
@@ -471,8 +457,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 		}
 		let mut buf = [0; 255];
 		self.fs.read_exact(self.id + 1, x.1, &mut buf[..y.len()])?;
-		dbg!(String::from_utf8_lossy(&buf[..y.len()]));
-		dbg!(String::from_utf8_lossy(&y[..y.len()]));
 		Ok(&buf[..y.len()] == y)
 	}
 
@@ -481,7 +465,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// The returned region is not readable until it is written to.
 	fn alloc(&mut self, len: u64) -> Result<u64, Error<S>> {
 		let log = self.alloc_log()?;
-		dbg!(&log);
 		for r in log.gaps(&(0..u64::MAX)) {
 			if r.end - r.start >= len {
 				log.insert(r.start..r.start + len);
@@ -507,7 +490,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 			self.fs.write_all(id, log_offt, &buf)?;
 			log_offt += 16;
 		}
-		dbg!(log_offt);
 		self.fs.truncate(self.id, log_offt)
 	}
 
@@ -538,7 +520,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 	/// The base address of the allocation log.
 	fn alloc_log_base(&self) -> u64 {
-		dbg!(u64::from(self.hashmap_base) + u64::from(self.entry_size) * self.capacity())
+		u64::from(self.hashmap_base) + u64::from(self.entry_size) * self.capacity()
 	}
 
 	/// Read a heap value.
@@ -553,8 +535,13 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 	/// Grow the hashmap
 	fn grow(&mut self) -> Result<(), Error<S>> {
-		dbg!();
-		let new_map = Dir::new_map(self.fs, 3, 2, self.hashmap_size_p2 + 1, &self.data.hash_keys)?;
+		let new_map = Dir::new_map(
+			self.fs,
+			3,
+			2,
+			self.hashmap_size_p2 + 1,
+			&self.data.hash_keys,
+		)?;
 		let new_index_mask = new_map.index_mask();
 		let new_base = new_map.alloc_log_base();
 		let new_map = new_map.data;
@@ -575,11 +562,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 				.read_exact(self.id + 1, key_offset, &mut key[..key_len.into()])?;
 
 			let mut i = self.hash(&key[..key_len.into()]);
-			println!(
-				"> {:08x} - {:?}",
-				i,
-				String::from_utf8_lossy(&key[..key_len.into()])
-			);
 
 			loop {
 				let mut c = [0];
@@ -609,7 +591,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 			.storage
 			.move_object(self.id, new_map.id)
 			.map_err(Error::Nros)?;
-		dbg!(&self.alloc_map);
 		self.data = DirData {
 			id: self.id,
 			entry_count: self.entry_count,

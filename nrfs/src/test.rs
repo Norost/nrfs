@@ -111,7 +111,6 @@ fn create_many_files() {
 			.unwrap()
 			.unwrap();
 		f.write_all(0, contents.as_bytes()).unwrap();
-		dbg!();
 
 		let g = d.find((&*name).try_into().unwrap()).unwrap().unwrap();
 
@@ -132,7 +131,6 @@ fn create_many_files() {
 	let mut i = 0;
 	let mut count = 0;
 	while let Some((e, ni)) = d.next_from(i).unwrap() {
-		dbg!(e);
 		count += 1;
 		i = if let Some(i) = ni { i } else { break };
 	}
@@ -144,7 +142,6 @@ fn create_many_files() {
 		let contents = format!("This is file #{}", i);
 
 		let mut d = fs.root_dir().unwrap();
-		dbg!();
 
 		let g = d.find((&*name).try_into().unwrap()).unwrap().unwrap();
 
