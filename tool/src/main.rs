@@ -15,6 +15,8 @@ struct Args {
 	file: String,
 	#[clap(short)]
 	directory: Option<PathBuf>,
+	#[clap(long)]
+	follow: bool,
 	#[clap(short, long, default_value_t = 17)]
 	block_size_p2: u8,
 }
@@ -39,30 +41,34 @@ fn make(args: Args) {
 		.truncate(false)
 		.read(true)
 		.write(true)
-		.open(args.file)
+		.open(&args.file)
 		.unwrap();
 
 	let mut nrfs = nrfs::Nrfs::new(S::new(f), args.block_size_p2).unwrap();
 
 	let mut root = nrfs.root_dir().unwrap();
-	if let Some(d) = args.directory {
-		add_files(&mut root, &d);
+	if let Some(d) = &args.directory {
+		add_files(&mut root, d, &args);
 		nrfs.finish_transaction().unwrap();
 	}
 
-	fn add_files(root: &mut nrfs::Dir<'_, S>, from: &Path) {
+	fn add_files(root: &mut nrfs::Dir<'_, S>, from: &Path, args: &Args) {
 		for f in fs::read_dir(from).expect("failed to read dir") {
 			let f = f.unwrap();
 			let m = f.metadata().unwrap();
 			let n = f.file_name();
 			let n = n.to_str().unwrap().try_into().unwrap();
-			if m.is_file() {
+			if m.is_file() || (m.is_symlink() && args.follow) {
 				let c = fs::read(f.path()).unwrap();
 				let mut f = root.create_file(n).unwrap().unwrap();
 				f.write_all(0, &c).unwrap();
 			} else if m.is_dir() {
 				let mut d = root.create_dir(n).unwrap().unwrap();
-				add_files(&mut d, &f.path())
+				add_files(&mut d, &f.path(), args)
+			} else if m.is_symlink() {
+				let c = fs::read_link(f.path()).unwrap();
+				let mut f = root.create_sym(n).unwrap().unwrap();
+				f.write_all(0, c.to_str().unwrap().as_bytes()).unwrap();
 			} else {
 				todo!()
 			}
@@ -83,7 +89,7 @@ fn dump(args: Args) {
 			if e.is_file() {
 				let mut f = e.as_file().unwrap();
 				println!(
-					"{:>8}  {:>indent$}f {:<32}",
+					"{:>8}  {:>indent$}f {}",
 					f.len().unwrap(),
 					"",
 					name,
@@ -91,16 +97,21 @@ fn dump(args: Args) {
 				);
 			} else if e.is_dir() {
 				let mut d = e.as_dir().unwrap().unwrap();
-				println!(
-					"{:>8}  {:>indent$}d {:<32}",
-					d.len(),
-					"",
-					name,
-					indent = indent
-				);
+				println!("{:>8}  {:>indent$}d {}", d.len(), "", name, indent = indent);
 				list_files(&mut d, indent + 2);
 			} else if e.is_sym() {
-				println!("{:>indent$}s {:<32}", "", name, indent = 10 + indent);
+				let mut f = e.as_sym().unwrap();
+				let len = f.len().unwrap();
+				let mut buf = vec![0; len as _];
+				f.read_exact(0, &mut buf).unwrap();
+				let link = String::from_utf8_lossy(&buf);
+				println!(
+					"{:>indent$}s {} -> {}",
+					"",
+					name,
+					link,
+					indent = 10 + indent
+				);
 			}
 			i = next_i
 		}

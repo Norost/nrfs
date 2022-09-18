@@ -686,6 +686,16 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 			_ => return None,
 		})
 	}
+
+	pub fn as_sym(&mut self) -> Option<File<'a, '_, S>> {
+		Some(match self.ty {
+			Ok(Type::Sym { id }) => File::from_obj(self.dir, true, id, self.index),
+			Ok(Type::EmbedSym { offset, length }) => {
+				File::from_embed(self.dir, true, self.index, offset, length)
+			}
+			_ => return None,
+		})
+	}
 }
 
 impl<S: Storage + fmt::Debug> fmt::Debug for Entry<'_, '_, S> {
