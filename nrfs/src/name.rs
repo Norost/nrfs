@@ -28,10 +28,10 @@ impl Default for &mut Name {
 	}
 }
 
-impl TryFrom<&[u8]> for &Name {
+impl<'a> TryFrom<&'a [u8]> for &'a Name {
 	type Error = TooLong;
 
-	fn try_from(s: &[u8]) -> Result<Self, Self::Error> {
+	fn try_from(s: &'a [u8]) -> Result<Self, Self::Error> {
 		// SAFETY: Name is repr(transparent)
 		(s.len() < 256)
 			.then(|| unsafe { &*(s as *const _ as *const _) })
@@ -39,10 +39,10 @@ impl TryFrom<&[u8]> for &Name {
 	}
 }
 
-impl TryFrom<&str> for &Name {
+impl<'a> TryFrom<&'a str> for &'a Name {
 	type Error = TooLong;
 
-	fn try_from(s: &str) -> Result<Self, Self::Error> {
+	fn try_from(s: &'a str) -> Result<Self, Self::Error> {
 		s.as_bytes().try_into()
 	}
 }
@@ -51,15 +51,15 @@ impl TryFrom<&str> for &Name {
 macro_rules! from {
 	{ $($n:literal)* } => {
 		$(
-			impl From<&[u8; $n]> for &Name {
-				fn from(s: &[u8; $n]) -> Self {
+			impl<'a> From<&'a [u8; $n]> for &'a Name {
+				fn from(s: &'a [u8; $n]) -> Self {
 					// SAFETY: Name is repr(transparent)
 					unsafe { &*(<&[u8]>::from(s) as *const _ as *const _) }
 				}
 			}
 
-			impl From<&mut [u8; $n]> for &mut Name {
-				fn from(s: &mut [u8; $n]) -> Self {
+			impl<'a> From<&'a mut [u8; $n]> for &'a mut Name {
+				fn from(s: &'a mut [u8; $n]) -> Self {
 					// SAFETY: Name is repr(transparent)
 					unsafe { &mut *(<&mut [u8]>::from(s) as *mut _ as *mut _) }
 				}
@@ -85,6 +85,13 @@ impl DerefMut for Name {
 }
 
 impl fmt::Debug for Name {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		// TODO use Utf8Lossy when it becomes stable.
+		String::from_utf8_lossy(self).fmt(f)
+	}
+}
+
+impl fmt::Display for Name {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		// TODO use Utf8Lossy when it becomes stable.
 		String::from_utf8_lossy(self).fmt(f)
