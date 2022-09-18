@@ -1,6 +1,9 @@
-use core::{
-	fmt,
-	ops::{Deref, DerefMut},
+use {
+	core::{
+		fmt,
+		ops::{Deref, DerefMut},
+	},
+	std::{rc::Rc, sync::Arc},
 };
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,6 +86,21 @@ impl DerefMut for Name {
 		&mut self.0
 	}
 }
+
+macro_rules! alloc {
+	($($ty:ident)*) => {
+		$(
+			impl From<&Name> for $ty<Name> {
+				fn from(name: &Name) -> Self {
+					// SAFETY: Name is repr(transparent)
+					unsafe { $ty::from_raw($ty::into_raw($ty::<[u8]>::from(&name.0)) as *mut _) }
+				}
+			}
+		)*
+	};
+}
+
+alloc!(Box Rc Arc);
 
 impl fmt::Debug for Name {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

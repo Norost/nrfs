@@ -613,6 +613,10 @@ impl<'a, S: Storage> Dir<'a, S> {
 	pub fn len(&self) -> u32 {
 		self.entry_count
 	}
+
+	pub fn id(&self) -> u64 {
+		self.id
+	}
 }
 
 impl<S: Storage> fmt::Debug for Dir<'_, S>
@@ -695,6 +699,13 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 			}
 			_ => return None,
 		})
+	}
+
+	pub fn dir_id(&self) -> Option<u64> {
+		match self.ty {
+			Ok(Type::Dir { id }) => Some(id),
+			_ => None,
+		}
 	}
 }
 

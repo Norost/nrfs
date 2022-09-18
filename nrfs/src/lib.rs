@@ -44,6 +44,10 @@ impl<S: Storage> Nrfs<S> {
 		self.storage.finish_transaction().map_err(Error::Nros)
 	}
 
+	pub fn get_dir(&mut self, id: u64) -> Result<Dir<'_, S>, Error<S>> {
+		Dir::load(self, id)
+	}
+
 	fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
 		self.storage
 			.read_object(id, offset, buf)
@@ -74,6 +78,10 @@ impl<S: Storage> Nrfs<S> {
 
 	fn length(&mut self, id: u64) -> Result<u64, Error<S>> {
 		self.storage.object_len(id).map_err(Error::Nros)
+	}
+
+	pub fn storage(&self) -> &S {
+		&self.storage.storage()
 	}
 }
 

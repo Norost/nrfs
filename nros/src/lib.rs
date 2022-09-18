@@ -160,6 +160,10 @@ impl<S: Storage> Nros<S> {
 			.object_list
 			.write(&mut self.storage, id * 64, rec.0.as_ref())
 	}
+
+	pub fn storage(&self) -> &S {
+		&self.storage.storage
+	}
 }
 
 impl<S: Storage> fmt::Debug for Nros<S> {
