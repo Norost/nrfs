@@ -79,6 +79,13 @@ impl<'a, 'b, S: Storage> File<'a, 'b, S> {
 			}
 		}
 	}
+
+	pub fn len(&mut self) -> Result<u64, Error<S>> {
+		match &self.inner {
+			Inner::Object { id, .. } => self.dir.fs.storage.object_len(*id).map_err(Error::Nros),
+			Inner::Embed { length, .. } => Ok((*length).into()),
+		}
+	}
 }
 
 impl<S: Storage> fmt::Debug for File<'_, '_, S>

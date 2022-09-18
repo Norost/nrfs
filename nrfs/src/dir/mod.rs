@@ -165,7 +165,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// Create a new directory.
 	///
 	/// This fails if an entry with the given name already exists.
-	pub fn create_dir(&'a mut self, name: &Name) -> Result<Option<Self>, Error<S>> {
+	pub fn create_dir<'s>(&'s mut self, name: &Name) -> Result<Option<Dir<'s, S>>, Error<S>> {
 		let d = Dir::new(self.fs, [0; 16])?.data;
 		let e = NewEntry { name, ty: Type::Dir { id: d.id } };
 		self.insert(e)
@@ -181,7 +181,10 @@ impl<'a, S: Storage> Dir<'a, S> {
 			.map(|r| r.map(|i| File::from_embed(self, true, i, 0, 0)))
 	}
 
-	pub fn next_from(&mut self, mut index: u32) -> Result<Option<(Entry, Option<u32>)>, Error<S>> {
+	pub fn next_from<'b>(
+		&'b mut self,
+		mut index: u32,
+	) -> Result<Option<(Entry<'a, 'b, S>, Option<u32>)>, Error<S>> {
 		while u64::from(index) < self.capacity() {
 			// Get standard info
 			let e = self.get(index)?;
@@ -205,7 +208,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 		Ok(None)
 	}
 
-	pub fn find(&mut self, name: &Name) -> Result<Option<Entry>, Error<S>> {
+	pub fn find<'b>(&'b mut self, name: &Name) -> Result<Option<Entry<'a, 'b, S>>, Error<S>> {
 		self.find_index(name)?
 			.map(|(i, e)| self.get_ext(i, e, name))
 			.transpose()
@@ -233,8 +236,17 @@ impl<'a, S: Storage> Dir<'a, S> {
 		let mut key = [0; 255];
 		key[..entry.name.len()].copy_from_slice(entry.name);
 
-		let e = Entry { ty: Ok(entry.ty), key, key_len: entry.name.len_u8(), unix: None };
-		self.set_ext(index, &e)?;
+		// Store name
+		let name_offset = self.alloc(entry.name.len_u8().into())?;
+		self.fs.write_all(self.id + 1, name_offset, entry.name)?;
+
+		let e = RawEntry {
+			key_offset: name_offset,
+			key_len: entry.name.len_u8(),
+			ty: entry.ty.to_ty(),
+			id_or_offset: entry.ty.to_data(),
+		};
+		self.set_ext(index, &e, None)?;
 		self.set_entry_count(self.entry_count + 1)?;
 		Ok(Some(index))
 	}
@@ -314,7 +326,12 @@ impl<'a, S: Storage> Dir<'a, S> {
 	///
 	/// If the index is out of range.
 	/// If the name is longer than 255 bytes.
-	fn get_ext(&mut self, index: u32, entry: RawEntry, name: &[u8]) -> Result<Entry, Error<S>> {
+	fn get_ext<'b>(
+		&'b mut self,
+		index: u32,
+		entry: RawEntry,
+		name: &[u8],
+	) -> Result<Entry<'a, 'b, S>, Error<S>> {
 		let offt = self.get_offset(index);
 
 		// Get unix info
@@ -345,7 +362,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 			}),
 			n => Err(n),
 		};
-		Ok(Entry { ty, key_len, key, unix })
+		Ok(Entry { dir: self, index, ty, key_len, key, unix })
 	}
 
 	/// Set the type and offset of an entry.
@@ -356,7 +373,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 		debug_assert!(e.ty != 0);
 		e.ty = ty.to_ty();
 		e.id_or_offset = ty.to_data();
-		self.set(index, e).map(|_: u64| ())
+		self.set(index, &e).map(|_: u64| ())
 	}
 
 	/// Set the raw standard info for an entry.
@@ -366,7 +383,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// # Panics
 	///
 	/// If the index is out of range.
-	fn set(&mut self, index: u32, entry: RawEntry) -> Result<u64, Error<S>> {
+	fn set(&mut self, index: u32, entry: &RawEntry) -> Result<u64, Error<S>> {
 		let offt = self.get_offset(index);
 		let mut buf = [0; 16];
 		buf[..8].copy_from_slice(&entry.key_offset.to_le_bytes());
@@ -385,32 +402,17 @@ impl<'a, S: Storage> Dir<'a, S> {
 	///
 	/// If the index is out of range.
 	/// If the name is longer than 255 bytes.
-	fn set_ext(&mut self, index: u32, entry: &Entry) -> Result<(), Error<S>> {
-		// Store key
-		let key_offset = self.alloc(entry.key_len.into())?;
-		self.fs
-			.write_all(self.id + 1, key_offset, &entry.key[..entry.key_len.into()])?;
-
-		let (ty, id_or_offset) = match entry.ty {
-			Ok(Type::File { id }) => (TY_FILE, id),
-			Ok(Type::Dir { id }) => (TY_DIR, id),
-			Ok(Type::Sym { id }) => (TY_SYM, id),
-			Ok(Type::EmbedFile { offset, length }) => {
-				(TY_EMBED_FILE, offset | u64::from(length) << 48)
-			}
-			Ok(Type::EmbedSym { offset, length }) => {
-				(TY_EMBED_SYM, offset | u64::from(length) << 48)
-			}
-			Err(n) => (n, 0),
-		};
-
-		// Set entry itself
-		let e = RawEntry { key_len: entry.key_len, key_offset, id_or_offset, ty };
-		let offt = self.set(index, e)?;
+	fn set_ext(
+		&mut self,
+		index: u32,
+		entry: &RawEntry,
+		unix: Option<ext::unix::Entry>,
+	) -> Result<(), Error<S>> {
+		let offt = self.set(index, entry)?;
 
 		// Set unix info
 		if let Some(o) = self.unix {
-			let u = entry.unix.as_ref().map_or(0, |u| u.permissions);
+			let u = unix.map_or(0, |u| u.permissions);
 			self.fs
 				.write_all(self.id, offt + u64::from(o), &u.to_le_bytes())?;
 		}
@@ -607,6 +609,10 @@ impl<'a, S: Storage> Dir<'a, S> {
 		self.entry_count = count;
 		Ok(())
 	}
+
+	pub fn len(&self) -> u32 {
+		self.entry_count
+	}
 }
 
 impl<S: Storage> fmt::Debug for Dir<'_, S>
@@ -638,28 +644,55 @@ struct RawEntry {
 	ty: u8,
 }
 
-pub struct Entry {
+pub struct Entry<'a, 'b, S: Storage> {
+	dir: &'b mut Dir<'a, S>,
+	index: u32,
 	ty: Result<Type, u8>,
 	key_len: u8,
 	key: [u8; 255],
 	unix: Option<ext::unix::Entry>,
 }
 
-impl Entry {
-	pub fn read<S>(&self, fs: &mut Nrfs<S>, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>>
-	where
-		S: Storage,
-	{
-		match &self.ty {
-			Ok(Type::File { id }) => fs.read(*id, offset, buf),
-			_ => todo!(),
-		}
+impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
+	pub fn name(&self) -> &Name {
+		self.key[..self.key_len.into()].try_into().unwrap()
+	}
+
+	pub fn is_file(&self) -> bool {
+		matches!(&self.ty, Ok(Type::File { .. }) | Ok(Type::EmbedFile { .. }))
+	}
+
+	pub fn is_dir(&self) -> bool {
+		matches!(&self.ty, Ok(Type::Dir { .. }))
+	}
+
+	pub fn is_sym(&self) -> bool {
+		matches!(&self.ty, Ok(Type::Sym { .. }) | Ok(Type::EmbedSym { .. }))
+	}
+
+	pub fn as_file(&mut self) -> Option<File<'a, '_, S>> {
+		Some(match self.ty {
+			Ok(Type::File { id }) => File::from_obj(self.dir, false, id, self.index),
+			Ok(Type::EmbedFile { offset, length }) => {
+				File::from_embed(self.dir, false, self.index, offset, length)
+			}
+			_ => return None,
+		})
+	}
+
+	pub fn as_dir(&mut self) -> Option<Result<Dir<'_, S>, Error<S>>> {
+		Some(match self.ty {
+			Ok(Type::Dir { id }) => Dir::load(self.dir.fs, id),
+			_ => return None,
+		})
 	}
 }
 
-impl fmt::Debug for Entry {
+impl<S: Storage + fmt::Debug> fmt::Debug for Entry<'_, '_, S> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Entry))
+			.field("dir", self.dir)
+			.field("index", &self.index)
 			.field("ty", &self.ty)
 			// TODO use Utf8Lossy when it is stable.
 			.field(

@@ -8,5 +8,4 @@ version = "3.2.21"
 features = ["derive"]
 
 [dependencies.nrfs]
-package = "nros"
-path = "../nros"
+path = "../nrfs"

@@ -89,10 +89,10 @@ fn create_file() {
 	f.write_all(0, b"Hello, world!").unwrap();
 
 	assert!(d.find(b"I do not exist".into()).unwrap().is_none());
-	let g = d.find(b"test.txt".into()).unwrap().unwrap();
+	let mut g = d.find(b"test.txt".into()).unwrap().unwrap();
 
 	let mut buf = [0; 32];
-	let l = g.read(&mut fs, 0, &mut buf).unwrap();
+	let l = g.as_file().unwrap().read(0, &mut buf).unwrap();
 	assert_eq!(core::str::from_utf8(&buf[..l]), Ok("Hello, world!"));
 }
 
@@ -112,10 +112,10 @@ fn create_many_files() {
 			.unwrap();
 		f.write_all(0, contents.as_bytes()).unwrap();
 
-		let g = d.find((&*name).try_into().unwrap()).unwrap().unwrap();
+		let mut g = d.find((&*name).try_into().unwrap()).unwrap().unwrap();
 
 		let mut buf = [0; 32];
-		let l = g.read(&mut fs, 0, &mut buf).unwrap();
+		let l = g.as_file().unwrap().read(0, &mut buf).unwrap();
 		assert_eq!(
 			core::str::from_utf8(&buf[..l]),
 			Ok(&*contents),
@@ -143,10 +143,10 @@ fn create_many_files() {
 
 		let mut d = fs.root_dir().unwrap();
 
-		let g = d.find((&*name).try_into().unwrap()).unwrap().unwrap();
+		let mut g = d.find((&*name).try_into().unwrap()).unwrap().unwrap();
 
 		let mut buf = [0; 32];
-		let l = g.read(&mut fs, 0, &mut buf).unwrap();
+		let l = g.as_file().unwrap().read(0, &mut buf).unwrap();
 		assert_eq!(
 			core::str::from_utf8(&buf[..l]),
 			Ok(&*contents),

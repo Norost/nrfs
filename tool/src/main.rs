@@ -3,7 +3,7 @@ use {
 	std::{
 		fs::{self, File, OpenOptions},
 		io::{self, Read as _, Seek as _, SeekFrom, Write as _},
-		str::FromStr,
+		path::{Path, PathBuf},
 	},
 };
 
@@ -14,7 +14,9 @@ struct Args {
 	command: Command,
 	file: String,
 	#[clap(short)]
-	directory: Option<String>,
+	directory: Option<PathBuf>,
+	#[clap(short, long, default_value_t = 17)]
+	block_size_p2: u8,
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -33,46 +35,75 @@ fn main() {
 }
 
 fn make(args: Args) {
-	let mut f = OpenOptions::new()
+	let f = OpenOptions::new()
 		.truncate(false)
 		.read(true)
 		.write(true)
 		.open(args.file)
 		.unwrap();
-	let h = nrfs::header::Header::default();
-	f.write_all(h.as_ref()).unwrap();
-	let mut nrfs = nrfs::Nrfs::load(S::new(f)).unwrap();
 
+	let mut nrfs = nrfs::Nrfs::new(S::new(f), args.block_size_p2).unwrap();
+
+	let mut root = nrfs.root_dir().unwrap();
 	if let Some(d) = args.directory {
-		for f in fs::read_dir(d).expect("failed to read dir") {
-			match f {
-				Ok(f) if f.metadata().unwrap().is_file() => {
-					let f = fs::read(f.path()).unwrap();
-					let id = nrfs.new_object().unwrap();
-					nrfs.write_object(id, 0, &f).unwrap();
-				}
-				Ok(_) => {}
-				Err(e) => todo!("{:?}", e),
-			}
-		}
+		add_files(&mut root, &d);
 		nrfs.finish_transaction().unwrap();
 	}
-	dbg!(nrfs);
+
+	fn add_files(root: &mut nrfs::Dir<'_, S>, from: &Path) {
+		for f in fs::read_dir(from).expect("failed to read dir") {
+			let f = f.unwrap();
+			let m = f.metadata().unwrap();
+			let n = f.file_name();
+			let n = n.to_str().unwrap().try_into().unwrap();
+			if m.is_file() {
+				let c = fs::read(f.path()).unwrap();
+				let mut f = root.create_file(n).unwrap().unwrap();
+				f.write_all(0, &c).unwrap();
+			} else if m.is_dir() {
+				let mut d = root.create_dir(n).unwrap().unwrap();
+				add_files(&mut d, &f.path())
+			} else {
+				todo!()
+			}
+		}
+	}
 }
 
 fn dump(args: Args) {
 	let f = File::open(args.file).unwrap();
 	let mut nrfs = nrfs::Nrfs::load(S::new(f)).unwrap();
-	dbg!(&nrfs);
-	for id in 0..nrfs.object_count() {
-		let len = nrfs.object_len(id).unwrap();
-		dbg!(len);
-		let mut buf = vec![0; len as _];
-		let l = nrfs.read_object(id, 0, &mut buf).unwrap();
-		assert_eq!(l, len as usize);
-		dbg!();
-		std::io::stdout().write_all(&buf).unwrap();
-		dbg!();
+	let mut root = nrfs.root_dir().unwrap();
+	list_files(&mut root, 0);
+
+	fn list_files(root: &mut nrfs::Dir<'_, S>, indent: usize) {
+		let mut i = Some(0);
+		while let Some((mut e, next_i)) = i.and_then(|i| root.next_from(i).unwrap()) {
+			let name = String::from_utf8_lossy(e.name()).into_owned();
+			if e.is_file() {
+				let mut f = e.as_file().unwrap();
+				println!(
+					"{:>8}  {:>indent$}f {:<32}",
+					f.len().unwrap(),
+					"",
+					name,
+					indent = indent
+				);
+			} else if e.is_dir() {
+				let mut d = e.as_dir().unwrap().unwrap();
+				println!(
+					"{:>8}  {:>indent$}d {:<32}",
+					d.len(),
+					"",
+					name,
+					indent = indent
+				);
+				list_files(&mut d, indent + 2);
+			} else if e.is_sym() {
+				println!("{:>indent$}s {:<32}", "", name, indent = 10 + indent);
+			}
+			i = next_i
+		}
 	}
 }
 
@@ -109,7 +140,7 @@ impl nrfs::Storage for S {
 
 	fn write(&mut self, lba: u64, blocks: usize) -> Result<Box<dyn nrfs::Write + '_>, Self::Error> {
 		let bsp2 = self.block_size_p2();
-		let buf = Vec::with_capacity(blocks << bsp2);
+		let buf = vec![0; blocks << bsp2];
 		Ok(Box::new(W { s: self, offset: lba << bsp2, buf }))
 	}
 
