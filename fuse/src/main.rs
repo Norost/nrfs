@@ -13,8 +13,8 @@ use {
 };
 
 const TTL: Duration = Duration::MAX;
-// Because 1 is reserved for the root dir
-const DIR_INO_OFFSET: u64 = 2;
+// Because 1 is reserved for the root dir, but nrfs uses 0 for the root dir
+const DIR_INO_OFFSET: u64 = 1;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let mut a = std::env::args().skip(1);
@@ -37,8 +37,8 @@ struct Fs {
 }
 
 impl Fs {
-	fn new(mut io: File) -> Self {
-		let mut sto = nrfs::Nrfs::load(S::new(io)).unwrap();
+	fn new(io: File) -> Self {
+		let sto = nrfs::Nrfs::load(S::new(io)).unwrap();
 		Self { sto, ino: Default::default(), ino_counter: 1 << 63 }
 	}
 
@@ -83,11 +83,7 @@ impl Fs {
 impl Filesystem for Fs {
 	fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
 		debug_assert!(parent & 1 << 63 == 0, "parent is not a directory");
-		let mut d = if parent == 1 {
-			self.sto.root_dir().unwrap()
-		} else {
-			self.sto.get_dir(parent - DIR_INO_OFFSET).unwrap()
-		};
+		let mut d = self.sto.get_dir(parent - DIR_INO_OFFSET).unwrap();
 		match name
 			.as_bytes()
 			.try_into()
@@ -119,11 +115,7 @@ impl Filesystem for Fs {
 
 	fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
 		if self.is_dir(ino) {
-			let d = if ino == 1 {
-				self.sto.root_dir().unwrap()
-			} else {
-				self.sto.get_dir(ino - DIR_INO_OFFSET).unwrap()
-			};
+			let d = self.sto.get_dir(ino - DIR_INO_OFFSET).unwrap();
 			let l = d.len().into();
 			reply.attr(&TTL, &self.attr(FileType::Directory, l, ino));
 			return;
@@ -151,7 +143,7 @@ impl Filesystem for Fs {
 		_lock: Option<u64>,
 		reply: ReplyData,
 	) {
-		let mut buf = [0; 1 << 15];
+		let mut buf = vec![0; size as _];
 		let (dir, name) = self.ino.get(&ino).unwrap();
 		let mut d = self.sto.get_dir(*dir).unwrap();
 		let mut e = d.find(name).unwrap().unwrap();
@@ -192,11 +184,7 @@ impl Filesystem for Fs {
 			offset += 1;
 		}
 
-		let mut d = if ino == 1 {
-			self.sto.root_dir().unwrap()
-		} else {
-			self.sto.get_dir(ino - DIR_INO_OFFSET).unwrap()
-		};
+		let mut d = self.sto.get_dir(ino - DIR_INO_OFFSET).unwrap();
 		let d_id = d.id();
 
 		let mut index = Some(offset as u32 - 2);
