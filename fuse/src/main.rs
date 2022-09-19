@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	fuser::mount2(
 		Fs::new(File::open(&f)?),
 		m,
-		&[MountOption::RO, MountOption::FSName("nrofs".into())],
+		&[MountOption::FSName("nrfs".into())],
 	)?;
 	Ok(())
 }
@@ -152,6 +152,26 @@ impl Filesystem for Fs {
 		reply.data(&buf[..l]);
 	}
 
+	fn write(
+		&mut self,
+		_req: &Request,
+		ino: u64,
+		_fh: u64,
+		offset: i64,
+		data: &[u8],
+		_write_flags: u32,
+		_flags: i32,
+		_lock_owner: Option<u64>,
+		reply: ReplyWrite,
+	) {
+		let (dir, name) = self.ino.get(&ino).unwrap();
+		let mut d = self.sto.get_dir(*dir).unwrap();
+		let mut e = d.find(name).unwrap().unwrap();
+		let mut f = e.as_file().unwrap();
+		let l = f.write(offset as _, data).unwrap();
+		reply.written(l as _);
+	}
+
 	fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
 		let mut buf = [0; 1 << 15];
 		let (dir, name) = self.ino.get(&ino).unwrap();
@@ -212,6 +232,27 @@ impl Filesystem for Fs {
 		}
 
 		reply.ok();
+	}
+
+	fn create(
+		&mut self,
+		_req: &Request,
+		parent: u64,
+		name: &OsStr,
+		_mode: u32,
+		_umask: u32,
+		_flags: i32,
+		reply: ReplyCreate,
+	) {
+		let dir = parent - DIR_INO_OFFSET;
+		if let Ok(name) = name.as_bytes().try_into() {
+			let mut d = self.sto.get_dir(dir).unwrap();
+			d.create_file(name).unwrap();
+			let ino = Self::add_ino(&mut self.ino, &mut self.ino_counter, dir, name.into());
+			reply.created(&TTL, &self.attr(FileType::RegularFile, 0, ino), 0, 0, 0);
+		} else {
+			reply.error(libc::ENAMETOOLONG);
+		}
 	}
 }
 
