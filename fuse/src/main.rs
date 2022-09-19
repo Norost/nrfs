@@ -350,6 +350,8 @@ impl Filesystem for Fs {
 		let mut f = e.as_file().unwrap();
 		let l = f.write(offset as _, data).unwrap();
 		reply.written(l as _);
+
+		self.sto.finish_transaction().unwrap();
 	}
 
 	fn readlink(&mut self, req: &Request, ino: u64, reply: ReplyData) {
