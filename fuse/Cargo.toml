@@ -11,3 +11,13 @@ version = "*"
 
 [dependencies.nrfs]
 path = "../nrfs"
+
+[dependencies.arena]
+path = "../../arena"
+
+[dependencies.env_logger]
+version = "0.9"
+
+[dependencies.log]
+version = "0.4.6"
+features = ["max_level_trace", "release_max_level_debug"]
