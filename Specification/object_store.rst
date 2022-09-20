@@ -4,11 +4,13 @@ Object store
 Features
 --------
 
-* Error detection & correction (with mirrors only!)
+* Error detection
+* Error correction (with mirrors only!)
 * Compression
 * Transactional updates
 * Mirroring
 * Defragmentation
+* Sparse objects
 
 Transactions
 ------------
