@@ -58,51 +58,60 @@ A directory is a special type of file that points to other files.
 It consists of two objects: one object with a header and hashmap at ID
 and one object for "heap" data at ID + 1 [#two_objects]_
 
-.. [#two_objects] The map and heap are split so the map can grow without
-   needing to shift the heap data or leave large holes.
-   Fixing the heap ID relative to the map's ID allows loading it concurrently.
+.. [#two_objects]
+
+  The map and heap are split so the map can grow without needing to shift the
+  heap data or leave large holes.
+  Fixing the heap ID relative to the map's ID allows loading it concurrently.
 
 A hashmap [#hashmap]_ is used to keep track of files.
 
-.. [#hashmap] Hashmaps are used as they are very simple to implement, scale
-   well and, contrary some expectations, perform well.
-   Two situations were considered:
-   * A large directory is iterated.
-   * A large directory where random entries are accessed.
-   The following data structures were considered:
-   * Plain array.
-     These have notoriously poor performance in both cases.
-   * BTree.
-     These have good performance in general and are commonly used, but
-     are relatively difficult to implement and suffer from indirection.
-   * Hashmap. These have good performance in general.
-     They are not commonly used as they require a contiguous region of storage.
-     However, the underlying object storage makes this practical.
-     The main drawbacks are:
-     * O(n) worst-case lookup.
-       This is not expected to be a problem win the general case, especially
-       with a cryptographic hash.
-     * Growing is slow, as it requires a full reallocation.
-       This may result in performance hiccups when growing an extremely large
-       directory, though this is not expected to be a problem for all but the
-       largest directories (billions of entries).
+.. [#hashmap]
+
+  Hashmaps are used as they are very simple to implement.
+  They also scale and perform well.
+  Two situations were considered:
+
+  * A large directory is iterated.
+  * A large directory where random entries are accessed.
+
+  The following data structures were considered:
+
+  * Plain array.
+    These have notoriously poor performance in both cases.
+  * BTree.
+    These have good performance in general and are commonly used, but
+    are relatively difficult to implement and suffer from indirection.
+  * Hashmap. These have good performance in general.
+    They are not commonly used as they require a contiguous region of storage.
+    However, the underlying object storage makes this practical.
+    The main drawbacks are:
+
+    * O(n) worst-case lookup.
+      This is not expected to be a problem in the general case, especially
+      with a cryptographic hash.
+    * Growing is slow, as it requires a full reallocation.
+      This may result in performance hiccups when growing an extremely large
+      directory, though this is not expected to be a problem for all but the
+      largest directories (billions of entries).
 
 Every directory begins with a variable-sized byte header.
 
-Header
-+------+------+------+------+------+------+------+------+------+
-| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 |        Entry count        | MLen | HAlg | ELen | HLen |
-+------+---------------------------+------+------+------+------+
-|    8 |                                                       |
-+------+                          Key                          |
-|   16 |                                                       |
-+------+-------------------------------------------------------+
-|   24 |                      Extensions                       |
-+------+-------------------------------------------------------+
-|  ... |                          ...                          |
-+------+-------------------------------------------------------+
+.. table:: Header
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |        Entry count        | MLen | HAlg | ELen | HLen |
+  +------+---------------------------+------+------+------+------+
+  |    8 |                                                       |
+  +------+                          Key                          |
+  |   16 |                                                       |
+  +------+-------------------------------------------------------+
+  |   24 |                      Extensions                       |
+  +------+-------------------------------------------------------+
+  |  ... |                          ...                          |
+  +------+-------------------------------------------------------+
 
 HLen and ELen are in units of 8 bytes.
 MLen represents a power of 2.
@@ -114,56 +123,60 @@ Hash algorithms are:
 
 * 1: SipHash13
 
-Extension header
-+------+------+------+
-| Byte |    1 |    0 |
-+======+======+======+
-|    0 | DLen | NLen |
-+------+------+------+
-|    2 |    Name     |
-+------+-------------+
-|  N+2 |    Data     |
-+------+-------------+
+.. table:: Extension header
 
-Regular entry
-+------+------+------+------+------+------+------+------+------+
-| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 | Type | KLen |               Key offset                |
-+------+------+------+-----------------------------------------+
-|    8 |                     Object index                      |
-+------+-------------------------------------------------------+
-|   16 |                    Extension data                     |
-+------+-------------------------------------------------------+
-|  ... |                          ...                          |
-+------+-------------------------------------------------------+
+  +------+------+------+
+  | Byte |    1 |    0 |
+  +======+======+======+
+  |    0 | DLen | NLen |
+  +------+------+------+
+  |    2 |    Name     |
+  +------+-------------+
+  |  N+2 |    Data     |
+  +------+-------------+
 
-Embedded entry
-+------+------+------+------+------+------+------+------+------+
-| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 | Type | KLen |               Key offset                |
-+------+------+------+-----------------------------------------+
-|    8 | Data Length |               Data offset               |
-+------+-------------------------------------------------------+
-|   16 |                    Extension data                     |
-+------+-------------------------------------------------------+
-|  ... |                          ...                          |
-+------+-------------------------------------------------------+
+.. table:: Regular entry
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 | Type | KLen |               Key offset                |
+  +------+------+------+-----------------------------------------+
+  |    8 |                     Object index                      |
+  +------+-------------------------------------------------------+
+  |   16 |                    Extension data                     |
+  +------+-------------------------------------------------------+
+  |  ... |                          ...                          |
+  +------+-------------------------------------------------------+
+
+.. table:: Embedded entry
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 | Type | KLen |               Key offset                |
+  +------+------+------+-----------------------------------------+
+  |    8 | Data Length |               Data offset               |
+  +------+-------------+-----------------------------------------+
+  |   16 |                    Extension data                     |
+  +------+-------------------------------------------------------+
+  |  ... |                          ...                          |
+  +------+-------------------------------------------------------+
 
 If the type is 0, the entry is empty.
 
 After the hashmap comes an allocation log.
 Each entry in the log indicates a single allocation or deallocation.
 
-Log entry
-+------+------+------+------+------+------+------+------+------+
-| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 |                        Offset                         |
-+------+-------------------------------------------------------+
-|    8 |                        Length                         |
-+------+-------------------------------------------------------+
+.. table:: Log entry
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                        Offset                         |
+  +------+-------------------------------------------------------+
+  |    8 |                        Length                         |
+  +------+-------------------------------------------------------+
 
 The high bit of length indicates whether the entry is an allocation (0)
 or deallocation (1).
@@ -181,26 +194,31 @@ name: "unix"
 
 The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
 
-Extension data
-+------+------+------+
-| Byte |    1 |    0 |
-+======+======+======+
+.. table:: Extension data
 
-Entry data
-+------+------+------+------+------+------+------+------+------+
-| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 |         GID        |         UID        | Permissions |
-+------+--------------------+--------------------+-------------+
+  +------+------+------+
+  | Byte |    1 |    0 |
+  +======+======+======+
+  |    0 |   Offset    |
+  +------+-------------+
 
-Permissions
-+------+------+------+------+------+------+------+------+------+
-| Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 |   User WX   |     Group RWX      |     Global RWX     |
-+------+------+------+----------------------------------+------+
-|    8 |                                                | U. R |
-+------+------------------------------------------------+------+
+.. table:: Entry data
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |         GID        |         UID        | Permissions |
+  +------+--------------------+--------------------+-------------+
+
+.. table:: Permissions
+
+  +------+------+------+------+------+------+------+------+------+
+  | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |   User WX   |     Group RWX      |     Global RWX     |
+  +------+------+------+----------------------------------+------+
+  |    8 |                                                | U. R |
+  +------+------------------------------------------------+------+
 
 
 Modification time
@@ -213,14 +231,18 @@ The modification time extension adds a signed 64-bit time stamp to all entries.
 It is expressed in milliseconds, which gives it a range of ~584 million years.
 The timestamp is relative to the UNIX epoch.
 
-Extension data
-+------+------+------+
-| Byte |    1 |    0 |
-+======+======+======+
+.. table:: Extension data
 
-Entry data
-+------+------+------+------+------+------+------+------+------+
-| Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-+======+======+======+======+======+======+======+======+======+
-|    0 |                       Timestamp                       |
-+------+-------------------------------------------------------+
+  +------+------+------+
+  | Byte |    1 |    0 |
+  +======+======+======+
+  |    0 |   Offset    |
+  +------+-------------+
+
+.. table:: Entry data
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                       Timestamp                       |
+  +------+-------------------------------------------------------+
