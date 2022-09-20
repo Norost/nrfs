@@ -53,9 +53,7 @@ impl<S: Storage> Nrfs<S> {
 	}
 
 	fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
-		self.storage
-			.read_object(id, offset, buf)
-			.map_err(Error::Nros)
+		self.storage.read(id, offset, buf).map_err(Error::Nros)
 	}
 
 	fn read_exact(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<(), Error<S>> {
@@ -64,20 +62,24 @@ impl<S: Storage> Nrfs<S> {
 	}
 
 	fn write(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<usize, Error<S>> {
-		self.storage
-			.write_object(id, offset, data)
-			.map(|()| data.len())
-			.map_err(Error::Nros)
+		self.storage.write(id, offset, data).map_err(Error::Nros)
 	}
 
 	fn write_all(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
-		self.storage
-			.write_object(id, offset, data)
-			.map_err(Error::Nros)
+		self.write(id, offset, data)
+			.and_then(|l| (l == data.len()).then_some(()).ok_or(Error::Truncated))
 	}
 
-	fn truncate(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
-		self.storage.truncate_object(id, len).map_err(Error::Nros)
+	/// This function automatically grows the object if it can't contain the data.
+	fn write_grow(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
+		if self.length(id)? < offset + data.len() as u64 {
+			self.resize(id, offset + data.len() as u64)?;
+		}
+		self.write_all(id, offset, data)
+	}
+
+	fn resize(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
+		self.storage.resize(id, len).map_err(Error::Nros)
 	}
 
 	fn length(&mut self, id: u64) -> Result<u64, Error<S>> {

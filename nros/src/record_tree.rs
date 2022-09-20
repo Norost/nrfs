@@ -4,9 +4,96 @@ use crate::{record::Record, storage::Storage, Error, RecordCache};
 #[repr(transparent)]
 pub struct RecordTree(pub Record);
 
+struct NodeRef<'a>(&'a Record);
+
+struct NodeMut<'a>(&'a mut Record);
+
 impl RecordTree {
+	/// # Note
+	///
+	/// `offset + data.len()` must not exceed [`Self::len`].
 	pub fn read<S>(
 		&self,
+		sto: &mut RecordCache<S>,
+		offset: u64,
+		buf: &mut [u8],
+	) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		NodeRef(&self.0).read(self.len(), sto, offset, buf)
+	}
+
+	/// # Note
+	///
+	/// The record tree does *not* automatically grow. Use [`Self::resize`] to grow the tree.
+	///
+	/// `offset + data.len()` must not exceed [`Self::len`].
+	pub fn write<S>(
+		&mut self,
+		sto: &mut RecordCache<S>,
+		offset: u64,
+		data: &[u8],
+	) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		let len = self.len();
+		NodeMut(&mut self.0).write(len, sto, offset, data)?;
+		self.0.total_length = len.into();
+		Ok(())
+	}
+
+	pub fn resize<S>(&mut self, sto: &mut RecordCache<S>, len: u64) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		if len < self.len() {
+			self.shrink(sto, len)
+		} else {
+			self.grow(sto, len)
+		}
+	}
+
+	fn shrink<S>(&mut self, sto: &mut RecordCache<S>, new_len: u64) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		let len = self.len();
+		NodeMut(&mut self.0).shrink(len, sto, new_len)?;
+		self.0.total_length = new_len.into();
+		Ok(())
+	}
+
+	fn grow<S>(&mut self, sto: &mut RecordCache<S>, len: u64) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		// Count how many levels need to be added.
+		let (old_depth, _) = depth(self.len(), sto);
+		self.0.total_length = len.into();
+		let (new_depth, _) = depth(self.len(), sto);
+		for _ in old_depth..new_depth {
+			let mut w = sto.write(&Record::default())?;
+			set(&mut w, 0, &self.0);
+			self.0 = w.finish()?;
+		}
+		self.0.total_length = len.into();
+		Ok(())
+	}
+
+	pub fn len(&self) -> u64 {
+		self.0.total_length.into()
+	}
+}
+
+impl NodeRef<'_> {
+	/// # Note
+	///
+	/// `offset + data.len()` must not exceed [`Self::len`].
+	pub fn read<S>(
+		self,
+		len: u64,
 		sto: &mut RecordCache<S>,
 		offset: u64,
 		mut buf: &mut [u8],
@@ -15,34 +102,43 @@ impl RecordTree {
 		S: Storage,
 	{
 		debug_assert!(
-			offset + buf.len() as u64 <= u64::from(self.0.total_length),
+			offset + buf.len() as u64 <= len,
 			"{} + {} <= {}",
 			offset,
 			buf.len(),
-			self.0.total_length
+			len
 		);
 
-		let (chunk_size, is_leaf) = self.chunk_size(sto);
-
-		let mut i = offset / chunk_size;
-		let mut offt = offset % chunk_size;
-		while !buf.is_empty() {
-			let d;
-			(d, buf) = buf.split_at_mut(buf.len().min((chunk_size - offt) as _));
-			let rec = self.get(sto, i)?;
-			if is_leaf {
-				d.copy_from_slice(&sto.read(&rec.0)?[offt as _..][..d.len()])
-			} else {
-				rec.read(sto, offt, d)?
+		if let Some(chunk_size) = chunk_size(len, sto) {
+			let mut i = offset / chunk_size;
+			let mut offt = offset % chunk_size;
+			let r = sto.take(self.0)?;
+			while !buf.is_empty() {
+				let d;
+				let rem = chunk_size - offt;
+				(d, buf) = buf.split_at_mut(buf.len().min(rem as _));
+				NodeRef(&get(&r, i as _)).read(chunk_size, sto, offt, d)?;
+				offt = 0;
+				i += 1;
 			}
-			offt = 0;
-			i += 1;
+			sto.insert_clean(self.0, r)?
+		} else {
+			let r = sto.read(self.0)?;
+			read_from(&r, offset as _, buf);
 		}
 		Ok(())
 	}
+}
 
+impl NodeMut<'_> {
+	/// # Note
+	///
+	/// The record tree does *not* automatically grow. Use [`Self::resize`] to grow the tree.
+	///
+	/// `offset + data.len()` must not exceed [`Self::len`].
 	pub fn write<S>(
-		&mut self,
+		self,
+		len: u64,
 		sto: &mut RecordCache<S>,
 		offset: u64,
 		mut data: &[u8],
@@ -50,119 +146,141 @@ impl RecordTree {
 	where
 		S: Storage,
 	{
-		let (chunk_size, is_leaf) = self.chunk_size(sto);
+		debug_assert!(
+			offset + data.len() as u64 <= len,
+			"{} + {} <= {}",
+			offset,
+			data.len(),
+			len
+		);
 
-		let end = offset + data.len() as u64;
-
-		let mut i = offset / chunk_size;
-		let mut offt = offset % chunk_size;
-		while !data.is_empty() {
-			let d;
-			(d, data) = data.split_at(data.len().min((chunk_size - offt) as _));
-			let mut rec = self.get(sto, i)?;
-			if is_leaf {
-				let mut w = if offt == 0 && data.len() == 1 << sto.max_record_size_p2 {
-					sto.write(&rec.0)
-				} else {
-					sto.modify(&rec.0)
-				}?;
-				write_to(&mut w, offt as _, d);
-				rec = Self(w.finish()?);
+		*self.0 = if let Some(chunk_size) = chunk_size(len, sto) {
+			let mut i = offset / chunk_size;
+			let mut offt = offset % chunk_size;
+			let mut w = sto.take(self.0)?;
+			while !data.is_empty() {
+				let d;
+				let rem = chunk_size - offt;
+				(d, data) = data.split_at(data.len().min(rem as _));
+				let mut rec = get(&w, i as _);
+				NodeMut(&mut rec).write(chunk_size, sto, offt, d)?;
+				set(&mut w, i as _, &rec);
+				offt = 0;
+				i += 1;
+			}
+			sto.insert(self.0, w)
+		} else {
+			let mut w = if offset == 0 && data.len() >= len as _ {
+				sto.write(self.0)?
 			} else {
-				rec.write(sto, offt, d)?;
-			}
-			self.set(sto, i, &rec)?;
-			offt = 0;
-			i += 1;
-		}
-
-		self.0.total_length = self.0.total_length.max(end.into());
+				sto.modify(self.0)?
+			};
+			write_to(&mut w, offset as _, data);
+			w.finish()
+		}?;
 
 		Ok(())
 	}
 
-	pub fn truncate<S>(&mut self, sto: &mut RecordCache<S>, len: u64) -> Result<(), Error<S>>
+	fn shrink<S>(self, len: u64, sto: &mut RecordCache<S>, new_len: u64) -> Result<(), Error<S>>
 	where
 		S: Storage,
 	{
-		let old_len = u64::from(self.0.total_length);
-		if len < old_len {
-			let (chunk_size, is_leaf) = self.chunk_size(sto);
-			if !is_leaf {
-				let mut clen = len % chunk_size;
-				for i in len / chunk_size..old_len / chunk_size {
-					let mut rec = self.get(sto, i)?;
-					rec.truncate(sto, clen)?;
-					if clen > 0 {
-						self.set(sto, i, &rec)?;
-					}
-					clen = 0;
-				}
+		*self.0 = if let Some(chunk_size) = chunk_size(len, sto) {
+			// Remove all records that would have zero length.
+			let start = ((new_len + chunk_size - 1) / chunk_size) as usize;
+			let end = (len / chunk_size) as usize;
+			let mut w = sto.take(self.0)?;
+			for i in start..end {
+				NodeMut(&mut get(&w, i as _)).shrink(chunk_size, sto, 0)?;
 			}
-			if len == 0 {
-				self.0 = sto.write(&self.0)?.finish()?;
+			w.resize(start * 64, 0);
+			// Resize tail record, if necessary.
+			let tail = (new_len / chunk_size) as u32;
+			let clen = new_len % chunk_size;
+			if clen != 0 {
+				let mut rec = get(&w, tail);
+				NodeMut(&mut rec).shrink(clen, sto, clen)?;
+				set(&mut w, tail, &rec);
 			}
-			self.0.total_length = len.into();
-		}
-		Ok(())
-	}
-
-	pub fn len(&self) -> u64 {
-		self.0.total_length.into()
-	}
-
-	fn get<S>(&self, sto: &mut RecordCache<S>, index: u64) -> Result<Self, Error<S>>
-	where
-		S: Storage,
-	{
-		let mut rec = Record::default();
-		let i = (index * 64) as _;
-		sto.read(&self.0)?
-			.get(i..i + 64)
-			.map(|r| rec.as_mut().copy_from_slice(r));
-		Ok(Self(rec))
-	}
-
-	fn set<S>(&mut self, sto: &mut RecordCache<S>, index: u64, rec: &Self) -> Result<(), Error<S>>
-	where
-		S: Storage,
-	{
-		let mut w = sto.modify(&self.0)?;
-		write_to(w.as_mut(), (index * 64) as _, rec.0.as_ref());
-		self.0 = Record { total_length: self.0.total_length, ..w.finish()? };
-		Ok(())
-	}
-
-	/// Calculate the amount of data each chunk / child can hold.
-	/// Also returns `true` if this record is a leaf.
-	fn chunk_size<S>(&self, sto: &RecordCache<S>) -> (u64, bool)
-	where
-		S: Storage,
-	{
-		let len = self.len() >> sto.max_record_size_p2;
-
-		// mem::size_of<Record>() = 64 = 2^6
-		let lvl_shift = sto.max_record_size_p2 - 6;
-
-		let mut depth = {
-			let (mut l, mut d) = (len, 0);
-			while {
-				l >>= lvl_shift;
-				d += 1;
-				l > 0
-			} {}
-			d - 1
+			// If the tail is 0, the depth can be reduced.
+			if tail == 0 {
+				sto.write(self.0)?.finish()?;
+				get(&w, tail)
+			} else {
+				sto.insert(self.0, w)?
+			}
+		} else {
+			if new_len == 0 {
+				sto.write(self.0)?
+			} else {
+				let mut w = sto.modify(&self.0)?;
+				w.resize(new_len as _, 0);
+				w
+			}
+			.finish()?
 		};
-
-		(1 << depth * lvl_shift + sto.max_record_size_p2, depth == 0)
+		Ok(())
 	}
 }
 
-fn write_to(w: &mut Vec<u8>, offt: usize, data: &[u8]) {
-	if let Some(w) = w.get_mut(offt..offt + data.len()) {
-		w.copy_from_slice(data)
-	} else {
-		w.resize(offt, 0);
-		w.extend_from_slice(data);
+fn get(r: &[u8], index: u32) -> Record {
+	let mut rec = Record::default();
+	read_from(r, index as usize * 64, rec.as_mut());
+	rec
+}
+
+fn set(w: &mut Vec<u8>, index: u32, rec: &Record) {
+	write_to(w, index as usize * 64, rec.as_ref())
+}
+
+fn read_from(r: &[u8], offt: usize, buf: &mut [u8]) {
+	if offt >= r.len() {
+		buf.fill(0);
+		return;
 	}
+	let i = r.len().min(offt + buf.len());
+	let (l, h) = buf.split_at_mut(i - offt);
+	l.copy_from_slice(&r[offt..][..l.len()]);
+	h.fill(0);
+}
+
+fn write_to(w: &mut Vec<u8>, offt: usize, data: &[u8]) {
+	if offt + data.len() > w.len() {
+		w.resize(offt + data.len(), 0);
+	}
+	w[offt..][..data.len()].copy_from_slice(data);
+}
+
+/// Calculate the amount of data each chunk / child can hold.
+///
+/// If this returns `None` the record is a leaf and has no children.
+fn chunk_size<S>(len: u64, sto: &RecordCache<S>) -> Option<u64>
+where
+	S: Storage,
+{
+	let (depth, lvl_shift) = depth(len, sto);
+	depth.checked_sub(1).map(|d| 1 << d * lvl_shift + sto.max_record_size_p2)
+}
+
+/// Calculate the depth and amount of records per record as a power of 2
+fn depth<S>(len: u64, sto: &RecordCache<S>) -> (u8, u8)
+where
+	S: Storage,
+{
+	// The length in units of records.
+	let max_rec_size = 1 << sto.max_record_size_p2;
+	let len = (len + max_rec_size - 1) / max_rec_size;
+
+	// mem::size_of<Record>() = 64 = 2^6
+	let lvl_shift = sto.max_record_size_p2 - 6;
+
+	let (mut lvl, mut depth) = (len, 0);
+	// 0 = empty, 1 = not empty
+	while lvl > 1 {
+		lvl >>= lvl_shift;
+		depth += 1;
+	}
+
+	(depth, lvl_shift)
 }

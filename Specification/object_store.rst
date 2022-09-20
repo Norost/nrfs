@@ -135,6 +135,8 @@ The type should be set to 0 to ensure deduplication & recovery is effective.
 The depth of a record tree depends on the size of the data.
 `ceil(log2(length / 64))`
 
+Some records may not unpack to the expected length.
+The remaining length is all zeroes.
 
 Object list
 ~~~~~~~~~~~

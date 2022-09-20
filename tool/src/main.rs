@@ -96,7 +96,7 @@ fn make(args: Args) {
 			if m.is_file() || (m.is_symlink() && args.follow) {
 				let c = fs::read(f.path()).unwrap();
 				let mut f = root.create_file(n, &ext).unwrap().unwrap();
-				f.write_all(0, &c).unwrap();
+				f.write_grow(0, &c).unwrap();
 			} else if m.is_dir() {
 				let opt = nrfs::DirOptions { extensions, ..Default::default() };
 				let mut d = root.create_dir(n, &opt, &ext).unwrap().unwrap();
@@ -104,7 +104,7 @@ fn make(args: Args) {
 			} else if m.is_symlink() {
 				let c = fs::read_link(f.path()).unwrap();
 				let mut f = root.create_sym(n, &ext).unwrap().unwrap();
-				f.write_all(0, c.to_str().unwrap().as_bytes()).unwrap();
+				f.write_grow(0, c.to_str().unwrap().as_bytes()).unwrap();
 			} else {
 				todo!()
 			}

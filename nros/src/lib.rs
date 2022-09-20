@@ -83,12 +83,20 @@ impl<S: Storage> Nros<S> {
 	pub fn new_object(&mut self) -> Result<u64, Error<S>> {
 		let r = &mut self.header.object_list;
 		let l = r.len();
-		r.write(&mut self.storage, l, Record::default().as_ref())?;
+		r.resize(&mut self.storage, l + 64)?;
+		Ok(l / 64)
+	}
+
+	/// Return IDs for two objects, one at ID and one at ID + 1
+	pub fn new_object_pair(&mut self) -> Result<u64, Error<S>> {
+		let r = &mut self.header.object_list;
+		let l = r.len();
+		r.resize(&mut self.storage, l + 128)?;
 		Ok(l / 64)
 	}
 
 	pub fn move_object(&mut self, to_id: u64, from_id: u64) -> Result<(), Error<S>> {
-		self.object_root(to_id)?.truncate(&mut self.storage, 0)?;
+		self.object_root(to_id)?.resize(&mut self.storage, 0)?;
 		let f = self.object_root(from_id)?;
 		self.set_object_root(to_id, &f)?;
 		self.set_object_root(from_id, &Default::default())
@@ -102,7 +110,7 @@ impl<S: Storage> Nros<S> {
 		Ok(self.object_root(id)?.len())
 	}
 
-	pub fn read_object(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
+	pub fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
 		let obj = self.object_root(id)?;
 		if offset >= obj.len() {
 			return Ok(0);
@@ -114,18 +122,24 @@ impl<S: Storage> Nros<S> {
 		Ok(buf.len())
 	}
 
-	pub fn write_object(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
-		let mut rec = self.object_root(id)?;
-		rec.write(&mut self.storage, offset, data)?;
+	pub fn write(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<usize, Error<S>> {
+		let mut obj = self.object_root(id)?;
+		if offset >= obj.len() {
+			return Ok(0);
+		}
+		let Some(l) = obj.len().checked_sub(offset) else { return Ok(0) };
+		let l = (data.len() as u64).min(l);
+		let data = &data[..l as _];
+		obj.write(&mut self.storage, offset, data)?;
 		self.header
 			.object_list
-			.write(&mut self.storage, id * 64, rec.0.as_ref())?;
-		Ok(())
+			.write(&mut self.storage, id * 64, obj.0.as_ref())?;
+		Ok(data.len())
 	}
 
-	pub fn truncate_object(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
+	pub fn resize(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
 		let mut rec = self.object_root(id)?;
-		rec.truncate(&mut self.storage, len)?;
+		rec.resize(&mut self.storage, len)?;
 		self.header
 			.object_list
 			.write(&mut self.storage, id * 64, rec.0.as_ref())?;
@@ -148,11 +162,12 @@ impl<S: Storage> Nros<S> {
 	}
 
 	fn object_root(&mut self, id: u64) -> Result<record_tree::RecordTree, Error<S>> {
-		let mut rec = record::Record::default();
+		let mut rec = RecordTree::default();
+		debug_assert!(id * 64 < self.header.object_list.len());
 		self.header
 			.object_list
-			.read(&mut self.storage, id * 64, rec.as_mut())?;
-		Ok(record_tree::RecordTree(rec))
+			.read(&mut self.storage, id * 64, rec.0.as_mut())?;
+		Ok(rec)
 	}
 
 	fn set_object_root(&mut self, id: u64, rec: &record_tree::RecordTree) -> Result<(), Error<S>> {

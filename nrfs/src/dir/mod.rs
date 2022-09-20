@@ -86,18 +86,15 @@ impl<'a, S: Storage> Dir<'a, S> {
 				alloc_map: Some(Default::default()),
 			},
 		};
-		slf.id = slf.new_with_size(options.capacity_p2)?;
-		let alloc = slf.fs.storage.new_object().map_err(Error::Nros)?;
-		assert_eq!(slf.id + 1, alloc);
+		slf.id = slf.fs.storage.new_object_pair().map_err(Error::Nros)?;
+		slf.init_with_size(slf.id, options.capacity_p2)?;
 		Ok(slf)
 	}
 
-	/// Allocate a new hashmap object with the given size.
+	/// Initialize a hashmap object with the given size.
 	///
 	/// This does not modify the current dir structure.
-	fn new_with_size(&mut self, map_size_p2: u8) -> Result<u64, Error<S>> {
-		let id = self.fs.storage.new_object().map_err(Error::Nros)?;
-
+	fn init_with_size(&mut self, id: u64, map_size_p2: u8) -> Result<(), Error<S>> {
 		let mut buf = [0; 64];
 		buf[0] = self.header_len8;
 		buf[1] = self.entry_len8;
@@ -121,18 +118,13 @@ impl<'a, S: Storage> Dir<'a, S> {
 			buf[header_offt + 7..][..2].copy_from_slice(&offt.to_le_bytes());
 		}
 		self.fs
+			.storage
+			.resize(id, self.hashmap_base() + self.entry_size() << map_size_p2)
+			.map_err(Error::Nros)?;
+		self.fs
 			.write_all(id, 0, &buf[..usize::from(self.header_len8) * 8])?;
-		// FIXME gap should be added automatically
-		// Or add resize() to Nros or whatever
-		for i in 0..1 << map_size_p2 {
-			self.fs.write_all(
-				id,
-				u64::from(self.header_len8) * 8 + i * u64::from(self.entry_len8) * 8,
-				&[0; 64][..usize::from(self.entry_len8) * 8],
-			)?;
-		}
 
-		Ok(id)
+		Ok(())
 	}
 
 	pub(crate) fn load(fs: &'a mut Nrfs<S>, id: u64) -> Result<Self, Error<S>> {
@@ -288,7 +280,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 		// Store name
 		let name_offset = self.alloc(entry.name.len_u8().into())?;
-		self.fs.write_all(self.id + 1, name_offset, entry.name)?;
+		self.write_heap(name_offset, entry.name)?;
 
 		let e = RawEntry {
 			key_offset: name_offset,
@@ -542,6 +534,8 @@ impl<'a, S: Storage> Dir<'a, S> {
 		// Avoid mutable borrow issues
 		self.alloc_log()?;
 		let log = self.data.alloc_map.as_mut().unwrap();
+		self.fs
+			.resize(id, log_offt + 16 * log.iter().size_hint().0 as u64)?;
 		for r in log.iter() {
 			let mut buf = [0; 16];
 			buf[..8].copy_from_slice(&r.start.to_le_bytes());
@@ -549,7 +543,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 			self.fs.write_all(id, log_offt, &buf)?;
 			log_offt += 16;
 		}
-		self.fs.truncate(self.id, log_offt)
+		self.fs.resize(self.id, log_offt)
 	}
 
 	/// Get or load the allocation map.
@@ -599,7 +593,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 	/// Write a heap value.
 	pub(crate) fn write_heap(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
-		self.fs.write_all(self.id + 1, offset, data)
+		self.fs.write_grow(self.id + 1, offset, data)
 	}
 
 	/// Grow the hashmap
@@ -607,7 +601,8 @@ impl<'a, S: Storage> Dir<'a, S> {
 		// Since we're going to load the entire log we can as well minimize it.
 		self.alloc_log()?;
 
-		let new_map_id = self.new_with_size(self.hashmap_size_p2 + 1)?;
+		let new_map_id = self.fs.storage.new_object().map_err(Error::Nros)?;
+		self.init_with_size(new_map_id, self.hashmap_size_p2 + 1)?;
 		let new_index_mask = self.index_mask() << 1 | 1;
 
 		// Copy entries
@@ -625,8 +620,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 			let key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
 			let mut key = [0; 255];
-			self.fs
-				.read_exact(self.id + 1, key_offset, &mut key[..key_len.into()])?;
+			self.read_heap(key_offset, &mut key[..key_len.into()])?;
 
 			let mut i = self.hash(&key[..key_len.into()]);
 

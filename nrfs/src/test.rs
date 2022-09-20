@@ -103,7 +103,7 @@ fn create_file() {
 		.create_file(b"test.txt".into(), &Default::default())
 		.unwrap()
 		.unwrap();
-	f.write_all(0, b"Hello, world!").unwrap();
+	f.write_grow(0, b"Hello, world!").unwrap();
 
 	assert!(d.find(b"I do not exist".into()).unwrap().is_none());
 	let mut g = d.find(b"test.txt".into()).unwrap().unwrap();
@@ -129,7 +129,7 @@ fn create_many_files() {
 			.create_file((&*name).try_into().unwrap(), &Default::default())
 			.unwrap()
 			.unwrap();
-		f.write_all(0, contents.as_bytes()).unwrap();
+		f.write_grow(0, contents.as_bytes()).unwrap();
 
 		let mut g = d.find((&*name).try_into().unwrap()).unwrap().unwrap();
 
@@ -190,7 +190,7 @@ fn create_file_ext() {
 		)
 		.unwrap()
 		.unwrap();
-	f.write_all(0, b"Hello, world!").unwrap();
+	f.write_grow(0, b"Hello, world!").unwrap();
 
 	assert!(d.find(b"I do not exist".into()).unwrap().is_none());
 	let mut g = d.find(b"test.txt".into()).unwrap().unwrap();

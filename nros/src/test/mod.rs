@@ -1,3 +1,5 @@
+mod record_tree;
+
 use crate::*;
 
 #[derive(Debug)]
@@ -76,14 +78,11 @@ fn new(max_record_size_p2: u8) -> Nros<S> {
 }
 
 #[test]
-fn append_to_object() {
+fn resize_object() {
 	let mut s = new(9);
 	let id = s.new_object().unwrap();
-	s.write_object(id, 0, &[0xaa; 512]).unwrap();
-	s.write_object(id, 512, &[0xbb; 512]).unwrap();
-	let mut buf = [0; 512];
-	s.read_object(id, 0, &mut buf).unwrap();
-	assert_eq!(buf, [0xaa; 512]);
-	s.read_object(id, 512, &mut buf).unwrap();
-	assert_eq!(buf, [0xbb; 512]);
+	s.resize(id, 512).unwrap();
+	s.resize(id, 1020).unwrap();
+	s.resize(id, 500).unwrap();
+	s.resize(id, 0).unwrap();
 }

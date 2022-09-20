@@ -55,29 +55,54 @@ impl<'a, 'b, S: Storage> File<'a, 'b, S> {
 	}
 
 	pub fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, Error<S>> {
-		// Same thing at the moment anyways
-		self.write_all(offset, data).map(|()| data.len())
+		match &self.inner {
+			Inner::Object { id, .. } => self.dir.fs.write(*id, offset, data),
+			Inner::Embed { offset: 0, length: 0, index } => {
+				let id = self.empty_to_object(*index)?;
+				self.dir.fs.write(id, offset, data)
+			}
+			Inner::Embed { offset: offt, length, .. } => {
+				todo!()
+			}
+		}
 	}
 
 	pub fn write_all(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
 		match &self.inner {
 			Inner::Object { id, .. } => self.dir.fs.write_all(*id, offset, data),
 			Inner::Embed { offset: 0, length: 0, index } => {
-				let index = *index;
-				let id = self.dir.fs.storage.new_object().map_err(Error::Nros)?;
-				self.inner = Inner::Object { id, index };
-				let ty = if self.is_sym {
-					Type::Sym { id }
-				} else {
-					Type::File { id }
-				};
-				self.dir.set_ty(index, ty)?;
+				let id = self.empty_to_object(*index)?;
 				self.dir.fs.write_all(id, offset, data)
 			}
 			Inner::Embed { offset: offt, length, .. } => {
 				todo!()
 			}
 		}
+	}
+
+	pub fn write_grow(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
+		match &self.inner {
+			Inner::Object { id, .. } => self.dir.fs.write_grow(*id, offset, data),
+			Inner::Embed { offset: 0, length: 0, index } => {
+				let id = self.empty_to_object(*index)?;
+				self.dir.fs.write_grow(id, offset, data)
+			}
+			Inner::Embed { offset: offt, length, .. } => {
+				todo!()
+			}
+		}
+	}
+
+	fn empty_to_object(&mut self, index: u32) -> Result<u64, Error<S>> {
+		let id = self.dir.fs.storage.new_object().map_err(Error::Nros)?;
+		self.inner = Inner::Object { id, index };
+		let ty = if self.is_sym {
+			Type::Sym { id }
+		} else {
+			Type::File { id }
+		};
+		self.dir.set_ty(index, ty)?;
+		Ok(id)
 	}
 
 	pub fn len(&mut self) -> Result<u64, Error<S>> {

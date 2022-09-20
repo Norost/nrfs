@@ -44,11 +44,13 @@ impl<S: Storage> RecordCache<S> {
 		})
 	}
 
+	/// `len` is the unpacked length of the record.
 	pub fn read<'a>(&'a mut self, record: &Record) -> Result<Read<'a, S>, Error<S>> {
 		self.read_inner(record)
 			.map(|data| Read { data: data.map_or(&[], |d| &**d), _marker: PhantomData })
 	}
 
+	/// `len` is the unpacked length of the record.
 	pub fn modify<'a>(&'a mut self, record: &Record) -> Result<Write<'a, S>, Error<S>> {
 		self.read_inner(record)?;
 		self.free(record);
@@ -63,6 +65,32 @@ impl<S: Storage> RecordCache<S> {
 		Ok(Write { data, cache: self })
 	}
 
+	/// Fetch and remove a record from the cache.
+	///
+	/// This is useful when modifying multiple records at once, though more delicate.
+	///
+	/// `len` is the unpacked length of the record.
+	pub fn take(&mut self, record: &Record) -> Result<Vec<u8>, Error<S>> {
+		self.read_inner(record)?;
+		Ok(self.cache.remove(&record.lba.into()).unwrap_or_default())
+	}
+
+	/// Insert a record into the cache.
+	///
+	/// This is useful in conjunction with [`Self::take`].
+	pub fn insert(&mut self, record: &Record, data: Vec<u8>) -> Result<Record, Error<S>> {
+		self.free(record);
+		Write { data, cache: self }.finish()
+	}
+
+	/// Insert a record into the cache without writing.
+	///
+	/// This is useful in conjunction with [`Self::take`].
+	pub fn insert_clean(&mut self, record: &Record, data: Vec<u8>) -> Result<(), Error<S>> {
+		self.cache.insert(record.lba.into(), data);
+		Ok(())
+	}
+
 	fn free(&mut self, record: &Record) {
 		self.allocator.free(
 			record.lba.into(),
@@ -74,8 +102,9 @@ impl<S: Storage> RecordCache<S> {
 		self.allocator.serialize_full(&mut self.storage)
 	}
 
+	/// `length` is the unpacked length of the record.
 	fn read_inner<'a>(&'a mut self, record: &Record) -> Result<Option<&'a mut Vec<u8>>, Error<S>> {
-		if record.length == 0 {
+		if record.lba == 0 {
 			return Ok(None);
 		}
 		debug_assert!(record.lba != 0);
@@ -95,7 +124,7 @@ impl<S: Storage> RecordCache<S> {
 
 		let count = self.calc_block_count(len);
 		let rd = self.storage.read(lba, count).map_err(Error::Storage)?;
-		let mut v = Vec::with_capacity(1 << self.max_record_size_p2);
+		let mut v = Vec::new();
 		record
 			.unpack(&rd.get()[..len as _], &mut v, self.max_record_size_p2)
 			.map_err(Error::RecordUnpack)?;

@@ -348,8 +348,8 @@ impl Filesystem for Fs {
 		let mut d = self.sto.get_dir(f.dir).unwrap();
 		let mut e = d.find(&f.name).unwrap().unwrap();
 		let mut f = e.as_file().unwrap();
-		let l = f.write(offset as _, data).unwrap();
-		reply.written(l as _);
+		f.write_grow(offset as _, data).unwrap();
+		reply.written(data.len() as _);
 
 		self.sto.finish_transaction().unwrap();
 	}
