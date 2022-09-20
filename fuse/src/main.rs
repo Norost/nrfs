@@ -446,7 +446,7 @@ impl Filesystem for Fs {
 		}
 
 		if let Ok(name) = name.as_bytes().try_into() {
-			d.create_file(name).unwrap();
+			d.create_file(name, &Default::default()).unwrap();
 			let ino = self.ino.add_file(File { dir: d.id(), name: name.into() });
 			reply.created(&TTL, &self.attr(FileType::RegularFile, 0, ino), 0, 0, 0);
 		} else {

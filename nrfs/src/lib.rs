@@ -8,7 +8,7 @@ mod name;
 mod test;
 
 pub use {
-	dir::Dir,
+	dir::{Dir, DirOptions},
 	file::File,
 	name::Name,
 	nros::{Read, Storage, Write},
@@ -22,10 +22,14 @@ pub struct Nrfs<S: Storage> {
 }
 
 impl<S: Storage> Nrfs<S> {
-	pub fn new(storage: S, max_record_length_p2: u8) -> Result<Self, nros::NewError<S>> {
+	pub fn new(
+		storage: S,
+		max_record_length_p2: u8,
+		dir: &DirOptions,
+	) -> Result<Self, nros::NewError<S>> {
 		let storage = nros::Nros::new(storage, max_record_length_p2)?;
 		let mut s = Self { storage };
-		match Dir::new(&mut s, [0; 16]) {
+		match Dir::new(&mut s, dir) {
 			Ok(_) => {}
 			_ => todo!(),
 		}

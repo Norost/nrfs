@@ -112,7 +112,7 @@ Record
 +------+------+------+------+------+---------------------------+
 |   48 |                     Total length²                     |
 +------+-------------------------------------------------------+
-|   56 |                  Modification Time³                   |
+|   56 |                                                       |
 +------+-------------------------------------------------------+
 
 Flgs:
@@ -120,7 +120,6 @@ Flgs:
 If bit 0 is set, the record is present. Otherwise it is empty.
 
 ² Only used by record trees.
-³ Only used by the object list.
 
 
 Record tree
@@ -131,7 +130,7 @@ If a tree has a depth greater than 0 it consists of multiple subtrees.
 These subtrees also have the total length set.
 The depth is derived from the total length and the maximum record size.
 
-The modification date and type should be set to 0 to ensure deduplication & recovery is effective.
+The type should be set to 0 to ensure deduplication & recovery is effective.
 
 The depth of a record tree depends on the size of the data.
 `ceil(log2(length / 64))`

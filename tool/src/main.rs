@@ -44,30 +44,66 @@ fn make(args: Args) {
 		.open(&args.file)
 		.unwrap();
 
-	let mut nrfs = nrfs::Nrfs::new(S::new(f), args.block_size_p2).unwrap();
+	let mut extensions = nrfs::dir::EnableExtensions::default();
+	extensions.add_unix();
+	extensions.add_mtime();
+	let mut opt = nrfs::DirOptions { extensions, ..Default::default() };
+	let mut nrfs = nrfs::Nrfs::new(S::new(f), args.block_size_p2, &opt).unwrap();
 
 	let mut root = nrfs.root_dir().unwrap();
 	if let Some(d) = &args.directory {
-		add_files(&mut root, d, &args);
+		add_files(&mut root, d, &args, extensions);
 		nrfs.finish_transaction().unwrap();
 	}
 
-	fn add_files(root: &mut nrfs::Dir<'_, S>, from: &Path, args: &Args) {
+	fn add_files(
+		root: &mut nrfs::Dir<'_, S>,
+		from: &Path,
+		args: &Args,
+		extensions: nrfs::dir::EnableExtensions,
+	) {
 		for f in fs::read_dir(from).expect("failed to read dir") {
 			let f = f.unwrap();
 			let m = f.metadata().unwrap();
 			let n = f.file_name();
 			let n = n.to_str().unwrap().try_into().unwrap();
+
+			let mut ext = nrfs::dir::Extensions::default();
+
+			ext.unix = extensions.unix().then(|| {
+				let mut u =
+					nrfs::dir::ext::unix::Entry { permissions: 0o700, ..Default::default() };
+				let p = m.permissions();
+				#[cfg(target_family = "unix")]
+				{
+					use std::os::unix::fs::{MetadataExt, PermissionsExt};
+					u.permissions = (p.mode() & 0o777) as _;
+					u.uid = m.uid();
+					u.gid = m.gid();
+				}
+				u
+			});
+
+			ext.mtime = extensions.mtime().then(|| nrfs::dir::ext::mtime::Entry {
+				mtime: m
+					.modified()
+					.ok()
+					.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+					.map(|t| t.as_millis().try_into().unwrap_or(i64::MAX))
+					.unwrap_or(0),
+			});
+
 			if m.is_file() || (m.is_symlink() && args.follow) {
 				let c = fs::read(f.path()).unwrap();
-				let mut f = root.create_file(n).unwrap().unwrap();
+				let mut f = root.create_file(n, &ext).unwrap().unwrap();
 				f.write_all(0, &c).unwrap();
 			} else if m.is_dir() {
-				let mut d = root.create_dir(n).unwrap().unwrap();
-				add_files(&mut d, &f.path(), args)
+				let opt = nrfs::DirOptions { extensions, ..Default::default() };
+				let mut d = root.create_dir(n, &opt, &ext).unwrap().unwrap();
+				add_files(&mut d, &f.path(), args, extensions)
 			} else if m.is_symlink() {
 				let c = fs::read_link(f.path()).unwrap();
-				let mut f = root.create_sym(n).unwrap().unwrap();
+				let mut f = root.create_sym(n, &ext).unwrap().unwrap();
 				f.write_all(0, c.to_str().unwrap().as_bytes()).unwrap();
 			} else {
 				todo!()
@@ -85,6 +121,26 @@ fn dump(args: Args) {
 	fn list_files(root: &mut nrfs::Dir<'_, S>, indent: usize) {
 		let mut i = Some(0);
 		while let Some((mut e, next_i)) = i.and_then(|i| root.next_from(i).unwrap()) {
+			if let Some(u) = e.ext_unix() {
+				let mut s = [0; 9];
+				for (i, (c, l)) in s.iter_mut().zip(b"rwxrwxrwx").rev().enumerate() {
+					*c = [b'-', *l][usize::from(u.permissions & 1 << i != 0)];
+				}
+				print!(
+					"{} {:>4} {:>4}  ",
+					std::str::from_utf8(&s).unwrap(),
+					u.uid,
+					u.gid
+				);
+			}
+
+			if let Some(t) = e.ext_mtime() {
+				let secs = (t.mtime / 1000) as i64;
+				let millis = t.mtime.rem_euclid(1000) as u32;
+				let t = chrono::NaiveDateTime::from_timestamp(secs, millis * 1_000_000);
+				print!("{:>14?}  ", t);
+			}
+
 			let name = String::from_utf8_lossy(e.name()).into_owned();
 			if e.is_file() {
 				let mut f = e.as_file().unwrap();
