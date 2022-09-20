@@ -304,12 +304,13 @@ impl<'a, S: Storage> Dir<'a, S> {
 			todo!("remove dir");
 		}
 		let offt = self.get_offset(i);
-		self.fs.write_all(self.id, offt, &[0])?;
+		// Set ty to 0
+		self.fs.write_all(self.id, offt + 7, &[0])?;
 		self.set_entry_count(self.entry_count - 1)?;
 
 		// Check if we should shrink the hashmap
 		if self.should_shrink() {
-			todo!()
+			self.shrink()?;
 		}
 		Ok(true)
 	}
@@ -598,12 +599,28 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 	/// Grow the hashmap
 	fn grow(&mut self) -> Result<(), Error<S>> {
+		debug_assert!(self.hashmap_size_p2 < 32, "hashmap is already at maximum size");
+		self.resize(self.hashmap_size_p2 + 1)
+	}
+
+	/// Shrink the hashmap.
+	///
+	/// There must be *at least* `capacity / 2 + 1` slots free,
+	/// i.e. `entry_count < capacity / 2`.
+	fn shrink(&mut self) -> Result<(), Error<S>> {
+		debug_assert!(self.hashmap_size_p2 != 0, "hashmap is already at minimum size");
+		debug_assert!(u64::from(self.entry_count) < self.capacity() / 2, "not enough free slots");
+		self.resize(self.hashmap_size_p2 - 1)
+	}
+
+	/// Resize the hashmap
+	fn resize(&mut self, new_size_p2: u8) -> Result<(), Error<S>> {
 		// Since we're going to load the entire log we can as well minimize it.
 		self.alloc_log()?;
 
 		let new_map_id = self.fs.storage.new_object().map_err(Error::Nros)?;
-		self.init_with_size(new_map_id, self.hashmap_size_p2 + 1)?;
-		let new_index_mask = self.index_mask() << 1 | 1;
+		self.init_with_size(new_map_id, new_size_p2)?;
+		let new_index_mask = 1u32.wrapping_shl(new_size_p2.into()).wrapping_sub(1);
 
 		// Copy entries
 		for index in (0..self.capacity()).map(|i| i as _) {
@@ -642,7 +659,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 			.storage
 			.move_object(self.id, new_map_id)
 			.map_err(Error::Nros)?;
-		self.hashmap_size_p2 += 1;
+		self.hashmap_size_p2 = new_size_p2;
 		self.save_alloc_log()
 	}
 

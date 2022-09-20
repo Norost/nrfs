@@ -1,7 +1,7 @@
 use {
 	arena::{Arena, Handle},
 	fuser::*,
-	log::*,
+	log::{debug, *},
 	nrfs::{Name, Storage},
 	std::{
 		collections::HashMap,
@@ -168,6 +168,7 @@ impl InodeStore {
 				if let Some(n) = c.checked_sub(nlookup) {
 					*c = n;
 				} else {
+					debug!("remove dir {:?}", h);
 					self.dir.remove(h);
 				}
 			}
@@ -176,6 +177,7 @@ impl InodeStore {
 				if let Some(n) = c.checked_sub(nlookup) {
 					*c = n;
 				} else {
+					debug!("remove file {:?}", h);
 					self.file.remove(h);
 				}
 			}
@@ -184,6 +186,7 @@ impl InodeStore {
 				if let Some(n) = c.checked_sub(nlookup) {
 					*c = n;
 				} else {
+					debug!("remove sym {:?}", h);
 					self.sym.remove(h);
 				}
 			}
@@ -233,7 +236,6 @@ impl Filesystem for Fs {
 	}
 
 	fn forget(&mut self, _req: &Request<'_>, ino: u64, nlookup: u64) {
-		todo!();
 		self.ino.forget(ino, nlookup)
 	}
 
@@ -449,11 +451,10 @@ impl Filesystem for Fs {
 			d.create_file(name, &Default::default()).unwrap();
 			let ino = self.ino.add_file(File { dir: d.id(), name: name.into() });
 			reply.created(&TTL, &self.attr(FileType::RegularFile, 0, ino), 0, 0, 0);
+			self.sto.finish_transaction().unwrap();
 		} else {
 			reply.error(libc::ENAMETOOLONG);
 		}
-
-		self.sto.finish_transaction().unwrap();
 	}
 
 	fn fallocate(
@@ -466,7 +467,6 @@ impl Filesystem for Fs {
 		_mode: i32,
 		reply: ReplyEmpty,
 	) {
-		dbg!();
 		if req.uid() != self.uid {
 			reply.error(libc::EPERM);
 			return;
@@ -482,6 +482,25 @@ impl Filesystem for Fs {
 				self.sto.finish_transaction().unwrap();
 				reply.ok();
 			}
+		}
+	}
+
+	fn unlink(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+		if req.uid() != self.uid {
+			reply.error(libc::EPERM);
+			return;
+		}
+
+		let d = self.ino.get_dir(parent);
+		let mut d = self.sto.get_dir(d.id).unwrap();
+		if let Ok(name) = name.as_bytes().try_into() {
+			if d.remove(name).unwrap() {
+				reply.ok()
+			} else {
+				reply.error(libc::ENOENT)
+			}
+		} else {
+			reply.error(libc::ENAMETOOLONG);
 		}
 	}
 

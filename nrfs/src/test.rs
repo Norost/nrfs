@@ -203,3 +203,38 @@ fn create_file_ext() {
 	let l = g.as_file().unwrap().read(0, &mut buf).unwrap();
 	assert_eq!(core::str::from_utf8(&buf[..l]), Ok("Hello, world!"));
 }
+
+#[test]
+fn remove_file() {
+	let mut fs = new();
+	let mut d = fs.root_dir().unwrap();
+	d.create_file(b"hello".into(), &Default::default()).unwrap();
+	d.create_file(b"world".into(), &Default::default()).unwrap();
+	d.create_file(b"exist".into(), &Default::default()).unwrap();
+	assert!(d.remove(b"hello".into()).unwrap());
+
+	// Ensure no spooky entries appear when iterating
+	let mut i = Some(0);
+	while let Some((e, ni)) = i.and_then(|i| d.next_from(i).unwrap()) {
+		assert!(matches!(&**e.name(), b"world" | b"exist"));
+		i = ni;
+	}
+}
+
+#[test]
+fn shrink() {
+	let mut fs = new();
+	let mut d = fs.root_dir().unwrap();
+	d.create_file(b"hello".into(), &Default::default()).unwrap();
+	d.create_file(b"world".into(), &Default::default()).unwrap();
+	d.create_file(b"exist".into(), &Default::default()).unwrap();
+	assert!(d.remove(b"hello".into()).unwrap());
+	assert!(d.remove(b"exist".into()).unwrap());
+
+	// Ensure no spooky entries appear when iterating
+	let mut i = Some(0);
+	while let Some((e, ni)) = i.and_then(|i| d.next_from(i).unwrap()) {
+		assert!(matches!(&**e.name(), b"world"));
+		i = ni;
+	}
+}
