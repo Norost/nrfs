@@ -133,7 +133,7 @@ Record tree
 
 A record tree respresents a group of data.
 If a tree has a depth greater than 0 it consists of multiple subtrees.
-These subtrees also have the total length set.
+These trees do *not* have a total length set.
 The depth is derived from the total length and the maximum record size.
 
 The type should be set to 0 to ensure deduplication & recovery is effective.
