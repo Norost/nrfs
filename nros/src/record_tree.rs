@@ -260,7 +260,9 @@ where
 	S: Storage,
 {
 	let (depth, lvl_shift) = depth(len, sto);
-	depth.checked_sub(1).map(|d| 1 << d * lvl_shift + sto.max_record_size_p2)
+	depth
+		.checked_sub(1)
+		.map(|d| 1 << d * lvl_shift + sto.max_record_size_p2)
 }
 
 /// Calculate the depth and amount of records per record as a power of 2

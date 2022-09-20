@@ -456,6 +456,35 @@ impl Filesystem for Fs {
 		self.sto.finish_transaction().unwrap();
 	}
 
+	fn fallocate(
+		&mut self,
+		req: &Request<'_>,
+		ino: u64,
+		_fh: u64,
+		_offset: i64,
+		length: i64,
+		_mode: i32,
+		reply: ReplyEmpty,
+	) {
+		dbg!();
+		if req.uid() != self.uid {
+			reply.error(libc::EPERM);
+			return;
+		}
+
+		match self.ino.get(ino) {
+			Inode::Dir(_) => reply.error(libc::EISDIR),
+			Inode::File(f) | Inode::Sym(f) => {
+				let mut d = self.sto.get_dir(f.dir).unwrap();
+				let mut e = d.find(&f.name).unwrap().unwrap();
+				let mut f = e.as_file().unwrap();
+				f.resize(length as _).unwrap();
+				self.sto.finish_transaction().unwrap();
+				reply.ok();
+			}
+		}
+	}
+
 	fn destroy(&mut self) {
 		self.sto.finish_transaction().unwrap();
 	}

@@ -93,6 +93,18 @@ impl<'a, 'b, S: Storage> File<'a, 'b, S> {
 		}
 	}
 
+	pub fn resize(&mut self, new_len: u64) -> Result<(), Error<S>> {
+		match &self.inner {
+			Inner::Object { id, .. } => self.dir.fs.resize(*id, new_len),
+			Inner::Embed { offset: 0, length: 0, index } if new_len == 0 => Ok(()),
+			Inner::Embed { offset: 0, length: 0, index } => {
+				let id = self.empty_to_object(*index)?;
+				self.dir.fs.resize(id, new_len)
+			}
+			Inner::Embed { offset: offt, length, .. } => todo!(),
+		}
+	}
+
 	fn empty_to_object(&mut self, index: u32) -> Result<u64, Error<S>> {
 		let id = self.dir.fs.storage.new_object().map_err(Error::Nros)?;
 		self.inner = Inner::Object { id, index };
