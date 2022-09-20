@@ -1,5 +1,4 @@
 //#![cfg_attr(not(test), no_std)]
-#![feature(let_else)]
 
 extern crate alloc;
 
@@ -115,7 +114,11 @@ impl<S: Storage> Nros<S> {
 		if offset >= obj.len() {
 			return Ok(0);
 		}
-		let Some(l) = obj.len().checked_sub(offset) else { return Ok(0) };
+		let l = if let Some(l) = obj.len().checked_sub(offset) {
+			l
+		} else {
+			return Ok(0);
+		};
 		let l = (buf.len() as u64).min(l);
 		let buf = &mut buf[..l as _];
 		obj.read(&mut self.storage, offset, buf)?;
@@ -127,7 +130,11 @@ impl<S: Storage> Nros<S> {
 		if offset >= obj.len() {
 			return Ok(0);
 		}
-		let Some(l) = obj.len().checked_sub(offset) else { return Ok(0) };
+		let l = if let Some(l) = obj.len().checked_sub(offset) {
+			l
+		} else {
+			return Ok(0);
+		};
 		let l = (data.len() as u64).min(l);
 		let data = &data[..l as _];
 		obj.write(&mut self.storage, offset, data)?;
