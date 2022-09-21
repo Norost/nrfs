@@ -100,6 +100,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 		buf[1] = self.entry_len8;
 		buf[2] = self.hash_algorithm as _;
 		buf[3] = map_size_p2;
+		buf[4..8].copy_from_slice(&self.entry_count.to_le_bytes());
 		buf[8..24].copy_from_slice(&self.hash_key);
 		let mut header_offt = 24;
 

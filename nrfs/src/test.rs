@@ -208,10 +208,15 @@ fn create_file_ext() {
 fn remove_file() {
 	let mut fs = new();
 	let mut d = fs.root_dir().unwrap();
+	assert_eq!(d.len(), 0);
 	d.create_file(b"hello".into(), &Default::default()).unwrap();
+	assert_eq!(d.len(), 1);
 	d.create_file(b"world".into(), &Default::default()).unwrap();
+	assert_eq!(d.len(), 2);
 	d.create_file(b"exist".into(), &Default::default()).unwrap();
+	assert_eq!(d.len(), 3);
 	assert!(d.remove(b"hello".into()).unwrap());
+	assert_eq!(d.len(), 2);
 
 	// Ensure no spooky entries appear when iterating
 	let mut i = Some(0);
@@ -225,11 +230,17 @@ fn remove_file() {
 fn shrink() {
 	let mut fs = new();
 	let mut d = fs.root_dir().unwrap();
+	assert_eq!(d.len(), 0);
 	d.create_file(b"hello".into(), &Default::default()).unwrap();
+	assert_eq!(d.len(), 1);
 	d.create_file(b"world".into(), &Default::default()).unwrap();
+	assert_eq!(d.len(), 2);
 	d.create_file(b"exist".into(), &Default::default()).unwrap();
+	assert_eq!(d.len(), 3);
 	assert!(d.remove(b"hello".into()).unwrap());
+	assert_eq!(d.len(), 2);
 	assert!(d.remove(b"exist".into()).unwrap());
+	assert_eq!(d.len(), 1);
 
 	// Ensure no spooky entries appear when iterating
 	let mut i = Some(0);
