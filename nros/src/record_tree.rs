@@ -39,7 +39,9 @@ impl RecordTree {
 		S: Storage,
 	{
 		let len = self.len();
+		let ref_c = self.0.reference_count;
 		NodeMut(&mut self.0).write(len, sto, offset, data)?;
+		self.0.reference_count = ref_c;
 		self.0.total_length = len.into();
 		Ok(())
 	}
@@ -60,7 +62,9 @@ impl RecordTree {
 		S: Storage,
 	{
 		let len = self.len();
+		let ref_c = self.0.reference_count;
 		NodeMut(&mut self.0).shrink(len, sto, new_len)?;
+		self.0.reference_count = ref_c;
 		self.0.total_length = new_len.into();
 		Ok(())
 	}
@@ -73,11 +77,14 @@ impl RecordTree {
 		let (old_depth, _) = depth(self.len(), sto);
 		self.0.total_length = len.into();
 		let (new_depth, _) = depth(self.len(), sto);
+		let ref_c = self.0.reference_count;
 		for _ in old_depth..new_depth {
 			let mut w = sto.write(&Record::default())?;
 			set(&mut w, 0, &self.0);
+			self.0.reference_count = 0;
 			self.0 = w.finish()?;
 		}
+		self.0.reference_count = ref_c;
 		self.0.total_length = len.into();
 		Ok(())
 	}

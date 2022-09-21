@@ -89,10 +89,10 @@ impl Fs {
 		let uid = unsafe { libc::getuid() };
 		let gid = unsafe { libc::getgid() };
 		let mut s = Self { sto, ino: InodeStore { uid, gid, ..Default::default() } };
-		s.ino.add_dir(Dir {
-			id: 0,
-			unix: nrfs::dir::ext::unix::Entry { permissions: 0o777, uid, gid },
-		}, true);
+		s.ino.add_dir(
+			Dir { id: 0, unix: nrfs::dir::ext::unix::Entry { permissions: 0o777, uid, gid } },
+			true,
+		);
 		s
 	}
 
@@ -137,7 +137,13 @@ impl InodeStore {
 		Self::add(&mut self.sym, &mut self.sym_rev, k, sym, incr) | INO_TY_SYM
 	}
 
-	fn add<T, K>(m: &mut Arena<(T, u64), ()>, rev_m: &mut HashMap<K, Handle<()>>, k: K, t: T, incr: bool) -> u64
+	fn add<T, K>(
+		m: &mut Arena<(T, u64), ()>,
+		rev_m: &mut HashMap<K, Handle<()>>,
+		k: K,
+		t: T,
+		incr: bool,
+	) -> u64
 	where
 		K: Hash + Eq,
 	{
@@ -183,7 +189,8 @@ impl InodeStore {
 				*c = c.saturating_sub(nlookup);
 				if *c == 0 {
 					debug!("remove dir {:?}", h);
-					self.dir.remove(h);
+					let (d, _) = self.dir.remove(h).unwrap();
+					self.dir_rev.remove(&d.id);
 				}
 			}
 			INO_TY_FILE => {
@@ -191,7 +198,8 @@ impl InodeStore {
 				*c = c.saturating_sub(nlookup);
 				if *c == 0 {
 					debug!("remove file {:?}", h);
-					self.file.remove(h);
+					let (f, _) = self.file.remove(h).unwrap();
+					self.file_rev.remove(&(f.dir, f.name));
 				}
 			}
 			INO_TY_SYM => {
@@ -199,7 +207,8 @@ impl InodeStore {
 				*c = c.saturating_sub(nlookup);
 				if *c == 0 {
 					debug!("remove sym {:?}", h);
-					self.sym.remove(h);
+					let (f, _) = self.sym.remove(h).unwrap();
+					self.sym_rev.remove(&(f.dir, f.name));
 				}
 			}
 			_ => unreachable!(),
@@ -238,20 +247,18 @@ impl Filesystem for Fs {
 			}
 			Some(mut e) if e.is_file() => {
 				let l = e.as_file().unwrap().len().unwrap();
-				let ino = self.ino.add_file(File {
-					name: e.name().into(),
-					unix: self.ino.get_unix(&e),
-					dir: d.id(),
-				},true);
+				let ino = self.ino.add_file(
+					File { name: e.name().into(), unix: self.ino.get_unix(&e), dir: d.id() },
+					true,
+				);
 				reply.entry(&TTL, &self.attr(FileType::RegularFile, l, ino), 0)
 			}
 			Some(mut e) if e.is_sym() => {
 				let l = e.as_sym().unwrap().len().unwrap();
-				let ino = self.ino.add_sym(File {
-					name: e.name().into(),
-					unix: self.ino.get_unix(&e),
-					dir: d.id(),
-				}, true);
+				let ino = self.ino.add_sym(
+					File { name: e.name().into(), unix: self.ino.get_unix(&e), dir: d.id() },
+					true,
+				);
 				reply.entry(&TTL, &self.attr(FileType::Symlink, l, ino), 0)
 			}
 			Some(_) => todo!(),
@@ -405,7 +412,10 @@ impl Filesystem for Fs {
 		while let Some((mut e, i)) = index.and_then(|i| d.next_from(i).unwrap()) {
 			let unix = self.ino.get_unix(&e);
 			let (ty, ino) = if let Some(id) = e.dir_id() {
-				(FileType::Directory, self.ino.add_dir(Dir { id, unix }, false))
+				(
+					FileType::Directory,
+					self.ino.add_dir(Dir { id, unix }, false),
+				)
 			} else if e.as_file().is_some() {
 				(
 					FileType::RegularFile,
@@ -446,11 +456,10 @@ impl Filesystem for Fs {
 
 		if let Ok(name) = name.as_bytes().try_into() {
 			d.create_file(name, &Default::default()).unwrap();
-			let ino = self.ino.add_file(File {
-				dir: d.id(),
-				name: name.into(),
-				unix: Default::default(),
-			}, false);
+			let ino = self.ino.add_file(
+				File { dir: d.id(), name: name.into(), unix: Default::default() },
+				false,
+			);
 			reply.created(&TTL, &self.attr(FileType::RegularFile, 0, ino), 0, 0, 0);
 			self.sto.finish_transaction().unwrap();
 		} else {
@@ -489,6 +498,31 @@ impl Filesystem for Fs {
 				reply.ok()
 			} else {
 				reply.error(libc::ENOENT)
+			}
+		} else {
+			reply.error(libc::ENAMETOOLONG);
+		}
+		self.sto.finish_transaction().unwrap();
+	}
+
+	fn rmdir(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+		let d = self.ino.get_dir(parent);
+		let mut d = self.sto.get_dir(d.id).unwrap();
+		// TODO use let_else as soon as Rust 1.65 is stable
+		if let Ok(name) = name.as_bytes().try_into() {
+			if let Some(mut e) = d.find(name).unwrap() {
+				if let Some(d) = e.as_dir().map(|d| d.unwrap()) {
+					if d.len() == 0 {
+						e.remove().unwrap();
+						reply.ok()
+					} else {
+						reply.error(libc::ENOTEMPTY);
+					}
+				} else {
+					reply.error(libc::ENOTDIR);
+				}
+			} else {
+				reply.error(libc::ENOENT);
 			}
 		} else {
 			reply.error(libc::ENAMETOOLONG);

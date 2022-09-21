@@ -83,6 +83,11 @@ impl<S: Storage> Nros<S> {
 		let r = &mut self.header.object_list;
 		let l = r.len();
 		r.resize(&mut self.storage, l + 64)?;
+		r.write(
+			&mut self.storage,
+			l,
+			Record { reference_count: 1, ..Default::default() }.as_ref(),
+		)?;
 		Ok(l / 64)
 	}
 
@@ -91,7 +96,26 @@ impl<S: Storage> Nros<S> {
 		let r = &mut self.header.object_list;
 		let l = r.len();
 		r.resize(&mut self.storage, l + 128)?;
+		let rec = Record { reference_count: 1, ..Default::default() };
+		let mut b = [0; 128];
+		b[..64].copy_from_slice(rec.as_ref());
+		b[64..].copy_from_slice(rec.as_ref());
+		r.write(&mut self.storage, l, &b)?;
 		Ok(l / 64)
+	}
+
+	/// Decrement the reference count to an object.
+	///
+	/// If this count reaches zero the object is automatically freed.
+	///
+	/// This function *must not* be used on invalid objects!
+	pub fn decr_ref(&mut self, id: u64) -> Result<(), Error<S>> {
+		let mut obj = self.object_root(id)?;
+		obj.0.reference_count -= 1;
+		if obj.0.reference_count == 0 {
+			obj.resize(&mut self.storage, 0)?;
+		}
+		self.set_object_root(id, &obj)
 	}
 
 	pub fn move_object(&mut self, to_id: u64, from_id: u64) -> Result<(), Error<S>> {
@@ -168,12 +192,14 @@ impl<S: Storage> Nros<S> {
 		Ok(())
 	}
 
+	/// This function *must not* be used on invalid objects!
 	fn object_root(&mut self, id: u64) -> Result<record_tree::RecordTree, Error<S>> {
-		let mut rec = RecordTree::default();
 		debug_assert!(id * 64 < self.header.object_list.len());
+		let mut rec = RecordTree::default();
 		self.header
 			.object_list
 			.read(&mut self.storage, id * 64, rec.0.as_mut())?;
+		debug_assert!(rec.0.reference_count > 0, "invalid object");
 		Ok(rec)
 	}
 

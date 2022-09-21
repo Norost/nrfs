@@ -294,26 +294,41 @@ impl<'a, S: Storage> Dir<'a, S> {
 		Ok(Some(index))
 	}
 
+	/// Remove the entry with the given name.
+	///
+	/// # Note
+	///
+	/// While it does check if the entry is a directory, it does not check whether it's empty.
+	/// It is up to the user to ensure the directory is empty.
 	pub fn remove(&mut self, name: &Name) -> Result<bool, Error<S>> {
-		let (i, e) = if let Some(r) = self.find_index(name)? {
-			r
+		if let Some((i, e)) = self.find_index(name)? {
+			self.remove_at(i, e.ty).map(|()| true)
 		} else {
-			return Ok(false);
-		};
-		if e.ty == TY_DIR {
-			// Be careful not to leak objects
-			todo!("remove dir");
+			Ok(false)
 		}
-		let offt = self.get_offset(i);
-		// Set ty to 0
+	}
+
+	fn remove_at(&mut self, index: u32, ty: u8) -> Result<(), Error<S>> {
+		// Remove entry
+		let offt = self.get_offset(index);
+		let mut id = [0; 8];
+		self.fs.read_exact(self.id, offt + 8, &mut id)?;
 		self.fs.write_all(self.id, offt + 7, &[0])?;
 		self.set_entry_count(self.entry_count - 1)?;
+
+		// Dereference object.
+		let id = u64::from_le_bytes(id);
+		self.fs.storage.decr_ref(id).map_err(Error::Nros)?;
+		if ty == TY_DIR {
+			// Destroy heap too
+			self.fs.storage.decr_ref(id + 1).map_err(Error::Nros)?;
+		}
 
 		// Check if we should shrink the hashmap
 		if self.should_shrink() {
 			self.shrink()?;
 		}
-		Ok(true)
+		Ok(())
 	}
 
 	fn find_index(&mut self, name: &[u8]) -> Result<Option<(u32, RawEntry)>, Error<S>> {
@@ -780,6 +795,11 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 			Ok(Type::Dir { id }) => Some(id),
 			_ => None,
 		}
+	}
+
+	pub fn remove(self) -> Result<(), Error<S>> {
+		self.dir
+			.remove_at(self.index, self.ty.map_or_else(|t| t, |t| t.to_ty()))
 	}
 
 	pub fn ext_unix(&self) -> Option<&ext::unix::Entry> {
