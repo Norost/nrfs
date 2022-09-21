@@ -7,7 +7,7 @@ use {
 		collections::HashMap,
 		ffi::OsStr,
 		fs,
-		hash::{BuildHasher, Hasher},
+		hash::{BuildHasher, Hash, Hasher},
 		io::{self, Read, Seek, SeekFrom, Write},
 		os::unix::ffi::OsStrExt,
 		rc::Rc,
@@ -30,15 +30,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let m = a.next().ok_or("expected mount path")?;
 
 	let f = fs::OpenOptions::new().read(true).write(true).open(&f)?;
-	fuser::mount2(Fs::new(f), m, &[MountOption::FSName("nrfs".into())])?;
+	fuser::mount2(
+		Fs::new(f),
+		m,
+		&[
+			MountOption::FSName("nrfs".into()),
+			MountOption::DefaultPermissions,
+		],
+	)?;
 	Ok(())
 }
 
 struct Fs {
 	sto: nrfs::Nrfs<S>,
 	ino: InodeStore,
-	uid: u32,
-	gid: u32,
 }
 
 #[derive(Default)]
@@ -55,15 +60,21 @@ struct InodeStore {
 	file_rev: HashMap<(u64, Rc<Name>), Handle<()>>,
 	/// Reverse lookup from directory ID + sym
 	sym_rev: HashMap<(u64, Rc<Name>), Handle<()>>,
+	/// Default UID
+	uid: u32,
+	/// Default GID
+	gid: u32,
 }
 
 struct Dir {
 	id: u64,
+	unix: nrfs::dir::ext::unix::Entry,
 }
 
 struct File {
 	dir: u64,
 	name: Rc<Name>,
+	unix: nrfs::dir::ext::unix::Entry,
 }
 
 enum Inode<D, F, S> {
@@ -77,22 +88,29 @@ impl Fs {
 		let sto = nrfs::Nrfs::load(S::new(io)).unwrap();
 		let uid = unsafe { libc::getuid() };
 		let gid = unsafe { libc::getgid() };
-		let mut s = Self { sto, ino: Default::default(), uid, gid };
-		s.ino.add_dir(Dir { id: 0 });
+		let mut s = Self { sto, ino: InodeStore { uid, gid, ..Default::default() } };
+		s.ino.add_dir(Dir {
+			id: 0,
+			unix: nrfs::dir::ext::unix::Entry { permissions: 0o777, uid, gid },
+		}, true);
 		s
 	}
 
 	fn attr(&self, ty: FileType, size: u64, ino: u64) -> FileAttr {
+		let u = match self.ino.get(ino) {
+			Inode::Dir(d) => &d.unix,
+			Inode::File(f) | Inode::Sym(f) => &f.unix,
+		};
 		let blksize = 1u32 << self.sto.storage().block_size_p2();
 		FileAttr {
 			atime: UNIX_EPOCH,
 			mtime: UNIX_EPOCH,
 			ctime: UNIX_EPOCH,
 			crtime: UNIX_EPOCH,
-			perm: 0o700,
+			perm: u.permissions,
 			nlink: 1,
-			uid: self.uid,
-			gid: self.gid,
+			uid: u.uid,
+			gid: u.gid,
 			rdev: 0,
 			flags: 0,
 			kind: ty,
@@ -105,37 +123,34 @@ impl Fs {
 }
 
 impl InodeStore {
-	fn add_dir(&mut self, dir: Dir) -> u64 {
-		let h = if let Some(h) = self.dir_rev.get_mut(&dir.id) {
-			self.dir[*h].1 += 1;
+	fn add_dir(&mut self, dir: Dir, incr: bool) -> u64 {
+		Self::add(&mut self.dir, &mut self.dir_rev, dir.id, dir, incr) | INO_TY_DIR
+	}
+
+	fn add_file(&mut self, file: File, incr: bool) -> u64 {
+		let k = (file.dir, file.name.clone());
+		Self::add(&mut self.file, &mut self.file_rev, k, file, incr) | INO_TY_FILE
+	}
+
+	fn add_sym(&mut self, sym: File, incr: bool) -> u64 {
+		let k = (sym.dir, sym.name.clone());
+		Self::add(&mut self.sym, &mut self.sym_rev, k, sym, incr) | INO_TY_SYM
+	}
+
+	fn add<T, K>(m: &mut Arena<(T, u64), ()>, rev_m: &mut HashMap<K, Handle<()>>, k: K, t: T, incr: bool) -> u64
+	where
+		K: Hash + Eq,
+	{
+		let h = if let Some(h) = rev_m.get_mut(&k) {
+			m[*h].1 += u64::from(incr);
 			*h
 		} else {
-			self.dir.insert((dir, 0))
+			let h = m.insert((t, 0));
+			rev_m.insert(k, h);
+			h
 		};
 		// Because ROOT_ID is reserved for the root dir, but nrfs uses 0 for the root dir
-		h.into_raw().0 as u64 + 1 | INO_TY_DIR
-	}
-
-	fn add_file(&mut self, file: File) -> u64 {
-		let h = if let Some(h) = self.file_rev.get_mut(&(file.dir, file.name.clone())) {
-			self.file[*h].1 += 1;
-			*h
-		} else {
-			self.file.insert((file, 0))
-		};
-		// Add 1 to the rest too for consistency
-		h.into_raw().0 as u64 + 1 | INO_TY_FILE
-	}
-
-	fn add_sym(&mut self, sym: File) -> u64 {
-		let h = if let Some(h) = self.sym_rev.get_mut(&(sym.dir, sym.name.clone())) {
-			self.sym[*h].1 += 1;
-			*h
-		} else {
-			self.sym.insert((sym, 0))
-		};
-		// Add 1 to the rest too for consistency
-		h.into_raw().0 as u64 + 1 | INO_TY_SYM
+		h.into_raw().0 as u64 + 1
 	}
 
 	fn get(&self, ino: u64) -> Inode<&Dir, &File, &File> {
@@ -165,27 +180,24 @@ impl InodeStore {
 		match ino & INO_TY_MASK {
 			INO_TY_DIR => {
 				let c = &mut self.dir[h].1;
-				if let Some(n) = c.checked_sub(nlookup) {
-					*c = n;
-				} else {
+				*c = c.saturating_sub(nlookup);
+				if *c == 0 {
 					debug!("remove dir {:?}", h);
 					self.dir.remove(h);
 				}
 			}
 			INO_TY_FILE => {
 				let c = &mut self.file[h].1;
-				if let Some(n) = c.checked_sub(nlookup) {
-					*c = n;
-				} else {
+				*c = c.saturating_sub(nlookup);
+				if *c == 0 {
 					debug!("remove file {:?}", h);
 					self.file.remove(h);
 				}
 			}
 			INO_TY_SYM => {
 				let c = &mut self.sym[h].1;
-				if let Some(n) = c.checked_sub(nlookup) {
-					*c = n;
-				} else {
+				*c = c.saturating_sub(nlookup);
+				if *c == 0 {
 					debug!("remove sym {:?}", h);
 					self.sym.remove(h);
 				}
@@ -193,15 +205,21 @@ impl InodeStore {
 			_ => unreachable!(),
 		}
 	}
+
+	fn get_unix(&self, entry: &nrfs::dir::Entry<'_, '_, S>) -> nrfs::dir::ext::unix::Entry {
+		entry
+			.ext_unix()
+			.copied()
+			.unwrap_or(nrfs::dir::ext::unix::Entry {
+				permissions: 0o700,
+				uid: self.uid,
+				gid: self.gid,
+			})
+	}
 }
 
 impl Filesystem for Fs {
 	fn lookup(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-		if req.uid() != self.uid {
-			reply.error(libc::EPERM);
-			return;
-		}
-
 		let d = self.ino.get_dir(parent);
 		let mut d = self.sto.get_dir(d.id).unwrap();
 		match name
@@ -213,21 +231,27 @@ impl Filesystem for Fs {
 			Some(mut e) if e.is_dir() => {
 				let d = e.as_dir().unwrap().unwrap();
 				let l = d.len().into();
-				let ino = self.ino.add_dir(Dir { id: d.id() });
+				let ino = self
+					.ino
+					.add_dir(Dir { id: d.id(), unix: self.ino.get_unix(&e) }, true);
 				reply.entry(&TTL, &self.attr(FileType::Directory, l, ino), 0)
 			}
 			Some(mut e) if e.is_file() => {
 				let l = e.as_file().unwrap().len().unwrap();
-				let ino = self
-					.ino
-					.add_file(File { name: e.name().into(), dir: d.id() });
+				let ino = self.ino.add_file(File {
+					name: e.name().into(),
+					unix: self.ino.get_unix(&e),
+					dir: d.id(),
+				},true);
 				reply.entry(&TTL, &self.attr(FileType::RegularFile, l, ino), 0)
 			}
 			Some(mut e) if e.is_sym() => {
 				let l = e.as_sym().unwrap().len().unwrap();
-				let ino = self
-					.ino
-					.add_sym(File { name: e.name().into(), dir: d.id() });
+				let ino = self.ino.add_sym(File {
+					name: e.name().into(),
+					unix: self.ino.get_unix(&e),
+					dir: d.id(),
+				}, true);
 				reply.entry(&TTL, &self.attr(FileType::Symlink, l, ino), 0)
 			}
 			Some(_) => todo!(),
@@ -240,11 +264,6 @@ impl Filesystem for Fs {
 	}
 
 	fn getattr(&mut self, req: &Request, ino: u64, reply: ReplyAttr) {
-		if req.uid() != self.uid {
-			reply.error(libc::EPERM);
-			return;
-		}
-
 		match self.ino.get(ino) {
 			Inode::Dir(d) => {
 				let d = self.sto.get_dir(d.id).unwrap();
@@ -315,11 +334,6 @@ impl Filesystem for Fs {
 		_lock: Option<u64>,
 		reply: ReplyData,
 	) {
-		if req.uid() != self.uid {
-			reply.error(libc::EPERM);
-			return;
-		}
-
 		let mut buf = vec![0; size as _];
 		let f = self.ino.get_file(ino);
 		let mut d = self.sto.get_dir(f.dir).unwrap();
@@ -341,11 +355,6 @@ impl Filesystem for Fs {
 		_lock_owner: Option<u64>,
 		reply: ReplyWrite,
 	) {
-		if req.uid() != self.uid {
-			reply.error(libc::EPERM);
-			return;
-		}
-
 		let f = self.ino.get_file(ino);
 		let mut d = self.sto.get_dir(f.dir).unwrap();
 		let mut e = d.find(&f.name).unwrap().unwrap();
@@ -357,11 +366,6 @@ impl Filesystem for Fs {
 	}
 
 	fn readlink(&mut self, req: &Request, ino: u64, reply: ReplyData) {
-		if req.uid() != self.uid {
-			reply.error(libc::EPERM);
-			return;
-		}
-
 		let mut buf = [0; 1 << 15];
 		let f = self.ino.get_sym(ino);
 		let mut d = self.sto.get_dir(f.dir).unwrap();
@@ -379,11 +383,6 @@ impl Filesystem for Fs {
 		mut offset: i64,
 		mut reply: ReplyDirectory,
 	) {
-		if req.uid() != self.uid {
-			reply.error(libc::EPERM);
-			return;
-		}
-
 		if offset == 0 {
 			if reply.add(ino, 1, FileType::Directory, ".") {
 				return reply.ok();
@@ -404,17 +403,20 @@ impl Filesystem for Fs {
 
 		let mut index = Some(offset as u32 - 2);
 		while let Some((mut e, i)) = index.and_then(|i| d.next_from(i).unwrap()) {
+			let unix = self.ino.get_unix(&e);
 			let (ty, ino) = if let Some(id) = e.dir_id() {
-				(FileType::Directory, self.ino.add_dir(Dir { id }))
+				(FileType::Directory, self.ino.add_dir(Dir { id, unix }, false))
 			} else if e.as_file().is_some() {
 				(
 					FileType::RegularFile,
-					self.ino.add_file(File { dir: d_id, name: e.name().into() }),
+					self.ino
+						.add_file(File { dir: d_id, name: e.name().into(), unix }, false),
 				)
 			} else if e.as_sym().is_some() {
 				(
 					FileType::Symlink,
-					self.ino.add_sym(File { dir: d_id, name: e.name().into() }),
+					self.ino
+						.add_sym(File { dir: d_id, name: e.name().into(), unix }, false),
 				)
 			} else {
 				unreachable!("miscellaneous file type");
@@ -442,14 +444,13 @@ impl Filesystem for Fs {
 		let d = self.ino.get_dir(parent);
 		let mut d = self.sto.get_dir(d.id).unwrap();
 
-		if req.uid() != self.uid {
-			reply.error(libc::EPERM);
-			return;
-		}
-
 		if let Ok(name) = name.as_bytes().try_into() {
 			d.create_file(name, &Default::default()).unwrap();
-			let ino = self.ino.add_file(File { dir: d.id(), name: name.into() });
+			let ino = self.ino.add_file(File {
+				dir: d.id(),
+				name: name.into(),
+				unix: Default::default(),
+			}, false);
 			reply.created(&TTL, &self.attr(FileType::RegularFile, 0, ino), 0, 0, 0);
 			self.sto.finish_transaction().unwrap();
 		} else {
@@ -467,11 +468,6 @@ impl Filesystem for Fs {
 		_mode: i32,
 		reply: ReplyEmpty,
 	) {
-		if req.uid() != self.uid {
-			reply.error(libc::EPERM);
-			return;
-		}
-
 		match self.ino.get(ino) {
 			Inode::Dir(_) => reply.error(libc::EISDIR),
 			Inode::File(f) | Inode::Sym(f) => {
@@ -486,11 +482,6 @@ impl Filesystem for Fs {
 	}
 
 	fn unlink(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-		if req.uid() != self.uid {
-			reply.error(libc::EPERM);
-			return;
-		}
-
 		let d = self.ino.get_dir(parent);
 		let mut d = self.sto.get_dir(d.id).unwrap();
 		if let Ok(name) = name.as_bytes().try_into() {
@@ -502,6 +493,7 @@ impl Filesystem for Fs {
 		} else {
 			reply.error(libc::ENAMETOOLONG);
 		}
+		self.sto.finish_transaction().unwrap();
 	}
 
 	fn destroy(&mut self) {

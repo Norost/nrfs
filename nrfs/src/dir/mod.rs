@@ -599,7 +599,10 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 	/// Grow the hashmap
 	fn grow(&mut self) -> Result<(), Error<S>> {
-		debug_assert!(self.hashmap_size_p2 < 32, "hashmap is already at maximum size");
+		debug_assert!(
+			self.hashmap_size_p2 < 32,
+			"hashmap is already at maximum size"
+		);
 		self.resize(self.hashmap_size_p2 + 1)
 	}
 
@@ -608,8 +611,14 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// There must be *at least* `capacity / 2 + 1` slots free,
 	/// i.e. `entry_count < capacity / 2`.
 	fn shrink(&mut self) -> Result<(), Error<S>> {
-		debug_assert!(self.hashmap_size_p2 != 0, "hashmap is already at minimum size");
-		debug_assert!(u64::from(self.entry_count) < self.capacity() / 2, "not enough free slots");
+		debug_assert!(
+			self.hashmap_size_p2 != 0,
+			"hashmap is already at minimum size"
+		);
+		debug_assert!(
+			u64::from(self.entry_count) < self.capacity() / 2,
+			"not enough free slots"
+		);
 		self.resize(self.hashmap_size_p2 - 1)
 	}
 
