@@ -1,14 +1,16 @@
+pub mod ext;
+
+mod hashmap;
+
 use {
 	crate::{Error, File, Name, Nrfs, Storage},
 	core::{
 		fmt,
 		ops::{Deref, DerefMut},
 	},
+	hashmap::*,
 	rangemap::RangeSet,
-	siphasher::sip::SipHasher13,
 };
-
-pub mod ext;
 
 // TODO determine a good load factor.
 const MAX_LOAD_FACTOR_MILLI: u64 = 875;
@@ -57,7 +59,7 @@ impl<S: Storage> DerefMut for Dir<'_, S> {
 impl<'a, S: Storage> Dir<'a, S> {
 	pub(crate) fn new(fs: &'a mut Nrfs<S>, options: &DirOptions) -> Result<Self, Error<S>> {
 		let mut header_len = 24;
-		let mut entry_len = 16;
+		let mut entry_len = 24;
 		let unix_offset = options.extensions.unix().then(|| {
 			header_len += 8; // 4, 2, "unix", offset
 			let o = entry_len;
@@ -229,7 +231,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 	) -> Result<Option<(Entry<'a, 'b, S>, Option<u32>)>, Error<S>> {
 		while u64::from(index) < self.capacity() {
 			// Get standard info
-			let e = self.get(index)?;
+			let e = self.hashmap().get(index)?;
 
 			if e.ty == 0 {
 				// Is empty, so skip
@@ -243,55 +245,53 @@ impl<'a, S: Storage> Dir<'a, S> {
 			self.read_heap(e.key_offset, key)?;
 
 			// Get extension info
-			return self
-				.get_ext(index, e, key)
-				.map_err(|_| todo!())
-				.map(|e| Some((e, index.checked_add(1))));
+			let e = self.hashmap().get_ext(index, e)?;
+			let e = Entry::new(self, e, key);
+			return Ok(Some((e, index.checked_add(1))));
 		}
 		Ok(None)
 	}
 
 	pub fn find<'b>(&'b mut self, name: &Name) -> Result<Option<Entry<'a, 'b, S>>, Error<S>> {
-		self.find_index(name)?
-			.map(|(i, e)| self.get_ext(i, e, name))
+		self.hashmap()
+			.find_index(name)?
+			.map(|(i, e)| {
+				self.hashmap()
+					.get_ext(i, e)
+					.map(|e| Entry::new(self, e, name))
+			})
 			.transpose()
 	}
 
 	/// Try to insert a new entry.
 	///
-	/// Returns `true` if succesful, `false` if an entry with the same name already exists.
+	/// Returns `None` if an entry with the same name already exists.
 	fn insert(&mut self, entry: NewEntry<'_>, ext: &Extensions) -> Result<Option<u32>, Error<S>> {
 		// Check if we should grow the hashmap
 		if self.should_grow() {
 			self.grow()?;
 		}
 
-		let mut index = self.hash(entry.name) & self.index_mask();
-		loop {
-			let e = self.get(index)?;
-			if e.ty == 0 {
-				break;
-			}
-			index += 1;
-			index &= self.index_mask();
-		}
-
-		let mut key = [0; 255];
-		key[..entry.name.len()].copy_from_slice(entry.name);
-
-		// Store name
-		let name_offset = self.alloc(entry.name.len_u8().into())?;
-		self.write_heap(name_offset, entry.name)?;
-
-		let e = RawEntry {
-			key_offset: name_offset,
-			key_len: entry.name.len_u8(),
-			ty: entry.ty.to_ty(),
-			id_or_offset: entry.ty.to_data(),
+		let hash = self.hash(entry.name);
+		let name = Some(entry.name);
+		let entry = RawEntryExt {
+			entry: RawEntry {
+				key_len: u8::MAX,
+				key_offset: u64::MAX,
+				ty: entry.ty.to_ty(),
+				id_or_offset: entry.ty.to_data(),
+				index: u32::MAX,
+				hash,
+			},
+			unix: ext.unix,
+			mtime: ext.mtime,
 		};
-		self.set_ext(index, &e, ext)?;
-		self.set_entry_count(self.entry_count + 1)?;
-		Ok(Some(index))
+
+		let r = self.hashmap().insert(entry, name)?;
+		if r.is_some() {
+			self.set_entry_count(self.entry_count + 1)?;
+		}
+		Ok(r)
 	}
 
 	/// Remove the entry with the given name.
@@ -301,27 +301,24 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// While it does check if the entry is a directory, it does not check whether it's empty.
 	/// It is up to the user to ensure the directory is empty.
 	pub fn remove(&mut self, name: &Name) -> Result<bool, Error<S>> {
-		if let Some((i, e)) = self.find_index(name)? {
-			self.remove_at(i, e.ty).map(|()| true)
+		if let Some((i, e)) = self.hashmap().find_index(name)? {
+			self.remove_at(i, e.ty, e.id_or_offset).map(|()| true)
 		} else {
 			Ok(false)
 		}
 	}
 
-	fn remove_at(&mut self, index: u32, ty: u8) -> Result<(), Error<S>> {
-		// Remove entry
-		let offt = self.get_offset(index);
-		let mut id = [0; 8];
-		self.fs.read_exact(self.id, offt + 8, &mut id)?;
-		self.fs.write_all(self.id, offt + 7, &[0])?;
+	fn remove_at(&mut self, index: u32, ty: u8, id: u64) -> Result<(), Error<S>> {
 		self.set_entry_count(self.entry_count - 1)?;
+		self.hashmap().remove_at(index)?;
 
 		// Dereference object.
-		let id = u64::from_le_bytes(id);
-		self.fs.storage.decr_ref(id).map_err(Error::Nros)?;
-		if ty == TY_DIR {
-			// Destroy heap too
-			self.fs.storage.decr_ref(id + 1).map_err(Error::Nros)?;
+		if [TY_DIR, TY_FILE, TY_SYM].contains(&ty) {
+			self.fs.storage.decr_ref(id).map_err(Error::Nros)?;
+			if ty == TY_DIR {
+				// Destroy heap too
+				self.fs.storage.decr_ref(id + 1).map_err(Error::Nros)?;
+			}
 		}
 
 		// Check if we should shrink the hashmap
@@ -331,169 +328,26 @@ impl<'a, S: Storage> Dir<'a, S> {
 		Ok(())
 	}
 
-	fn find_index(&mut self, name: &[u8]) -> Result<Option<(u32, RawEntry)>, Error<S>> {
-		let mut index @ last_index = self.hash(name) & self.index_mask();
-		loop {
-			let e = self.get(index)?;
-			if e.ty == 0 {
-				return Ok(None);
-			}
-			if self.compare_names((e.key_len, e.key_offset), name)? {
-				break Ok(Some((index, e)));
-			}
-			index += 1;
-			index &= self.index_mask();
-			if index == last_index {
-				return Ok(None);
-			}
-		}
-	}
-
 	fn hash(&self, key: &[u8]) -> u32 {
 		use core::hash::Hasher as _;
 		match self.hash_algorithm {
 			HashAlgorithm::SipHasher13 => {
-				let mut h = SipHasher13::new_with_key(&self.hash_key);
+				let mut h = siphasher::sip::SipHasher13::new_with_key(&self.hash_key);
 				h.write(key);
 				h.finish() as _
 			}
 		}
 	}
 
-	/// Get the raw standard info for an entry.
-	///
-	/// This does not check if the entry is empty or not.
-	///
-	/// # Panics
-	///
-	/// If the index is out of range.
-	fn get(&mut self, index: u32) -> Result<RawEntry, Error<S>> {
-		let offt = self.get_offset(index);
-		let mut buf = [0; 16];
-		self.fs.read_exact(self.id, offt, &mut buf)?;
-		let [a, b, c, d, e, f, key_len, ty, id @ ..] = buf;
-		let key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
-		let id_or_offset = u64::from_le_bytes(id);
-		Ok(RawEntry { key_offset, key_len, id_or_offset, ty })
-	}
-
-	/// Get an entry with extension data.
-	///
-	/// This does not check if the entry is empty or not.
-	///
-	/// # Panics
-	///
-	/// If the index is out of range.
-	/// If the name is longer than 255 bytes.
-	fn get_ext<'b>(
-		&'b mut self,
-		index: u32,
-		entry: RawEntry,
-		name: &[u8],
-	) -> Result<Entry<'a, 'b, S>, Error<S>> {
-		let offt = self.get_offset(index);
-
-		// Get unix info
-		let unix = self
-			.unix_offset
-			.map(|o| {
-				let mut buf = [0; 8];
-				self.fs.read_exact(self.id, offt + u64::from(o), &mut buf)?;
-				Ok(ext::unix::Entry::from_raw(buf))
-			})
-			.transpose()?;
-
-		// Get mtime info
-		let mtime = self
-			.mtime_offset
-			.map(|o| {
-				let mut buf = [0; 8];
-				self.fs.read_exact(self.id, offt + u64::from(o), &mut buf)?;
-				Ok(ext::mtime::Entry::from_raw(buf))
-			})
-			.transpose()?;
-
-		let mut key = [0; 255];
-		key[..name.len()].copy_from_slice(name);
-		let key_len = name.len().try_into().unwrap();
-
-		let ty = match entry.ty {
-			TY_DIR => Ok(Type::Dir { id: entry.id_or_offset }),
-			TY_FILE => Ok(Type::File { id: entry.id_or_offset }),
-			TY_SYM => Ok(Type::Sym { id: entry.id_or_offset }),
-			TY_EMBED_FILE => Ok(Type::EmbedFile {
-				offset: entry.id_or_offset & 0xff_ffff,
-				length: (entry.id_or_offset >> 48) as _,
-			}),
-			TY_EMBED_SYM => Ok(Type::EmbedSym {
-				offset: entry.id_or_offset & 0xff_ffff,
-				length: (entry.id_or_offset >> 48) as _,
-			}),
-			n => Err(n),
-		};
-		Ok(Entry { dir: self, index, ty, key_len, key, unix, mtime })
-	}
-
 	/// Set the type and offset of an entry.
 	///
 	/// The entry must not be empty, i.e. type is not 0.
 	pub(crate) fn set_ty(&mut self, index: u32, ty: Type) -> Result<(), Error<S>> {
-		let mut e = self.get(index)?;
+		let mut e = self.hashmap().get(index)?;
 		debug_assert!(e.ty != 0);
 		e.ty = ty.to_ty();
 		e.id_or_offset = ty.to_data();
-		self.set(index, &e).map(|_: u64| ())
-	}
-
-	/// Set the raw standard info for an entry.
-	///
-	/// This does not check if the entry is empty or not.
-	///
-	/// # Panics
-	///
-	/// If the index is out of range.
-	fn set(&mut self, index: u32, entry: &RawEntry) -> Result<u64, Error<S>> {
-		let offt = self.get_offset(index);
-		let mut buf = [0; 16];
-		buf[..8].copy_from_slice(&entry.key_offset.to_le_bytes());
-		buf[6] = entry.key_len;
-		buf[7] = entry.ty;
-		buf[8..].copy_from_slice(&entry.id_or_offset.to_le_bytes());
-		self.fs.write_all(self.id, offt, &buf)?;
-		Ok(offt)
-	}
-
-	/// Set an entry with key and extension data.
-	///
-	/// This does not check if the entry is empty or not.
-	///
-	/// # Panics
-	///
-	/// If the index is out of range.
-	/// If the name is longer than 255 bytes.
-	fn set_ext(&mut self, index: u32, entry: &RawEntry, ext: &Extensions) -> Result<(), Error<S>> {
-		let offt = self.set(index, entry)?;
-
-		// Set unix info
-		if let Some(o) = self.unix_offset {
-			let u = ext.unix.map_or([0; 8], |u| u.into_raw());
-			self.fs.write_all(self.id, offt + u64::from(o), &u)?;
-		}
-
-		// Set mtime info
-		if let Some(o) = self.mtime_offset {
-			let u = ext.mtime.map_or([0; 8], |u| u.into_raw());
-			self.fs.write_all(self.id, offt + u64::from(o), &u)?;
-		}
-
-		Ok(())
-	}
-
-	/// Determine the offset of an entry.
-	///
-	/// This does *not* check if the index is in range.
-	fn get_offset(&self, index: u32) -> u64 {
-		u64::from(self.header_len8) * 8 + u64::from(index) * u64::from(self.entry_len8) * 8
+		self.hashmap().set(index, &e).map(|_: u64| ())
 	}
 
 	/// Check if the hashmap should grow.
@@ -645,38 +499,15 @@ impl<'a, S: Storage> Dir<'a, S> {
 
 		let new_map_id = self.fs.storage.new_object().map_err(Error::Nros)?;
 		self.init_with_size(new_map_id, new_size_p2)?;
-		let new_index_mask = 1u32.wrapping_shl(new_size_p2.into()).wrapping_sub(1);
 
 		// Copy entries
 		for index in (0..self.capacity()).map(|i| i as _) {
-			let mut buf = [0; 64];
-			self.fs.read_exact(
-				self.id,
-				self.get_offset(index),
-				&mut buf[..self.entry_size() as _],
-			)?;
-			let [a, b, c, d, e, f, key_len, ty, ..] = buf;
-			if ty == 0 {
+			let e = self.hashmap().get(index)?;
+			if e.ty == 0 {
 				continue;
 			}
-
-			let key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
-			let mut key = [0; 255];
-			self.read_heap(key_offset, &mut key[..key_len.into()])?;
-
-			let mut i = self.hash(&key[..key_len.into()]);
-
-			loop {
-				let mut c = [0];
-				let offt = self.get_offset(i & new_index_mask);
-				self.fs.read_exact(new_map_id, offt + 7, &mut c)?;
-				if c[0] == 0 {
-					self.fs
-						.write_all(new_map_id, offt, &buf[..self.entry_size() as _])?;
-					break;
-				}
-				i += 1;
-			}
+			let e = self.hashmap().get_ext(index, e)?;
+			HashMap::new(self, new_map_id, new_size_p2).insert(e, None)?;
 		}
 
 		// Replace old map
@@ -702,6 +533,10 @@ impl<'a, S: Storage> Dir<'a, S> {
 	pub fn id(&self) -> u64 {
 		self.id
 	}
+
+	fn hashmap(&mut self) -> HashMap<'a, '_, S> {
+		HashMap::new(self, self.id, self.hashmap_size_p2)
+	}
 }
 
 impl<S: Storage> fmt::Debug for Dir<'_, S>
@@ -710,7 +545,6 @@ where
 {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Dir))
-			.field("fs", &self.fs)
 			.field("id", &self.id)
 			.field("header_len", &(u16::from(self.header_len8) * 8))
 			.field("entry_len", &(u16::from(self.entry_len8) * 8))
@@ -723,22 +557,14 @@ where
 			.field("unix_offset", &self.unix_offset)
 			.field("mtime_offset", &self.mtime_offset)
 			.field("alloc_map", &self.alloc_map)
-			.finish()
+			.finish_non_exhaustive()
 	}
-}
-
-impl DirData {}
-
-struct RawEntry {
-	key_offset: u64,
-	key_len: u8,
-	id_or_offset: u64,
-	ty: u8,
 }
 
 pub struct Entry<'a, 'b, S: Storage> {
 	dir: &'b mut Dir<'a, S>,
 	index: u32,
+	hash: u32,
 	ty: Result<Type, u8>,
 	key_len: u8,
 	key: [u8; 255],
@@ -747,6 +573,35 @@ pub struct Entry<'a, 'b, S: Storage> {
 }
 
 impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
+	fn new(dir: &'b mut Dir<'a, S>, e: RawEntryExt, name: &[u8]) -> Self {
+		debug_assert_eq!(usize::from(e.entry.key_len), name.len());
+		let mut key = [0; 255];
+		key[..name.len()].copy_from_slice(name);
+		Self {
+			dir,
+			index: e.entry.index,
+			hash: e.entry.hash,
+			ty: match e.entry.ty {
+				TY_DIR => Ok(Type::Dir { id: e.entry.id_or_offset }),
+				TY_FILE => Ok(Type::File { id: e.entry.id_or_offset }),
+				TY_SYM => Ok(Type::Sym { id: e.entry.id_or_offset }),
+				TY_EMBED_FILE => Ok(Type::EmbedFile {
+					offset: e.entry.id_or_offset & 0xff_ffff,
+					length: (e.entry.id_or_offset >> 48) as _,
+				}),
+				TY_EMBED_SYM => Ok(Type::EmbedSym {
+					offset: e.entry.id_or_offset & 0xff_ffff,
+					length: (e.entry.id_or_offset >> 48) as _,
+				}),
+				n => Err(n),
+			},
+			key_len: e.entry.key_len,
+			key,
+			unix: e.unix,
+			mtime: e.mtime,
+		}
+	}
+
 	pub fn name(&self) -> &Name {
 		self.key[..self.key_len.into()].try_into().unwrap()
 	}
@@ -798,8 +653,11 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 	}
 
 	pub fn remove(self) -> Result<(), Error<S>> {
-		self.dir
-			.remove_at(self.index, self.ty.map_or_else(|t| t, |t| t.to_ty()))
+		self.dir.remove_at(
+			self.index,
+			self.ty.as_ref().map_or_else(|t| *t, |t| t.to_ty()),
+			self.ty.map_or(0, |t| t.to_data()),
+		)
 	}
 
 	pub fn ext_unix(&self) -> Option<&ext::unix::Entry> {
@@ -814,8 +672,8 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 impl<S: Storage + fmt::Debug> fmt::Debug for Entry<'_, '_, S> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Entry))
-			.field("dir", self.dir)
 			.field("index", &self.index)
+			.field("hash", &format_args!("{:#10x}", self.hash))
 			.field("ty", &self.ty)
 			// TODO use Utf8Lossy when it is stable.
 			.field(
@@ -823,7 +681,7 @@ impl<S: Storage + fmt::Debug> fmt::Debug for Entry<'_, '_, S> {
 				&String::from_utf8_lossy(&self.key[..self.key_len.into()]),
 			)
 			.field("unix", &self.unix)
-			.finish()
+			.finish_non_exhaustive()
 	}
 }
 
@@ -860,12 +718,6 @@ impl Type {
 struct NewEntry<'a> {
 	name: &'a Name,
 	ty: Type,
-}
-
-#[derive(Clone, Copy, Default, Debug)]
-pub enum HashAlgorithm {
-	#[default]
-	SipHasher13 = 1,
 }
 
 #[derive(Default)]

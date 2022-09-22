@@ -228,7 +228,7 @@ impl InodeStore {
 }
 
 impl Filesystem for Fs {
-	fn lookup(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
+	fn lookup(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
 		let d = self.ino.get_dir(parent);
 		let mut d = self.sto.get_dir(d.id).unwrap();
 		match name
@@ -446,7 +446,7 @@ impl Filesystem for Fs {
 		req: &Request,
 		parent: u64,
 		name: &OsStr,
-		_mode: u32,
+		mode: u32,
 		_umask: u32,
 		_flags: i32,
 		reply: ReplyCreate,
@@ -457,7 +457,15 @@ impl Filesystem for Fs {
 		if let Ok(name) = name.as_bytes().try_into() {
 			d.create_file(name, &Default::default()).unwrap();
 			let ino = self.ino.add_file(
-				File { dir: d.id(), name: name.into(), unix: Default::default() },
+				File {
+					dir: d.id(),
+					name: name.into(),
+					unix: nrfs::dir::ext::unix::Entry {
+						permissions: mode as _,
+						uid: req.uid(),
+						gid: req.gid(),
+					},
+				},
 				false,
 			);
 			reply.created(&TTL, &self.attr(FileType::RegularFile, 0, ino), 0, 0, 0);
@@ -493,6 +501,7 @@ impl Filesystem for Fs {
 	fn unlink(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
 		let d = self.ino.get_dir(parent);
 		let mut d = self.sto.get_dir(d.id).unwrap();
+
 		if let Ok(name) = name.as_bytes().try_into() {
 			if d.remove(name).unwrap() {
 				reply.ok()

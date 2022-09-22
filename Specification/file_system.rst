@@ -120,9 +120,15 @@ MLen represents a power of 2.
 Extensions define metadata to be attached to entries.
 Each extension is prefixed with a 4 byte header.
 
-Hash algorithms are:
+Hash algorithms are [#hashing_algorithm]_:
 
-* 1: SipHash13
+* 0: No hash
+* 1: SipHash13 with Robin Hood hashing
+
+.. [#unknown_hash]
+
+   If the hashing algorithm isn't known the table can still be iterated as a
+   fallback (i.e. assume "No hash").
 
 .. table:: Extension header
 
@@ -144,8 +150,10 @@ Hash algorithms are:
   |    0 | Type | KLen |               Key offset                |
   +------+------+------+-----------------------------------------+
   |    8 |                     Object index                      |
-  +------+-------------------------------------------------------+
-  |   16 |                    Extension data                     |
+  +------+---------------------------+---------------------------+
+  |   16 |                           |           Hash            |
+  +------+---------------------------+---------------------------+
+  |   24 |                    Extension data                     |
   +------+-------------------------------------------------------+
   |  ... |                          ...                          |
   +------+-------------------------------------------------------+
@@ -158,8 +166,10 @@ Hash algorithms are:
   |    0 | Type | KLen |               Key offset                |
   +------+------+------+-----------------------------------------+
   |    8 | Data Length |               Data offset               |
-  +------+-------------+-----------------------------------------+
-  |   16 |                    Extension data                     |
+  +------+-------------+-------------+---------------------------+
+  |   16 |                           |           Hash            |
+  +------+---------------------------+---------------------------+
+  |   24 |                    Extension data                     |
   +------+-------------------------------------------------------+
   |  ... |                          ...                          |
   +------+-------------------------------------------------------+

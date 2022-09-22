@@ -199,7 +199,7 @@ impl<S: Storage> Nros<S> {
 		self.header
 			.object_list
 			.read(&mut self.storage, id * 64, rec.0.as_mut())?;
-		debug_assert!(rec.0.reference_count > 0, "invalid object");
+		debug_assert!(rec.0.reference_count > 0, "invalid object {}", id);
 		Ok(rec)
 	}
 

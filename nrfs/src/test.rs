@@ -249,3 +249,20 @@ fn shrink() {
 		i = ni;
 	}
 }
+
+#[test]
+fn remove_collision() {
+	let mut fs = new();
+	let mut d = fs.root_dir().unwrap();
+	// NOTE: hash must be SipHash13 and key must be 0
+	// Insert files to avoid shrinking below 8
+	for i in 0..5 {
+		d.create_file((&[i]).into(), &Default::default()).unwrap();
+	}
+	d.create_file(b"d".into(), &Default::default()).unwrap(); // c4eafac0
+	d.create_file(b"g".into(), &Default::default()).unwrap(); // e57630a8
+	assert!(d.remove(b"d".into()).unwrap());
+	// If the hashmap is improperly implemented, the empty slot makes
+	// it impossible to find "g" with linear probing
+	assert!(d.remove(b"g".into()).unwrap());
+}
