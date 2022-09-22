@@ -34,11 +34,15 @@ pub use {
 	storage::{Read, Storage, Write},
 };
 
-use {core::fmt, record::Record, record_cache::RecordCache, record_tree::RecordTree};
+use {
+	core::fmt, rangemap::RangeSet, record::Record, record_cache::RecordCache,
+	record_tree::RecordTree,
+};
 
 pub struct Nros<S: Storage> {
 	storage: RecordCache<S>,
 	header: header::Header,
+	used_objects: RangeSet<u64>,
 }
 impl<S: Storage> Nros<S> {
 	pub fn new(
@@ -62,7 +66,11 @@ impl<S: Storage> Nros<S> {
 		w.get_mut()[..h.as_ref().len()].copy_from_slice(h.as_ref());
 		w.set_region(0, 1).map_err(NewError::Storage)?;
 		w.finish().map_err(NewError::Storage)?;
-		Ok(Self { storage: RecordCache::new(storage, max_record_size, compression), header: h })
+		Ok(Self {
+			storage: RecordCache::new(storage, max_record_size, compression),
+			header: h,
+			used_objects: Default::default(),
+		})
 	}
 
 	pub fn load(mut storage: S) -> Result<Self, LoadError<S>> {
@@ -74,45 +82,78 @@ impl<S: Storage> Nros<S> {
 		if h.magic != *b"Nora Reliable FS" {
 			return Err(LoadError::InvalidMagic);
 		}
+
 		let rec_size = MaxRecordSize::from_raw(h.max_record_length_p2)
 			.ok_or(LoadError::InvalidRecordSize(h.max_record_length_p2))?;
 		let compr = Compression::from_raw(h.compression)
 			.ok_or(LoadError::UnsupportedCompression(h.compression))?;
-		Ok(Self {
-			storage: RecordCache::load(
-				storage,
-				rec_size,
-				h.allocation_log_lba.into(),
-				h.allocation_log_length.into(),
-				compr,
-			)?,
-			header: h,
-		})
+		let mut storage = RecordCache::load(
+			storage,
+			rec_size,
+			h.allocation_log_lba.into(),
+			h.allocation_log_length.into(),
+			compr,
+		)?;
+
+		let max_obj_id_used = h.object_list.len() / 64;
+		let mut used_objects = RangeSet::from_iter([0..max_obj_id_used + 1]);
+		for id in 0..max_obj_id_used + 1 {
+			let mut rec = Record::default();
+			h.object_list
+				.read(&mut storage, id * 64, rec.as_mut())
+				.map_err(|e| match e {
+					_ => todo!(),
+				})?;
+			if rec.reference_count == 0 {
+				used_objects.remove(id..id + 1);
+			}
+		}
+
+		Ok(Self { storage, header: h, used_objects })
+	}
+
+	fn alloc_ids(&mut self, count: u64) -> u64 {
+		for r in self.used_objects.gaps(&(0..u64::MAX)) {
+			if r.end - r.start >= count {
+				self.used_objects.insert(r.start..r.start + count);
+				return r.start;
+			}
+		}
+		unreachable!("more than 2**64 objects allocated");
+	}
+
+	fn dealloc_id(&mut self, id: u64) {
+		debug_assert!(self.used_objects.contains(&id), "double free");
+		self.used_objects.remove(id..id + 1);
 	}
 
 	pub fn new_object(&mut self) -> Result<u64, Error<S>> {
+		let id = self.alloc_ids(1);
 		let r = &mut self.header.object_list;
-		let l = r.len();
-		r.resize(&mut self.storage, l + 64)?;
+		if r.len() < id * 64 + 64 {
+			r.resize(&mut self.storage, id * 64 + 64)?;
+		}
 		r.write(
 			&mut self.storage,
-			l,
+			id * 64,
 			Record { reference_count: 1, ..Default::default() }.as_ref(),
 		)?;
-		Ok(l / 64)
+		Ok(id)
 	}
 
 	/// Return IDs for two objects, one at ID and one at ID + 1
 	pub fn new_object_pair(&mut self) -> Result<u64, Error<S>> {
+		let id = self.alloc_ids(2);
 		let r = &mut self.header.object_list;
-		let l = r.len();
-		r.resize(&mut self.storage, l + 128)?;
+		if r.len() <= id * 64 + 128 {
+			r.resize(&mut self.storage, id * 64 + 128)?;
+		}
 		let rec = Record { reference_count: 1, ..Default::default() };
 		let mut b = [0; 128];
 		b[..64].copy_from_slice(rec.as_ref());
 		b[64..].copy_from_slice(rec.as_ref());
-		r.write(&mut self.storage, l, &b)?;
-		Ok(l / 64)
+		r.write(&mut self.storage, id * 64, &b)?;
+		Ok(id)
 	}
 
 	/// Decrement the reference count to an object.
@@ -125,6 +166,7 @@ impl<S: Storage> Nros<S> {
 		obj.0.reference_count -= 1;
 		if obj.0.reference_count == 0 {
 			obj.resize(&mut self.storage, 0)?;
+			self.dealloc_id(id);
 		}
 		self.set_object_root(id, &obj)
 	}
@@ -133,7 +175,9 @@ impl<S: Storage> Nros<S> {
 		self.object_root(to_id)?.resize(&mut self.storage, 0)?;
 		let f = self.object_root(from_id)?;
 		self.set_object_root(to_id, &f)?;
-		self.set_object_root(from_id, &Default::default())
+		self.set_object_root(from_id, &Default::default())?;
+		self.dealloc_id(from_id);
+		Ok(())
 	}
 
 	pub fn object_count(&mut self) -> u64 {
@@ -229,6 +273,7 @@ impl<S: Storage> fmt::Debug for Nros<S> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Nros))
 			.field("header", &self.header)
+			.field("storage", &self.storage)
 			.finish_non_exhaustive()
 	}
 }

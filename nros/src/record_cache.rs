@@ -8,6 +8,7 @@ use {
 		vec::Vec,
 	},
 	core::{
+		fmt,
 		marker::PhantomData,
 		ops::{Deref, DerefMut},
 	},
@@ -202,4 +203,16 @@ fn calc_block_count(len: u32, block_size_p2: u8, max_record_size: MaxRecordSize)
 	debug_assert!(len <= 1 << max_record_size.to_raw(), "{:?}", len);
 	let bs = 1 << block_size_p2;
 	((len + bs - 1) / bs) as _
+}
+
+impl<S: Storage> fmt::Debug for RecordCache<S> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(RecordCache))
+			.field("cache", &format_args!(".."))
+			.field("dirty", &format_args!(".."))
+			.field("max_record_size", &self.max_record_size)
+			.field("allocator", &self.allocator)
+			.field("compression", &self.compression)
+			.finish_non_exhaustive()
+	}
 }

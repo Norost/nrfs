@@ -1,5 +1,7 @@
 use {
-	super::{ext, Dir, Error, Name, Storage, Type},
+	super::{
+		ext, Dir, Error, Name, Storage, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM, TY_FILE, TY_SYM,
+	},
 	siphasher::sip::SipHasher13,
 };
 
@@ -253,6 +255,25 @@ pub(super) struct RawEntry {
 	pub index: u32,
 	pub ty: u8,
 	pub hash: u32,
+}
+
+impl RawEntry {
+	pub fn ty(&self) -> Result<Type, u8> {
+		match self.ty {
+			TY_DIR => Ok(Type::Dir { id: self.id_or_offset }),
+			TY_FILE => Ok(Type::File { id: self.id_or_offset }),
+			TY_SYM => Ok(Type::Sym { id: self.id_or_offset }),
+			TY_EMBED_FILE => Ok(Type::EmbedFile {
+				offset: self.id_or_offset & 0xff_ffff,
+				length: (self.id_or_offset >> 48) as _,
+			}),
+			TY_EMBED_SYM => Ok(Type::EmbedSym {
+				offset: self.id_or_offset & 0xff_ffff,
+				length: (self.id_or_offset >> 48) as _,
+			}),
+			n => Err(n),
+		}
+	}
 }
 
 #[derive(Debug)]

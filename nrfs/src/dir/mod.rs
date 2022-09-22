@@ -302,22 +302,32 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// It is up to the user to ensure the directory is empty.
 	pub fn remove(&mut self, name: &Name) -> Result<bool, Error<S>> {
 		if let Some((i, e)) = self.hashmap().find_index(name)? {
-			self.remove_at(i, e.ty, e.id_or_offset).map(|()| true)
+			self.remove_at(i, (e.key_offset, e.key_len), e.ty().unwrap())
+				.map(|()| true)
 		} else {
 			Ok(false)
 		}
 	}
 
-	fn remove_at(&mut self, index: u32, ty: u8, id: u64) -> Result<(), Error<S>> {
+	fn remove_at(&mut self, index: u32, key: (u64, u8), ty: Type) -> Result<(), Error<S>> {
 		self.set_entry_count(self.entry_count - 1)?;
 		self.hashmap().remove_at(index)?;
 
-		// Dereference object.
-		if [TY_DIR, TY_FILE, TY_SYM].contains(&ty) {
-			self.fs.storage.decr_ref(id).map_err(Error::Nros)?;
-			if ty == TY_DIR {
-				// Destroy heap too
+		// Deallocate string
+		self.dealloc(key.0, key.1.into())?;
+
+		match ty {
+			Type::File { id } | Type::Sym { id } => {
+				// Dereference object.
+				self.fs.storage.decr_ref(id).map_err(Error::Nros)?;
+			}
+			Type::Dir { id } => {
+				// Dereference map and heap.
+				self.fs.storage.decr_ref(id).map_err(Error::Nros)?;
 				self.fs.storage.decr_ref(id + 1).map_err(Error::Nros)?;
+			}
+			Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
+				self.dealloc(offset, length.into())?;
 			}
 		}
 
@@ -385,6 +395,21 @@ impl<'a, S: Storage> Dir<'a, S> {
 		}
 		// This is unreachable in practice.
 		unreachable!("all 2^64 bytes are allocated");
+	}
+
+	/// Deallocate heap space.
+	fn dealloc(&mut self, offset: u64, len: u64) -> Result<(), Error<S>> {
+		if len > 0 {
+			let r = offset..offset + len;
+			let log = self.alloc_log()?;
+			debug_assert!(
+				log.iter().any(|d| r.clone().all(|e| d.contains(&e))),
+				"double free"
+			);
+			log.remove(r);
+			self.save_alloc_log()?;
+		}
+		Ok(())
 	}
 
 	/// Write a full, minimized allocation log.
@@ -604,6 +629,7 @@ where
 			.field("unix_offset", &self.unix_offset)
 			.field("mtime_offset", &self.mtime_offset)
 			.field("alloc_map", &self.alloc_map)
+			.field("fs", &self.fs)
 			.finish_non_exhaustive()
 	}
 }
@@ -614,6 +640,7 @@ pub struct Entry<'a, 'b, S: Storage> {
 	hash: u32,
 	ty: Result<Type, u8>,
 	key_len: u8,
+	key_offset: u64,
 	key: [u8; 255],
 	unix: Option<ext::unix::Entry>,
 	mtime: Option<ext::mtime::Entry>,
@@ -628,21 +655,9 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 			dir,
 			index: e.entry.index,
 			hash: e.entry.hash,
-			ty: match e.entry.ty {
-				TY_DIR => Ok(Type::Dir { id: e.entry.id_or_offset }),
-				TY_FILE => Ok(Type::File { id: e.entry.id_or_offset }),
-				TY_SYM => Ok(Type::Sym { id: e.entry.id_or_offset }),
-				TY_EMBED_FILE => Ok(Type::EmbedFile {
-					offset: e.entry.id_or_offset & 0xff_ffff,
-					length: (e.entry.id_or_offset >> 48) as _,
-				}),
-				TY_EMBED_SYM => Ok(Type::EmbedSym {
-					offset: e.entry.id_or_offset & 0xff_ffff,
-					length: (e.entry.id_or_offset >> 48) as _,
-				}),
-				n => Err(n),
-			},
+			ty: e.entry.ty(),
 			key_len: e.entry.key_len,
+			key_offset: e.entry.key_offset,
 			key,
 			unix: e.unix,
 			mtime: e.mtime,
@@ -702,8 +717,8 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 	pub fn remove(self) -> Result<(), Error<S>> {
 		self.dir.remove_at(
 			self.index,
-			self.ty.as_ref().map_or_else(|t| *t, |t| t.to_ty()),
-			self.ty.map_or(0, |t| t.to_data()),
+			(self.key_offset, self.key_len),
+			self.ty.unwrap(), // TODO handle unknown entry types gracefully
 		)
 	}
 

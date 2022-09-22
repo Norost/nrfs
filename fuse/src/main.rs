@@ -288,7 +288,6 @@ impl Filesystem for Fs {
 			}
 			Inode::File(f) | Inode::Sym(f) => {
 				let mut d = self.sto.get_dir(f.dir).unwrap();
-				dbg!(&f.name);
 				let mut e = d.find(&f.name).unwrap().unwrap();
 				let l = e.as_file().unwrap().len().unwrap();
 				let ty = if e.is_file() {
@@ -589,12 +588,10 @@ impl Filesystem for Fs {
 			let to_d = self.ino.get_dir(newparent).id;
 			let from_d;
 			let res = if parent == newparent {
-				dbg!();
 				from_d = to_d;
 				let mut to_d = self.sto.get_dir(to_d).unwrap();
 				to_d.rename(n, nn).unwrap()
 			} else {
-				dbg!();
 				from_d = self.ino.get_dir(parent).id;
 				debug_assert_ne!(to_d, from_d);
 				let mut to_d = self.sto.get_dir(to_d).unwrap().into_data();

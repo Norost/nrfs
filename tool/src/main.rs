@@ -49,13 +49,15 @@ fn make(args: Args) {
 	extensions.add_mtime();
 	let mut opt = nrfs::DirOptions { extensions, ..Default::default() };
 	let rec_size = nrfs::MaxRecordSize::K128; // TODO
-	let mut nrfs = nrfs::Nrfs::new(S::new(f), rec_size, &opt, nrfs::Compression::Lz4).unwrap();
+	let compr = nrfs::Compression::Lz4;
+	let compr = nrfs::Compression::None;
+	let mut nrfs = nrfs::Nrfs::new(S::new(f), rec_size, &opt, compr).unwrap();
 
-	let mut root = nrfs.root_dir().unwrap();
 	if let Some(d) = &args.directory {
+		let mut root = nrfs.root_dir().unwrap();
 		add_files(&mut root, d, &args, extensions);
-		nrfs.finish_transaction().unwrap();
 	}
+	nrfs.finish_transaction().unwrap();
 
 	fn add_files(
 		root: &mut nrfs::Dir<'_, S>,
