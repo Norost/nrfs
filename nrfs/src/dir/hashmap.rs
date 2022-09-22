@@ -176,6 +176,7 @@ impl<'a, 'b, S: Storage> HashMap<'a, 'b, S> {
 	///
 	/// This does *not* check if the index is in range.
 	fn get_offset(&self, index: u32) -> u64 {
+		debug_assert!(index <= self.mask, "{} <= {}", index, self.mask);
 		self.dir.hashmap_base() + u64::from(index) * self.dir.entry_size()
 	}
 

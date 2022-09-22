@@ -142,7 +142,8 @@ impl<'a, S: Storage> Dir<'a, S> {
 		let mut unix_offset = None;
 		let mut mtime_offset = None;
 		let mut offt = 24;
-		while offt < u16::from(header_len8) * 8 {
+		// An extension consists of at least two bytes, ergo +1
+		while offt + 1 < u16::from(header_len8) * 8 {
 			let mut buf = [0; 2];
 			fs.read_exact(id, offt.into(), &mut buf)?;
 			let [name_len, data_len] = buf;
