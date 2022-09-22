@@ -269,7 +269,7 @@ where
 	let (depth, lvl_shift) = depth(len, sto);
 	depth
 		.checked_sub(1)
-		.map(|d| 1 << d * lvl_shift + sto.max_record_size_p2)
+		.map(|d| 1 << d * lvl_shift + sto.max_record_size.to_raw())
 }
 
 /// Calculate the depth and amount of records per record as a power of 2
@@ -278,11 +278,11 @@ where
 	S: Storage,
 {
 	// The length in units of records.
-	let max_rec_size = 1 << sto.max_record_size_p2;
+	let max_rec_size = 1 << sto.max_record_size.to_raw();
 	let len = (len + max_rec_size - 1) / max_rec_size;
 
 	// mem::size_of<Record>() = 64 = 2^6
-	let lvl_shift = sto.max_record_size_p2 - 6;
+	let lvl_shift = sto.max_record_size.to_raw() - 6;
 
 	let (mut lvl, mut depth) = (len, 0);
 	// 0 = empty, 1 = not empty

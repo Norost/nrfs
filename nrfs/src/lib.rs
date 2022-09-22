@@ -11,7 +11,7 @@ pub use {
 	dir::{Dir, DirOptions},
 	file::File,
 	name::Name,
-	nros::{Read, Storage, Write},
+	nros::{Compression, MaxRecordSize, Read, Storage, Write},
 };
 
 use core::fmt;
@@ -24,10 +24,11 @@ pub struct Nrfs<S: Storage> {
 impl<S: Storage> Nrfs<S> {
 	pub fn new(
 		storage: S,
-		max_record_length_p2: u8,
+		max_record_size: MaxRecordSize,
 		dir: &DirOptions,
+		compression: Compression,
 	) -> Result<Self, nros::NewError<S>> {
-		let storage = nros::Nros::new(storage, max_record_length_p2)?;
+		let storage = nros::Nros::new(storage, max_record_size, compression)?;
 		let mut s = Self { storage };
 		match Dir::new(&mut s, dir) {
 			Ok(_) => {}

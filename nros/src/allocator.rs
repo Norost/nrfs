@@ -58,14 +58,11 @@ impl Allocator {
 		Ok(Self { alloc_map, free_map: Default::default(), dirty_map: Default::default() })
 	}
 
-	pub fn alloc<S>(&mut self, blocks: u64, sto: &S) -> Option<u64>
-	where
-		S: Storage,
-	{
+	pub fn alloc(&mut self, blocks: u64, block_count: u64) -> Option<u64> {
 		if blocks == 0 {
 			return Some(0);
 		}
-		for r in self.alloc_map.gaps(&(1..sto.block_count())) {
+		for r in self.alloc_map.gaps(&(1..block_count)) {
 			if r.end - r.start >= blocks {
 				self.alloc_map.insert(r.start..r.start + blocks);
 				self.dirty_map.insert(r.start..r.start + blocks);
@@ -109,15 +106,19 @@ impl Allocator {
 		let len = (len_min as u64 + 1) * 16;
 		let block_size = 1 << sto.block_size_p2();
 		let blocks = (len + block_size - 1) / block_size;
-		let lba = self.alloc(blocks, sto).ok_or(Error::NotEnoughSpace)?;
+		let lba = self
+			.alloc(blocks, sto.block_count())
+			.ok_or(Error::NotEnoughSpace)?;
 
 		// Save map
-		let mut wr = sto.write(lba, blocks as _).map_err(Error::Storage)?;
+		let mut wr = sto.write(blocks as _).map_err(Error::Storage)?;
 		for (w, r) in wr.get_mut().chunks_exact_mut(16).zip(self.alloc_map.iter()) {
 			let len = r.end - r.start;
 			w[..8].copy_from_slice(&r.start.to_le_bytes());
 			w[8..].copy_from_slice(&len.to_le_bytes());
 		}
+		wr.set_region(lba, blocks as _).map_err(Error::Storage)?;
+		wr.finish().map_err(Error::Storage)?;
 
 		self.alloc_map = alloc_map;
 		self.free_map = Default::default();

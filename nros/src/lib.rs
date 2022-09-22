@@ -1,4 +1,5 @@
 //#![cfg_attr(not(test), no_std)]
+#![deny(unused_must_use)]
 
 extern crate alloc;
 
@@ -24,11 +25,14 @@ pub mod header;
 mod record;
 mod record_cache;
 mod record_tree;
-mod storage;
+pub mod storage;
 #[cfg(test)]
 mod test;
 
-pub use storage::{Read, Storage, Write};
+pub use {
+	record::{Compression, MaxRecordSize},
+	storage::{Read, Storage, Write},
+};
 
 use {core::fmt, record::Record, record_cache::RecordCache, record_tree::RecordTree};
 
@@ -36,23 +40,29 @@ pub struct Nros<S: Storage> {
 	storage: RecordCache<S>,
 	header: header::Header,
 }
-
 impl<S: Storage> Nros<S> {
-	pub fn new(mut storage: S, max_record_length_p2: u8) -> Result<Self, NewError<S>> {
+	pub fn new(
+		mut storage: S,
+		max_record_size: MaxRecordSize,
+		compression: Compression,
+	) -> Result<Self, NewError<S>> {
 		// Mandate at least 512 byte blocks since basically every disk has such a minimum size.
-		if max_record_length_p2 < 9 {
-			return Err(NewError::RecordSizeTooSmall);
-		}
 		let block_length_p2 = storage.block_size_p2();
 		if block_length_p2 < 9 {
 			return Err(NewError::BlockTooSmall);
 		}
 
-		let h = header::Header { block_length_p2, max_record_length_p2, ..Default::default() };
-		let mut w = storage.write(0, 1).map_err(NewError::Storage)?;
+		let h = header::Header {
+			block_length_p2,
+			max_record_length_p2: max_record_size as _,
+			compression: compression.to_raw(),
+			..Default::default()
+		};
+		let mut w = storage.write(1).map_err(NewError::Storage)?;
 		w.get_mut()[..h.as_ref().len()].copy_from_slice(h.as_ref());
-		drop(w);
-		Ok(Self { storage: RecordCache::new(storage, h.max_record_length_p2), header: h })
+		w.set_region(0, 1).map_err(NewError::Storage)?;
+		w.finish().map_err(NewError::Storage)?;
+		Ok(Self { storage: RecordCache::new(storage, max_record_size, compression), header: h })
 	}
 
 	pub fn load(mut storage: S) -> Result<Self, LoadError<S>> {
@@ -64,16 +74,17 @@ impl<S: Storage> Nros<S> {
 		if h.magic != *b"Nora Reliable FS" {
 			return Err(LoadError::InvalidMagic);
 		}
-		// Mandate at least 128 byte records, otherwise it's impossible to construct a record tree.
-		if h.max_record_length_p2 < 7 {
-			return Err(LoadError::RecordSizeTooSmall);
-		}
+		let rec_size = MaxRecordSize::from_raw(h.max_record_length_p2)
+			.ok_or(LoadError::InvalidRecordSize(h.max_record_length_p2))?;
+		let compr = Compression::from_raw(h.compression)
+			.ok_or(LoadError::UnsupportedCompression(h.compression))?;
 		Ok(Self {
 			storage: RecordCache::load(
 				storage,
-				h.max_record_length_p2,
+				rec_size,
 				h.allocation_log_lba.into(),
 				h.allocation_log_length.into(),
+				compr,
 			)?,
 			header: h,
 		})
@@ -184,12 +195,12 @@ impl<S: Storage> Nros<S> {
 		self.header.allocation_log_length = len.into();
 
 		// Write header
-		let mut w = self.storage.storage.write(0, 1).map_err(Error::Storage)?;
-		w.set_blocks(1);
+		let mut w = self.storage.storage.write(1).map_err(Error::Storage)?;
+		w.set_region(0, 1).map_err(Error::Storage)?;
 		let (a, b) = w.get_mut().split_at_mut(self.header.as_ref().len());
 		a.copy_from_slice(self.header.as_ref());
 		b.fill(0);
-		Ok(())
+		w.finish().map_err(Error::Storage)
 	}
 
 	/// This function *must not* be used on invalid objects!
@@ -224,7 +235,6 @@ impl<S: Storage> fmt::Debug for Nros<S> {
 
 #[derive(Debug)]
 pub enum NewError<S: Storage> {
-	RecordSizeTooSmall,
 	BlockTooSmall,
 	Storage(S::Error),
 }
@@ -232,13 +242,13 @@ pub enum NewError<S: Storage> {
 #[derive(Debug)]
 pub enum LoadError<S: Storage> {
 	InvalidMagic,
-	RecordSizeTooSmall,
+	InvalidRecordSize(u8),
+	UnsupportedCompression(u8),
 	Storage(S::Error),
 }
 
 pub enum Error<S: Storage> {
 	Storage(S::Error),
-	RecordPack(record::PackError),
 	RecordUnpack(record::UnpackError),
 	NotEnoughSpace,
 }
@@ -250,7 +260,6 @@ where
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::Storage(e) => f.debug_tuple("Storage").field(&e).finish(),
-			Self::RecordPack(e) => f.debug_tuple("RecordPack").field(&e).finish(),
 			Self::RecordUnpack(e) => f.debug_tuple("RecordUnpack").field(&e).finish(),
 			Self::NotEnoughSpace => f.debug_tuple("NotEnoughSpace").finish(),
 		}

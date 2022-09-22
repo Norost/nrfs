@@ -9,3 +9,7 @@ version = "0.1"
 
 [dependencies.rangemap]
 version = "1.0"
+
+[dependencies.lz4_flex]
+version = "0.9"
+default-features = false

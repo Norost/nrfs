@@ -527,14 +527,19 @@ impl<'a, S: Storage> Dir<'a, S> {
 		Self { fs, data }
 	}
 
-	pub fn transfer(&mut self, name: &Name, to_dir: &mut DirData, to_name: &Name) -> Result<bool, Error<S>> {
+	pub fn transfer(
+		&mut self,
+		name: &Name,
+		to_dir: &mut DirData,
+		to_name: &Name,
+	) -> Result<bool, Error<S>> {
 		if let Some((i, e)) = self.hashmap().find_index(name)? {
 			let e = self.hashmap().get_ext(i, e)?;
 			core::mem::swap(&mut self.data, to_dir);
 			if self.should_grow() {
 				if let Err(e) = self.grow() {
 					core::mem::swap(&mut self.data, to_dir);
-					return Err(e)
+					return Err(e);
 				}
 			}
 			let r = match self.hashmap().insert(e, Some(to_name)) {
@@ -550,7 +555,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 				r?;
 				self.hashmap().remove_at(i)?;
 				self.set_entry_count(self.entry_count - 1)?;
-				return Ok(true)
+				return Ok(true);
 			}
 		}
 		Ok(false)
@@ -564,7 +569,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 			let r = self.hashmap().insert(e, Some(to));
 			if r?.is_some() {
 				self.hashmap().remove_at(i)?;
-				return Ok(true)
+				return Ok(true);
 			}
 		}
 		Ok(false)

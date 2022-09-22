@@ -1,5 +1,8 @@
 use {
-	crate::{allocator::Allocator, Error, LoadError, Read as _, Record, Storage, Write as _},
+	crate::{
+		allocator::Allocator, Compression, Error, LoadError, MaxRecordSize, Read as _, Record,
+		Storage, Write as _,
+	},
 	alloc::{
 		collections::{BTreeMap, BTreeSet},
 		vec::Vec,
@@ -14,33 +17,37 @@ pub struct RecordCache<S: Storage> {
 	pub(super) storage: S,
 	cache: BTreeMap<u64, Vec<u8>>,
 	dirty: BTreeSet<u64>,
-	pub(super) max_record_size_p2: u8,
+	pub(super) max_record_size: MaxRecordSize,
 	allocator: Allocator,
+	compression: Compression,
 }
 
 impl<S: Storage> RecordCache<S> {
-	pub fn new(mut storage: S, max_record_size_p2: u8) -> Self {
+	pub fn new(storage: S, max_record_size: MaxRecordSize, compression: Compression) -> Self {
 		Self {
 			allocator: Allocator::default(),
 			storage,
-			max_record_size_p2,
+			max_record_size,
 			cache: Default::default(),
 			dirty: Default::default(),
+			compression,
 		}
 	}
 
 	pub fn load(
 		mut storage: S,
-		max_record_size_p2: u8,
+		max_record_size: MaxRecordSize,
 		alloc_log_lba: u64,
 		alloc_log_len: u64,
+		compression: Compression,
 	) -> Result<Self, LoadError<S>> {
 		Ok(Self {
 			allocator: Allocator::load(&mut storage, alloc_log_lba, alloc_log_len)?,
 			storage,
-			max_record_size_p2,
+			max_record_size,
 			cache: Default::default(),
 			dirty: Default::default(),
+			compression,
 		})
 	}
 
@@ -126,13 +133,13 @@ impl<S: Storage> RecordCache<S> {
 		let rd = self.storage.read(lba, count).map_err(Error::Storage)?;
 		let mut v = Vec::new();
 		record
-			.unpack(&rd.get()[..len as _], &mut v, self.max_record_size_p2)
+			.unpack(&rd.get()[..len as _], &mut v, self.max_record_size)
 			.map_err(Error::RecordUnpack)?;
 		Ok(Some(self.cache.entry(lba).or_insert(v)))
 	}
 
 	fn calc_block_count(&self, len: u32) -> usize {
-		calc_block_count(len, self.storage.block_size_p2(), self.max_record_size_p2)
+		calc_block_count(len, self.storage.block_size_p2(), self.max_record_size)
 	}
 }
 
@@ -170,35 +177,29 @@ impl<S: Storage> DerefMut for Write<'_, S> {
 
 impl<'a, S: Storage> Write<'a, S> {
 	pub fn finish(self) -> Result<Record, Error<S>> {
-		let len = self.data.len() as u32;
-		let blks = self.cache.calc_block_count(len);
+		let len = self.cache.compression.max_output_size(self.data.len());
+		let max_blks = self.cache.calc_block_count(len as _);
+		let block_count = self.cache.storage.block_count();
+		let bs_p2 = self.cache.storage.block_size_p2();
+		let mut w = self.cache.storage.write(max_blks).map_err(Error::Storage)?;
+		let mut rec = Record::pack(&self.data, w.get_mut(), self.cache.compression);
+		let blks = calc_block_count(rec.length.into(), bs_p2, self.cache.max_record_size);
 		let lba = self
 			.cache
 			.allocator
-			.alloc(blks as _, &self.cache.storage)
+			.alloc(blks as _, block_count)
 			.ok_or(Error::NotEnoughSpace)?;
-		let bs_p2 = self.cache.storage.block_size_p2();
-		let mut w = self
-			.cache
-			.storage
-			.write(lba, blks)
-			.map_err(Error::Storage)?;
-		w.set_blocks(blks);
-		let mut rec = Record::pack(&self.data, w.get_mut()).map_err(Error::RecordPack)?;
 		rec.lba = lba.into();
-		w.set_blocks(calc_block_count(
-			rec.length.into(),
-			bs_p2,
-			self.cache.max_record_size_p2,
-		));
+		w.set_region(lba, blks).map_err(Error::Storage)?;
+		w.finish().map_err(Error::Storage)?;
 		self.cache.cache.insert(lba, self.data);
 		self.cache.dirty.insert(lba);
 		Ok(rec)
 	}
 }
 
-fn calc_block_count(len: u32, block_size_p2: u8, max_record_size_p2: u8) -> usize {
-	debug_assert!(len <= 1 << max_record_size_p2, "{:?}", len);
+fn calc_block_count(len: u32, block_size_p2: u8, max_record_size: MaxRecordSize) -> usize {
+	debug_assert!(len <= 1 << max_record_size.to_raw(), "{:?}", len);
 	let bs = 1 << block_size_p2;
 	((len + bs - 1) / bs) as _
 }

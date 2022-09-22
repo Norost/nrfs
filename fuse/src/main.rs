@@ -5,12 +5,12 @@ use {
 	nrfs::{Name, Storage},
 	std::{
 		collections::HashMap,
-		path::Path,
 		ffi::OsStr,
 		fs,
 		hash::{BuildHasher, Hash, Hasher},
 		io::{self, Read, Seek, SeekFrom, Write},
 		os::unix::ffi::OsStrExt,
+		path::Path,
 		rc::Rc,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	},
@@ -229,6 +229,14 @@ impl InodeStore {
 }
 
 impl Filesystem for Fs {
+	fn init(&mut self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), i32> {
+		use fuser::consts::*;
+		const CAP: u32 =
+			FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITE_CACHE | FUSE_NO_OPEN_SUPPORT;
+		config.add_capabilities(CAP).unwrap();
+		Ok(())
+	}
+
 	fn lookup(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
 		let d = self.ino.get_dir(parent);
 		let mut d = self.sto.get_dir(d.id).unwrap();
@@ -280,6 +288,7 @@ impl Filesystem for Fs {
 			}
 			Inode::File(f) | Inode::Sym(f) => {
 				let mut d = self.sto.get_dir(f.dir).unwrap();
+				dbg!(&f.name);
 				let mut e = d.find(&f.name).unwrap().unwrap();
 				let l = e.as_file().unwrap().len().unwrap();
 				let ty = if e.is_file() {
@@ -511,23 +520,15 @@ impl Filesystem for Fs {
 		let d = self.ino.get_dir(parent);
 		let mut d = self.sto.get_dir(d.id).unwrap();
 		if let Ok(name) = name.as_bytes().try_into() {
-			let unix = nrfs::dir::ext::unix::Entry {
-				permissions: 0o777,
-				uid: req.uid(),
-				gid: req.gid(),
-			};
-			let ext = nrfs::dir::Extensions {
-				unix: Some(unix),
-				..Default::default()
-			};
+			let unix =
+				nrfs::dir::ext::unix::Entry { permissions: 0o777, uid: req.uid(), gid: req.gid() };
+			let ext = nrfs::dir::Extensions { unix: Some(unix), ..Default::default() };
 			if let Some(mut f) = d.create_sym(name, &ext).unwrap() {
 				let link = link.as_os_str().as_bytes();
 				f.write_grow(0, link).unwrap();
-				let ino = self.ino.add_sym(File {
-					dir: d.id(),
-					name: name.into(),
-					unix,
-				}, false);
+				let ino = self
+					.ino
+					.add_sym(File { dir: d.id(), name: name.into(), unix }, false);
 				let attr = self.attr(FileType::Symlink, link.len() as _, ino);
 				reply.entry(&TTL, &attr, 0);
 			} else {
@@ -555,10 +556,7 @@ impl Filesystem for Fs {
 				uid: req.uid(),
 				gid: req.gid(),
 			};
-			let ext = nrfs::dir::Extensions {
-				unix: Some(unix),
-				..Default::default()
-			};
+			let ext = nrfs::dir::Extensions { unix: Some(unix), ..Default::default() };
 			let opt = nrfs::DirOptions {
 				extensions: *nrfs::dir::EnableExtensions::default()
 					.add_unix()
@@ -566,10 +564,7 @@ impl Filesystem for Fs {
 				..Default::default()
 			};
 			if let Some(dd) = d.create_dir(name, &opt, &ext).unwrap() {
-				let ino = self.ino.add_dir(Dir {
-					id: dd.id(),
-					unix,
-				}, false);
+				let ino = self.ino.add_dir(Dir { id: dd.id(), unix }, false);
 				let attr = self.attr(FileType::Directory, 0, ino);
 				reply.entry(&TTL, &attr, 0);
 			} else {
@@ -588,7 +583,7 @@ impl Filesystem for Fs {
 		newparent: u64,
 		newname: &OsStr,
 		flags: u32,
-		reply: ReplyEmpty
+		reply: ReplyEmpty,
 	) {
 		if let (Ok(n), Ok(nn)) = (name.as_bytes().try_into(), newname.as_bytes().try_into()) {
 			let to_d = self.ino.get_dir(newparent).id;
@@ -699,10 +694,13 @@ impl nrfs::Storage for S {
 		Ok(Box::new(R { buf }))
 	}
 
-	fn write(&mut self, lba: u64, blocks: usize) -> Result<Box<dyn nrfs::Write + '_>, Self::Error> {
+	fn write(
+		&mut self,
+		blocks: usize,
+	) -> Result<Box<dyn nrfs::Write<Error = Self::Error> + '_>, Self::Error> {
 		let bsp2 = self.block_size_p2();
 		let buf = vec![0; blocks << bsp2];
-		Ok(Box::new(W { s: self, offset: lba << bsp2, buf }))
+		Ok(Box::new(W { s: self, offset: u64::MAX, buf }))
 	}
 
 	fn fence(&mut self) -> Result<(), Self::Error> {
@@ -728,23 +726,20 @@ struct W<'a> {
 }
 
 impl<'a> nrfs::Write for W<'a> {
+	type Error = io::Error;
+
 	fn get_mut(&mut self) -> &mut [u8] {
 		&mut self.buf
 	}
 
-	fn set_blocks(&mut self, blocks: usize) {
+	fn set_region(&mut self, lba: u64, blocks: usize) -> Result<(), Self::Error> {
+		self.offset = lba << 9;
 		self.buf.resize(blocks << 9, 0);
+		Ok(())
 	}
-}
 
-impl Drop for W<'_> {
-	fn drop(&mut self) {
-		let e = (|| {
-			self.s.file.seek(SeekFrom::Start(self.offset))?;
-			self.s.file.write_all(&self.buf)
-		})();
-		if let Err(e) = e {
-			error!("write failed: {}", e)
-		}
+	fn finish(self: Box<Self>) -> Result<(), Self::Error> {
+		self.s.file.seek(SeekFrom::Start(self.offset))?;
+		self.s.file.write_all(&self.buf)
 	}
 }

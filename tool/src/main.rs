@@ -18,7 +18,7 @@ struct Args {
 	#[clap(long)]
 	follow: bool,
 	#[clap(short, long, default_value_t = 17)]
-	block_size_p2: u8,
+	record_size_p2: u8,
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -48,7 +48,8 @@ fn make(args: Args) {
 	extensions.add_unix();
 	extensions.add_mtime();
 	let mut opt = nrfs::DirOptions { extensions, ..Default::default() };
-	let mut nrfs = nrfs::Nrfs::new(S::new(f), args.block_size_p2, &opt).unwrap();
+	let rec_size = nrfs::MaxRecordSize::K128; // TODO
+	let mut nrfs = nrfs::Nrfs::new(S::new(f), rec_size, &opt, nrfs::Compression::Lz4).unwrap();
 
 	let mut root = nrfs.root_dir().unwrap();
 	if let Some(d) = &args.directory {
@@ -205,10 +206,13 @@ impl nrfs::Storage for S {
 		Ok(Box::new(R { buf }))
 	}
 
-	fn write(&mut self, lba: u64, blocks: usize) -> Result<Box<dyn nrfs::Write + '_>, Self::Error> {
+	fn write(
+		&mut self,
+		blocks: usize,
+	) -> Result<Box<dyn nrfs::Write<Error = Self::Error> + '_>, Self::Error> {
 		let bsp2 = self.block_size_p2();
 		let buf = vec![0; blocks << bsp2];
-		Ok(Box::new(W { s: self, offset: lba << bsp2, buf }))
+		Ok(Box::new(W { s: self, offset: u64::MAX, buf }))
 	}
 
 	fn fence(&mut self) -> Result<(), Self::Error> {
@@ -233,20 +237,20 @@ struct W<'a> {
 }
 
 impl<'a> nrfs::Write for W<'a> {
+	type Error = io::Error;
+
 	fn get_mut(&mut self) -> &mut [u8] {
 		&mut self.buf
 	}
 
-	fn set_blocks(&mut self, blocks: usize) {
+	fn set_region(&mut self, lba: u64, blocks: usize) -> Result<(), Self::Error> {
+		self.offset = lba << 9;
 		self.buf.resize(blocks << 9, 0);
+		Ok(())
 	}
-}
 
-impl Drop for W<'_> {
-	fn drop(&mut self) {
-		let _ = (|| {
-			self.s.file.seek(SeekFrom::Start(self.offset))?;
-			self.s.file.write_all(&self.buf)
-		})();
+	fn finish(self: Box<Self>) -> Result<(), Self::Error> {
+		self.s.file.seek(SeekFrom::Start(self.offset))?;
+		self.s.file.write_all(&self.buf)
 	}
 }
