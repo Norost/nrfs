@@ -466,19 +466,19 @@ impl Filesystem for Fs {
 		let mut d = self.sto.get_dir(d.id).unwrap();
 
 		if let Ok(name) = name.as_bytes().try_into() {
-			d.create_file(name, &Default::default()).unwrap();
-			let ino = self.ino.add_file(
-				File {
-					dir: d.id(),
-					name: name.into(),
-					unix: nrfs::dir::ext::unix::Entry {
-						permissions: mode as _,
-						uid: req.uid(),
-						gid: req.gid(),
-					},
-				},
-				false,
-			);
+			let unix = nrfs::dir::ext::unix::Entry {
+				permissions: mode as _,
+				uid: req.uid(),
+				gid: req.gid(),
+			};
+			d.create_file(
+				name,
+				&nrfs::dir::Extensions { unix: Some(unix), ..Default::default() },
+			)
+			.unwrap();
+			let ino = self
+				.ino
+				.add_file(File { dir: d.id(), name: name.into(), unix }, false);
 			reply.created(&TTL, &self.attr(FileType::RegularFile, 0, ino), 0, 0, 0);
 			self.sto.finish_transaction().unwrap();
 		} else {
