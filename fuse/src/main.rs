@@ -5,6 +5,7 @@ use {
 	nrfs::{Name, Storage},
 	std::{
 		collections::HashMap,
+		path::Path,
 		ffi::OsStr,
 		fs,
 		hash::{BuildHasher, Hash, Hasher},
@@ -270,7 +271,7 @@ impl Filesystem for Fs {
 		self.ino.forget(ino, nlookup)
 	}
 
-	fn getattr(&mut self, req: &Request, ino: u64, reply: ReplyAttr) {
+	fn getattr(&mut self, _: &Request, ino: u64, reply: ReplyAttr) {
 		match self.ino.get(ino) {
 			Inode::Dir(d) => {
 				let d = self.sto.get_dir(d.id).unwrap();
@@ -499,7 +500,129 @@ impl Filesystem for Fs {
 		}
 	}
 
-	fn unlink(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+	fn symlink(
+		&mut self,
+		req: &Request<'_>,
+		parent: u64,
+		name: &OsStr,
+		link: &Path,
+		reply: ReplyEntry,
+	) {
+		let d = self.ino.get_dir(parent);
+		let mut d = self.sto.get_dir(d.id).unwrap();
+		if let Ok(name) = name.as_bytes().try_into() {
+			let unix = nrfs::dir::ext::unix::Entry {
+				permissions: 0o777,
+				uid: req.uid(),
+				gid: req.gid(),
+			};
+			let ext = nrfs::dir::Extensions {
+				unix: Some(unix),
+				..Default::default()
+			};
+			if let Some(mut f) = d.create_sym(name, &ext).unwrap() {
+				let link = link.as_os_str().as_bytes();
+				f.write_grow(0, link).unwrap();
+				let ino = self.ino.add_sym(File {
+					dir: d.id(),
+					name: name.into(),
+					unix,
+				}, false);
+				let attr = self.attr(FileType::Symlink, link.len() as _, ino);
+				reply.entry(&TTL, &attr, 0);
+			} else {
+				reply.error(libc::EEXIST);
+			}
+		} else {
+			reply.error(libc::ENAMETOOLONG);
+		}
+	}
+
+	fn mkdir(
+		&mut self,
+		req: &Request<'_>,
+		parent: u64,
+		name: &OsStr,
+		mode: u32,
+		_umask: u32,
+		reply: ReplyEntry,
+	) {
+		let d = self.ino.get_dir(parent);
+		let mut d = self.sto.get_dir(d.id).unwrap();
+		if let Ok(name) = name.as_bytes().try_into() {
+			let unix = nrfs::dir::ext::unix::Entry {
+				permissions: mode as _,
+				uid: req.uid(),
+				gid: req.gid(),
+			};
+			let ext = nrfs::dir::Extensions {
+				unix: Some(unix),
+				..Default::default()
+			};
+			let opt = nrfs::DirOptions {
+				extensions: *nrfs::dir::EnableExtensions::default()
+					.add_unix()
+					.add_mtime(),
+				..Default::default()
+			};
+			if let Some(dd) = d.create_dir(name, &opt, &ext).unwrap() {
+				let ino = self.ino.add_dir(Dir {
+					id: dd.id(),
+					unix,
+				}, false);
+				let attr = self.attr(FileType::Directory, 0, ino);
+				reply.entry(&TTL, &attr, 0);
+			} else {
+				reply.error(libc::EEXIST);
+			}
+		} else {
+			reply.error(libc::ENAMETOOLONG);
+		}
+	}
+
+	fn rename(
+		&mut self,
+		_: &Request<'_>,
+		parent: u64,
+		name: &OsStr,
+		newparent: u64,
+		newname: &OsStr,
+		flags: u32,
+		reply: ReplyEmpty
+	) {
+		if let (Ok(n), Ok(nn)) = (name.as_bytes().try_into(), newname.as_bytes().try_into()) {
+			let to_d = self.ino.get_dir(newparent).id;
+			let from_d;
+			let res = if parent == newparent {
+				dbg!();
+				from_d = to_d;
+				let mut to_d = self.sto.get_dir(to_d).unwrap();
+				to_d.rename(n, nn).unwrap()
+			} else {
+				dbg!();
+				from_d = self.ino.get_dir(parent).id;
+				debug_assert_ne!(to_d, from_d);
+				let mut to_d = self.sto.get_dir(to_d).unwrap().into_data();
+				let mut from_d = self.sto.get_dir(from_d).unwrap();
+				from_d.transfer(n, &mut to_d, nn).unwrap()
+			};
+			if res {
+				let nn = Rc::<Name>::from(nn);
+				if let Some(h) = self.ino.file_rev.remove(&(from_d, n.into())) {
+					self.ino.file[h].0.dir = to_d;
+					self.ino.file[h].0.name = nn.clone();
+					self.ino.file_rev.insert((to_d, nn), h);
+				}
+				reply.ok();
+			} else {
+				todo!();
+			}
+		} else {
+			reply.error(libc::ENAMETOOLONG);
+		}
+	}
+
+	fn unlink(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
 		let d = self.ino.get_dir(parent);
 		let mut d = self.sto.get_dir(d.id).unwrap();
 

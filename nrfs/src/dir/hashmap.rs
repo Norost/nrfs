@@ -186,6 +186,7 @@ impl<'a, 'b, S: Storage> HashMap<'a, 'b, S> {
 		name: Option<&Name>,
 	) -> Result<Option<u32>, Error<S>> {
 		let mask = self.mask;
+		name.map(|n| entry.entry.hash = self.hash(n));
 		let mut index = entry.entry.hash & mask;
 		let mut psl = 0u32;
 		let mut entry_index = None;

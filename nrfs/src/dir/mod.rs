@@ -273,7 +273,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 			self.grow()?;
 		}
 
-		let hash = self.hash(entry.name);
 		let name = Some(entry.name);
 		let entry = RawEntryExt {
 			entry: RawEntry {
@@ -282,7 +281,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 				ty: entry.ty.to_ty(),
 				id_or_offset: entry.ty.to_data(),
 				index: u32::MAX,
-				hash,
+				hash: 0,
 			},
 			unix: ext.unix,
 			mtime: ext.mtime,
@@ -327,17 +326,6 @@ impl<'a, S: Storage> Dir<'a, S> {
 			self.shrink()?;
 		}
 		Ok(())
-	}
-
-	fn hash(&self, key: &[u8]) -> u32 {
-		use core::hash::Hasher as _;
-		match self.hash_algorithm {
-			HashAlgorithm::SipHasher13 => {
-				let mut h = siphasher::sip::SipHasher13::new_with_key(&self.hash_key);
-				h.write(key);
-				h.finish() as _
-			}
-		}
 	}
 
 	/// Set the type and offset of an entry.
@@ -527,16 +515,69 @@ impl<'a, S: Storage> Dir<'a, S> {
 		Ok(())
 	}
 
+	fn hashmap(&mut self) -> HashMap<'a, '_, S> {
+		HashMap::new(self, self.id, self.hashmap_size_p2)
+	}
+
+	pub fn into_data(self) -> DirData {
+		self.data
+	}
+
+	pub fn from_data(fs: &'a mut Nrfs<S>, data: DirData) -> Self {
+		Self { fs, data }
+	}
+
+	pub fn transfer(&mut self, name: &Name, to_dir: &mut DirData, to_name: &Name) -> Result<bool, Error<S>> {
+		if let Some((i, e)) = self.hashmap().find_index(name)? {
+			let e = self.hashmap().get_ext(i, e)?;
+			core::mem::swap(&mut self.data, to_dir);
+			if self.should_grow() {
+				if let Err(e) = self.grow() {
+					core::mem::swap(&mut self.data, to_dir);
+					return Err(e)
+				}
+			}
+			let r = match self.hashmap().insert(e, Some(to_name)) {
+				Ok(r) => r,
+				Err(e) => {
+					core::mem::swap(&mut self.data, to_dir);
+					return Err(e);
+				}
+			};
+			if r.is_some() {
+				let r = self.set_entry_count(self.entry_count + 1);
+				core::mem::swap(&mut self.data, to_dir);
+				r?;
+				self.hashmap().remove_at(i)?;
+				self.set_entry_count(self.entry_count - 1)?;
+				return Ok(true)
+			}
+		}
+		Ok(false)
+	}
+
+	pub fn rename(&mut self, from: &Name, to: &Name) -> Result<bool, Error<S>> {
+		if let Some((i, e)) = self.hashmap().find_index(from)? {
+			let e = self.hashmap().get_ext(i, e)?;
+			// Resizing is not necessary as there is guaranteed to be a free spot
+			// and we'll free another spot if the insert succeeds.
+			let r = self.hashmap().insert(e, Some(to));
+			if r?.is_some() {
+				self.hashmap().remove_at(i)?;
+				return Ok(true)
+			}
+		}
+		Ok(false)
+	}
+}
+
+impl DirData {
 	pub fn len(&self) -> u32 {
 		self.entry_count
 	}
 
 	pub fn id(&self) -> u64 {
 		self.id
-	}
-
-	fn hashmap(&mut self) -> HashMap<'a, '_, S> {
-		HashMap::new(self, self.id, self.hashmap_size_p2)
 	}
 }
 
