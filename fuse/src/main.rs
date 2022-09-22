@@ -318,6 +318,7 @@ impl Filesystem for Fs {
 				let mut d = self.sto.get_dir(f.dir).unwrap();
 				let mut e = d.find(&f.name).unwrap().unwrap();
 				let mut f = e.as_file().unwrap();
+				size.map(|s| f.resize(s).unwrap());
 				(FileType::RegularFile, f.len().unwrap())
 			}
 			Inode::Sym(s) => {
