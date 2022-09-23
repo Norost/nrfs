@@ -50,7 +50,6 @@ fn make(args: Args) {
 	let mut opt = nrfs::DirOptions { extensions, ..Default::default() };
 	let rec_size = nrfs::MaxRecordSize::K128; // TODO
 	let compr = nrfs::Compression::Lz4;
-	let compr = nrfs::Compression::None;
 	let mut nrfs = nrfs::Nrfs::new(S::new(f), rec_size, &opt, compr).unwrap();
 
 	if let Some(d) = &args.directory {
@@ -141,22 +140,24 @@ fn dump(args: Args) {
 				let secs = (t.mtime / 1000) as i64;
 				let millis = t.mtime.rem_euclid(1000) as u32;
 				let t = chrono::NaiveDateTime::from_timestamp(secs, millis * 1_000_000);
-				print!("{:>14?}  ", t);
+				// Use format!() since NaiveDateTime doesn't respect flags
+				print!("{:<23}", format!("{}", t));
 			}
 
 			let name = String::from_utf8_lossy(e.name()).into_owned();
 			if e.is_file() {
 				let mut f = e.as_file().unwrap();
 				println!(
-					"{:>8}  {:>indent$}f {}",
+					"{:>8}  {:>indent$}{}f {}",
 					f.len().unwrap(),
 					"",
+					[' ', 'e'][usize::from(e.is_embedded())],
 					name,
 					indent = indent
 				);
 			} else if e.is_dir() {
 				let mut d = e.as_dir().unwrap().unwrap();
-				println!("{:>8}  {:>indent$}d {}", d.len(), "", name, indent = indent);
+				println!("{:>8}  {:>indent$} d {}", d.len(), "", name, indent = indent);
 				list_files(&mut d, indent + 2);
 			} else if e.is_sym() {
 				let mut f = e.as_sym().unwrap();
@@ -165,8 +166,9 @@ fn dump(args: Args) {
 				f.read_exact(0, &mut buf).unwrap();
 				let link = String::from_utf8_lossy(&buf);
 				println!(
-					"{:>indent$}s {} -> {}",
+					"{:>indent$}{}s {} -> {}",
 					"",
+					[' ', 'e'][usize::from(e.is_embedded())],
 					name,
 					link,
 					indent = 10 + indent

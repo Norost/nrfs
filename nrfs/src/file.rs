@@ -11,9 +11,32 @@ pub struct File<'a, 'b, S: Storage> {
 
 #[derive(Debug)]
 enum Inner {
-	Object { id: u64, index: u32 },
+	Object { index: u32, id: u64 },
 	Embed { index: u32, offset: u64, length: u16 },
 }
+
+/// How many multiples of the block size a file should be before it is unembedded.
+///
+/// Waste calculation: `waste = 1 - blocks / (blocks + 1)`
+///
+/// Some factors for reference:
+///
+/// +--------+------------------------------+--------------------+-------------------+
+/// | Factor | Maximum waste (Uncompressed) | Maximum size (512) | Maximum size (4K) |
+/// +========+==============================+====================+===================+
+/// |      1 |                          50% |                512 |                4K |
+/// +--------+------------------------------+--------------------+-------------------+
+/// |      2 |                          33% |                 1K |                8K |
+/// +--------+------------------------------+--------------------+-------------------+
+/// |      3 |                          25% |               1.5K |               12K |
+/// +--------+------------------------------+--------------------+-------------------+
+/// |      4 |                          20% |                 2K |               16K |
+/// +--------+------------------------------+--------------------+-------------------+
+/// |      5 |                        16.6% |               2.5K |               20K |
+/// +--------+------------------------------+--------------------+-------------------+
+///
+/// * Maximum waste = how much data may be padding if stored as an object.
+const EMBED_FACTOR: u64 = 4;
 
 impl<'a, 'b, S: Storage> File<'a, 'b, S> {
 	pub(crate) fn from_obj(dir: &'b mut Dir<'a, S>, is_sym: bool, id: u64, index: u32) -> Self {
@@ -57,12 +80,13 @@ impl<'a, 'b, S: Storage> File<'a, 'b, S> {
 	pub fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, Error<S>> {
 		match &self.inner {
 			Inner::Object { id, .. } => self.dir.fs.write(*id, offset, data),
-			Inner::Embed { offset: 0, length: 0, index } => {
-				let id = self.empty_to_object(*index)?;
-				self.dir.fs.write(id, offset, data)
-			}
-			Inner::Embed { offset: offt, length, .. } => {
-				todo!()
+			Inner::Embed { offset: offt, length, index } => {
+				if offset >= u64::from(*length) {
+					return Ok(0);
+				}
+				let data = &data[..data.len().min(usize::from(*length) - offset as usize)];
+				self.dir.write_heap(*offt + offset, data)?;
+				Ok(data.len())
 			}
 		}
 	}
@@ -70,51 +94,99 @@ impl<'a, 'b, S: Storage> File<'a, 'b, S> {
 	pub fn write_all(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
 		match &self.inner {
 			Inner::Object { id, .. } => self.dir.fs.write_all(*id, offset, data),
-			Inner::Embed { offset: 0, length: 0, index } => {
-				let id = self.empty_to_object(*index)?;
-				self.dir.fs.write_all(id, offset, data)
-			}
-			Inner::Embed { offset: offt, length, .. } => {
-				todo!()
+			Inner::Embed { offset: offt, length, index } => {
+				if offset >= u64::from(*length) {
+					return Err(Error::Truncated);
+				}
+				let data = &data[..data.len().min(usize::from(*length) - offset as usize)];
+				self.dir.write_heap(*offt + offset, data)?;
+				Ok(())
 			}
 		}
 	}
 
 	pub fn write_grow(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
-		match &self.inner {
+		match &mut self.inner {
 			Inner::Object { id, .. } => self.dir.fs.write_grow(*id, offset, data),
-			Inner::Embed { offset: 0, length: 0, index } => {
-				let id = self.empty_to_object(*index)?;
-				self.dir.fs.write_grow(id, offset, data)
-			}
-			Inner::Embed { offset: offt, length, .. } => {
-				todo!()
+			Inner::Embed { offset: offt, length, index } => {
+				let index = *index;
+				let end = offset + data.len() as u64;
+
+				// Avoid reallocation if the data fits inside the current allocation.
+				if end < u64::from(*length) {
+					return self.write_all(offset, data);
+				}
+
+				let mut buf = vec![0; usize::from(*length)];
+				self.dir.read_heap(*offt, &mut buf)?;
+				self.dir.dealloc(*offt, u64::from(*length))?;
+				// Determine whether we should keep the data embedded.
+				let bs = 1 << self.dir.fs.storage().block_size_p2();
+				if end <= u64::from(u16::MAX).min(bs * EMBED_FACTOR) {
+					let o = self.dir.alloc(end)?;
+					// TODO avoid redundant tail write
+					self.dir.write_heap(o, &buf)?;
+					self.dir.write_heap(o + offset, &data)?;
+					*offt = o;
+					*length = end as _;
+				} else {
+					let id = self.dir.fs.storage.new_object().map_err(Error::Nros)?;
+					self.dir.fs.resize(id, end)?;
+					// TODO ditto
+					self.dir.fs.write_all(id, 0, &buf)?;
+					self.dir.fs.write_all(id, offset, data)?;
+					self.inner = Inner::Object { id, index };
+				}
+				self.dir.set_ty(index, self.ty())
 			}
 		}
 	}
 
 	pub fn resize(&mut self, new_len: u64) -> Result<(), Error<S>> {
-		match &self.inner {
-			Inner::Object { id, .. } => self.dir.fs.resize(*id, new_len),
-			Inner::Embed { offset: 0, length: 0, index } if new_len == 0 => Ok(()),
-			Inner::Embed { offset: 0, length: 0, index } => {
-				let id = self.empty_to_object(*index)?;
-				self.dir.fs.resize(id, new_len)
+		match &mut self.inner {
+			Inner::Object { index, id } if new_len == 0 => {
+				self.dir.fs.storage.decr_ref(*id).map_err(Error::Nros)?;
+				self.inner = Inner::Embed { index: *index, offset: 0, length: 0 };
+				Ok(())
 			}
-			Inner::Embed { offset: offt, length, .. } => todo!(),
+			Inner::Object { id, .. } => self.dir.fs.resize(*id, new_len),
+			Inner::Embed { length, .. } if u64::from(*length) == new_len => Ok(()),
+			Inner::Embed { offset: offt, length, index } => {
+				let index = *index;
+				let mut buf = vec![0; new_len.min(u64::from(*length)) as _];
+				self.dir.read_heap(*offt, &mut buf)?;
+				self.dir.dealloc(*offt, u64::from(*length))?;
+				// Determine whether we should keep the data embedded.
+				let bs = 1 << self.dir.fs.storage().block_size_p2();
+				if new_len <= u64::from(u16::MAX).min(bs * EMBED_FACTOR) {
+					let o = self.dir.alloc(new_len)?;
+					self.dir.write_heap(o, &buf)?;
+					*offt = o;
+					*length = new_len as _;
+				} else {
+					let id = self.dir.fs.storage.new_object().map_err(Error::Nros)?;
+					self.dir.fs.resize(id, new_len)?;
+					self.dir.fs.write_all(id, 0, &buf)?;
+					self.inner = Inner::Object { id, index };
+				}
+				self.dir.set_ty(index, self.ty())
+			}
 		}
 	}
 
-	fn empty_to_object(&mut self, index: u32) -> Result<u64, Error<S>> {
-		let id = self.dir.fs.storage.new_object().map_err(Error::Nros)?;
-		self.inner = Inner::Object { id, index };
-		let ty = if self.is_sym {
-			Type::Sym { id }
-		} else {
-			Type::File { id }
-		};
-		self.dir.set_ty(index, ty)?;
-		Ok(id)
+	fn ty(&self) -> Type {
+		match &self.inner {
+			Inner::Object { id, ..} if self.is_sym => Type::Sym { id: *id },
+			Inner::Object { id, ..} => Type::File { id: *id },
+			Inner::Embed { offset, length, ..} if self.is_sym => Type::EmbedSym {
+				offset: *offset,
+				length: *length,
+			},
+			Inner::Embed { offset, length, ..} => Type::EmbedFile {
+				offset: *offset,
+				length: *length,
+			},
+		}
 	}
 
 	pub fn len(&mut self) -> Result<u64, Error<S>> {

@@ -384,7 +384,10 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// Allocate heap space for arbitrary data.
 	///
 	/// The returned region is not readable until it is written to.
-	fn alloc(&mut self, len: u64) -> Result<u64, Error<S>> {
+	pub(crate) fn alloc(&mut self, len: u64) -> Result<u64, Error<S>> {
+		if len == 0 {
+			return Ok(0);
+		}
 		let log = self.alloc_log()?;
 		for r in log.gaps(&(0..u64::MAX)) {
 			if r.end - r.start >= len {
@@ -398,7 +401,7 @@ impl<'a, S: Storage> Dir<'a, S> {
 	}
 
 	/// Deallocate heap space.
-	fn dealloc(&mut self, offset: u64, len: u64) -> Result<(), Error<S>> {
+	pub(crate) fn dealloc(&mut self, offset: u64, len: u64) -> Result<(), Error<S>> {
 		if len > 0 {
 			let r = offset..offset + len;
 			let log = self.alloc_log()?;
@@ -728,6 +731,13 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 
 	pub fn ext_mtime(&self) -> Option<&ext::mtime::Entry> {
 		self.mtime.as_ref()
+	}
+
+	pub fn is_embedded(&self) -> bool {
+		match &self.ty {
+			Ok(Type::EmbedSym { .. }) | Ok(Type::EmbedFile { .. }) => true,
+			_ => false,
+		}
 	}
 }
 
