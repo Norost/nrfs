@@ -50,7 +50,7 @@ fn make(args: Args) {
 	let mut opt = nrfs::DirOptions { extensions, ..Default::default() };
 	let rec_size = nrfs::MaxRecordSize::K128; // TODO
 	let compr = nrfs::Compression::Lz4;
-	let mut nrfs = nrfs::Nrfs::new(S::new(f), rec_size, &opt, compr).unwrap();
+	let mut nrfs = nrfs::Nrfs::new(S::new(f), rec_size, &opt, compr, 32).unwrap();
 
 	if let Some(d) = &args.directory {
 		let mut root = nrfs.root_dir().unwrap();
@@ -116,7 +116,7 @@ fn make(args: Args) {
 
 fn dump(args: Args) {
 	let f = File::open(args.file).unwrap();
-	let mut nrfs = nrfs::Nrfs::load(S::new(f)).unwrap();
+	let mut nrfs = nrfs::Nrfs::load(S::new(f), 32).unwrap();
 	let mut root = nrfs.root_dir().unwrap();
 	list_files(&mut root, 0);
 
@@ -157,7 +157,13 @@ fn dump(args: Args) {
 				);
 			} else if e.is_dir() {
 				let mut d = e.as_dir().unwrap().unwrap();
-				println!("{:>8}  {:>indent$} d {}", d.len(), "", name, indent = indent);
+				println!(
+					"{:>8}  {:>indent$} d {}",
+					d.len(),
+					"",
+					name,
+					indent = indent
+				);
 				list_files(&mut d, indent + 2);
 			} else if e.is_sym() {
 				let mut f = e.as_sym().unwrap();

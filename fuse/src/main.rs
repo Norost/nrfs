@@ -86,7 +86,8 @@ enum Inode<D, F, S> {
 
 impl Fs {
 	fn new(io: fs::File) -> Self {
-		let sto = nrfs::Nrfs::load(S::new(io)).unwrap();
+		// 128 KiB * 128 = 16 MiB, which should be a reasonable limit
+		let sto = nrfs::Nrfs::load(S::new(io), 128).unwrap();
 		let uid = unsafe { libc::getuid() };
 		let gid = unsafe { libc::getgid() };
 		let mut s = Self { sto, ino: InodeStore { uid, gid, ..Default::default() } };

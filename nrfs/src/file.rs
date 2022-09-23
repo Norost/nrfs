@@ -176,16 +176,14 @@ impl<'a, 'b, S: Storage> File<'a, 'b, S> {
 
 	fn ty(&self) -> Type {
 		match &self.inner {
-			Inner::Object { id, ..} if self.is_sym => Type::Sym { id: *id },
-			Inner::Object { id, ..} => Type::File { id: *id },
-			Inner::Embed { offset, length, ..} if self.is_sym => Type::EmbedSym {
-				offset: *offset,
-				length: *length,
-			},
-			Inner::Embed { offset, length, ..} => Type::EmbedFile {
-				offset: *offset,
-				length: *length,
-			},
+			Inner::Object { id, .. } if self.is_sym => Type::Sym { id: *id },
+			Inner::Object { id, .. } => Type::File { id: *id },
+			Inner::Embed { offset, length, .. } if self.is_sym => {
+				Type::EmbedSym { offset: *offset, length: *length }
+			}
+			Inner::Embed { offset, length, .. } => {
+				Type::EmbedFile { offset: *offset, length: *length }
+			}
 		}
 	}
 

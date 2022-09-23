@@ -13,3 +13,6 @@ version = "1.0"
 [dependencies.lz4_flex]
 version = "0.9"
 default-features = false
+
+[dependencies.rustc-hash]
+version = "1.1"

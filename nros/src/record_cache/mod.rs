@@ -1,35 +1,40 @@
+mod lru;
+
 use {
 	crate::{
 		allocator::Allocator, Compression, Error, LoadError, MaxRecordSize, Read as _, Record,
 		Storage, Write as _,
 	},
-	alloc::{
-		collections::{BTreeMap, BTreeSet},
-		vec::Vec,
-	},
+	alloc::vec::Vec,
 	core::{
 		fmt,
 		marker::PhantomData,
 		ops::{Deref, DerefMut},
 	},
+	rustc_hash::FxHashSet,
 };
 
 pub struct RecordCache<S: Storage> {
 	pub(super) storage: S,
-	cache: BTreeMap<u64, Vec<u8>>,
-	dirty: BTreeSet<u64>,
+	cache: lru::Lru<u64, Vec<u8>>,
+	dirty: FxHashSet<u64>,
 	pub(super) max_record_size: MaxRecordSize,
 	allocator: Allocator,
 	compression: Compression,
 }
 
 impl<S: Storage> RecordCache<S> {
-	pub fn new(storage: S, max_record_size: MaxRecordSize, compression: Compression) -> Self {
+	pub fn new(
+		storage: S,
+		max_record_size: MaxRecordSize,
+		compression: Compression,
+		cache_size: u16,
+	) -> Self {
 		Self {
 			allocator: Allocator::default(),
 			storage,
 			max_record_size,
-			cache: Default::default(),
+			cache: lru::Lru::new(cache_size),
 			dirty: Default::default(),
 			compression,
 		}
@@ -41,12 +46,13 @@ impl<S: Storage> RecordCache<S> {
 		alloc_log_lba: u64,
 		alloc_log_len: u64,
 		compression: Compression,
+		cache_size: u16,
 	) -> Result<Self, LoadError<S>> {
 		Ok(Self {
 			allocator: Allocator::load(&mut storage, alloc_log_lba, alloc_log_len)?,
 			storage,
 			max_record_size,
-			cache: Default::default(),
+			cache: lru::Lru::new(cache_size),
 			dirty: Default::default(),
 			compression,
 		})
@@ -136,7 +142,8 @@ impl<S: Storage> RecordCache<S> {
 		record
 			.unpack(&rd.get()[..len as _], &mut v, self.max_record_size)
 			.map_err(Error::RecordUnpack)?;
-		Ok(Some(self.cache.entry(lba).or_insert(v)))
+		self.cache.insert(lba, v);
+		Ok(self.cache.get_mut(&lba))
 	}
 
 	fn calc_block_count(&self, len: u32) -> usize {

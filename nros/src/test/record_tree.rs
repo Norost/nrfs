@@ -2,7 +2,7 @@ use super::*;
 
 fn new() -> RecordCache<storage::MemoryDev> {
 	let s = storage::MemoryDev::new(16, 10);
-	RecordCache::new(s, MaxRecordSize::K1, Compression::None)
+	RecordCache::new(s, MaxRecordSize::K1, Compression::None, 4)
 }
 
 #[test]

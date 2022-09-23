@@ -5,7 +5,7 @@ use crate::*;
 
 fn new(max_record_size: MaxRecordSize) -> Nros<storage::MemoryDev> {
 	let s = storage::MemoryDev::new(8, 10);
-	Nros::new(s, max_record_size, Compression::None).unwrap()
+	Nros::new(s, max_record_size, Compression::None, 2).unwrap()
 }
 
 #[test]

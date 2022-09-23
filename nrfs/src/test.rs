@@ -4,7 +4,14 @@ type S = nros::storage::MemoryDev;
 
 fn new() -> Nrfs<S> {
 	let s = S::new(1 << 10, 10);
-	Nrfs::new(s, MaxRecordSize::K1, &Default::default(), Compression::None).unwrap()
+	Nrfs::new(
+		s,
+		MaxRecordSize::K1,
+		&Default::default(),
+		Compression::None,
+		32,
+	)
+	.unwrap()
 }
 
 /// New filesystem with extensions.
@@ -17,6 +24,7 @@ fn new_ext() -> Nrfs<S> {
 			..Default::default()
 		},
 		Compression::None,
+		32,
 	)
 	.unwrap()
 }

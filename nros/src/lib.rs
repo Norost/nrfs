@@ -49,6 +49,7 @@ impl<S: Storage> Nros<S> {
 		mut storage: S,
 		max_record_size: MaxRecordSize,
 		compression: Compression,
+		cache_size: u16,
 	) -> Result<Self, NewError<S>> {
 		// Mandate at least 512 byte blocks since basically every disk has such a minimum size.
 		let block_length_p2 = storage.block_size_p2();
@@ -67,13 +68,13 @@ impl<S: Storage> Nros<S> {
 		w.set_region(0, 1).map_err(NewError::Storage)?;
 		w.finish().map_err(NewError::Storage)?;
 		Ok(Self {
-			storage: RecordCache::new(storage, max_record_size, compression),
+			storage: RecordCache::new(storage, max_record_size, compression, cache_size),
 			header: h,
 			used_objects: Default::default(),
 		})
 	}
 
-	pub fn load(mut storage: S) -> Result<Self, LoadError<S>> {
+	pub fn load(mut storage: S, cache_size: u16) -> Result<Self, LoadError<S>> {
 		let r = storage.read(0, 1).map_err(LoadError::Storage)?;
 		let mut h = header::Header::default();
 		let l = h.as_ref().len();
@@ -93,6 +94,7 @@ impl<S: Storage> Nros<S> {
 			h.allocation_log_lba.into(),
 			h.allocation_log_length.into(),
 			compr,
+			cache_size,
 		)?;
 
 		let max_obj_id_used = h.object_list.len() / 64;

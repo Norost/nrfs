@@ -27,8 +27,9 @@ impl<S: Storage> Nrfs<S> {
 		max_record_size: MaxRecordSize,
 		dir: &DirOptions,
 		compression: Compression,
+		cache_size: u16,
 	) -> Result<Self, nros::NewError<S>> {
-		let storage = nros::Nros::new(storage, max_record_size, compression)?;
+		let storage = nros::Nros::new(storage, max_record_size, compression, cache_size)?;
 		let mut s = Self { storage };
 		match Dir::new(&mut s, dir) {
 			Ok(_) => {}
@@ -37,8 +38,8 @@ impl<S: Storage> Nrfs<S> {
 		Ok(s)
 	}
 
-	pub fn load(storage: S) -> Result<Self, nros::LoadError<S>> {
-		Ok(Self { storage: nros::Nros::load(storage)? })
+	pub fn load(storage: S, cache_size: u16) -> Result<Self, nros::LoadError<S>> {
+		Ok(Self { storage: nros::Nros::load(storage, cache_size)? })
 	}
 
 	pub fn root_dir(&mut self) -> Result<Dir<'_, S>, Error<S>> {

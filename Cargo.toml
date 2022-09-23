@@ -5,3 +5,7 @@ members = [
 	"nros",
 	"nrfs",
 ]
+
+[profile.release]
+lto = "fat"
+opt-level = 3

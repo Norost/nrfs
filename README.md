@@ -6,7 +6,7 @@
 
 * &cross; Error detection
 * &cross; Error correction (with mirrors only!)
-* &cross; Compression
+* &check; Compression
 * &check; Transactional updates
 * &cross; Mirroring
 * &cross; Defragmentation
@@ -15,7 +15,7 @@
 * &check; Up to 2^32 entries per directory, indexed using a hashmap with DoS resistance.
 * &check; File names up to 255 bytes long.
 * &check; Extensions per directory (UNIX permissions/UID/GID, modification time ...).
-* &cross; Embedding small files inside directories.
+* &check; Embedding small files inside directories.
 
 ## How to use
 
