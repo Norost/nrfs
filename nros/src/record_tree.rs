@@ -1,4 +1,5 @@
 use crate::{
+	MaxRecordSize,
 	record::Record,
 	storage::Storage,
 	util::{read_from, write_to},
@@ -101,9 +102,9 @@ impl RecordTree {
 		S: Storage,
 	{
 		// Count how many levels need to be added.
-		let (old_depth, _) = depth(self.len(), sto);
+		let (old_depth, _) = depth(self.len(), sto.max_record_size);
 		self.0.total_length = len.into();
-		let (new_depth, _) = depth(self.len(), sto);
+		let (new_depth, _) = depth(self.len(), sto.max_record_size);
 		let ref_c = self.0.reference_count;
 		for _ in old_depth..new_depth {
 			let mut w = sto.write(&Record::default())?;
@@ -275,30 +276,71 @@ fn chunk_size<S>(len: u64, sto: &RecordCache<S>) -> Option<u64>
 where
 	S: Storage,
 {
-	let (depth, lvl_shift) = depth(len, sto);
+	let (depth, lvl_shift) = depth(len, sto.max_record_size);
 	depth
 		.checked_sub(1)
 		.map(|d| 1 << d * lvl_shift + sto.max_record_size.to_raw())
 }
 
 /// Calculate the depth and amount of records per record as a power of 2
-fn depth<S>(len: u64, sto: &RecordCache<S>) -> (u8, u8)
-where
-	S: Storage,
-{
-	// The length in units of records.
-	let max_rec_size = 1 << sto.max_record_size.to_raw();
-	let len = (len + max_rec_size - 1) / max_rec_size;
+fn depth(len: u64, max_record_size: MaxRecordSize) -> (u8, u8) {
+	// Round up to record size
+	let max_rec_size = 1 << max_record_size.to_raw();
+	let len = (len + max_rec_size - 1) & !(max_rec_size - 1);
 
 	// mem::size_of<Record>() = 64 = 2^6
-	let lvl_shift = sto.max_record_size.to_raw() - 6;
+	let lvl_shift = max_record_size.to_raw() - 6;
 
 	let (mut lvl, mut depth) = (len, 0);
-	// 0 = empty, 1 = not empty
-	while lvl > 1 {
+	while lvl > max_rec_size {
 		lvl >>= lvl_shift;
 		depth += 1;
 	}
 
 	(depth, lvl_shift)
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn depth_0_min() {
+		assert_eq!(depth(0, MaxRecordSize::K1), (0, 4));
+	}
+
+	#[test]
+	fn depth_0() {
+		assert_eq!(depth(1000, MaxRecordSize::K1), (0, 4));
+	}
+
+	#[test]
+	fn depth_0_max() {
+		assert_eq!(depth(1024, MaxRecordSize::K1), (0, 4));
+	}
+
+	#[test]
+	fn depth_1_min() {
+		assert_eq!(depth(1025, MaxRecordSize::K1), (1, 4));
+	}
+
+	#[test]
+	fn depth_2_min() {
+		assert_eq!(depth(1024 * 16 + 1, MaxRecordSize::K1), (2, 4));
+	}
+
+	#[test]
+	fn depth_2_min2() {
+		assert_eq!(depth(1024 * 31, MaxRecordSize::K1), (2, 4));
+	}
+
+	#[test]
+	fn depth_2_min3() {
+		assert_eq!(depth(1024 * 31 + 1, MaxRecordSize::K1), (2, 4));
+	}
+
+	#[test]
+	fn depth_2_max() {
+		assert_eq!(depth(1024 * 16 * 16, MaxRecordSize::K1), (2, 4));
+	}
 }
