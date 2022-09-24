@@ -102,9 +102,9 @@ impl<S: Storage> Nros<S> {
 			cache_size,
 		)?;
 
-		let max_obj_id_used = h.object_list.len() / 64;
-		let mut used_objects = RangeSet::from_iter([0..max_obj_id_used + 1]);
-		for id in 0..max_obj_id_used + 1 {
+		let upper_obj_id = h.object_list.len() / 64;
+		let mut used_objects = RangeSet::from_iter([0..upper_obj_id]);
+		for id in 0..upper_obj_id {
 			let mut rec = Record::default();
 			h.object_list
 				.read(&mut storage, id * 64, rec.as_mut())
