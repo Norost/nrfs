@@ -143,13 +143,12 @@ impl<S: Storage> RecordCache<S> {
 		record
 			.unpack(&rd.get()[..len as _], &mut v, self.max_record_size)
 			.map_err(Error::RecordUnpack)?;
-		debug_assert!(v.len() <= 1 << self.max_record_size.to_raw());
 		self.cache.insert(lba, v);
 		Ok(self.cache.get_mut(&lba))
 	}
 
 	fn calc_block_count(&self, len: u32) -> usize {
-		calc_block_count(len, self.storage.block_size_p2(), self.max_record_size)
+		calc_block_count(len, self.storage.block_size_p2())
 	}
 }
 
@@ -187,13 +186,13 @@ impl<S: Storage> DerefMut for Write<'_, S> {
 
 impl<'a, S: Storage> Write<'a, S> {
 	pub fn finish(self) -> Result<Record, Error<S>> {
-		let len = self.cache.compression.max_output_size(self.data.len(), self.cache.max_record_size);
+		let len = self.cache.compression.max_output_size(self.data.len());
 		let max_blks = self.cache.calc_block_count(len as _);
 		let block_count = self.cache.storage.block_count();
 		let bs_p2 = self.cache.storage.block_size_p2();
 		let mut w = self.cache.storage.write(max_blks).map_err(Error::Storage)?;
 		let mut rec = Record::pack(&self.data, w.get_mut(), self.cache.compression);
-		let blks = calc_block_count(rec.length.into(), bs_p2, self.cache.max_record_size);
+		let blks = calc_block_count(rec.length.into(), bs_p2);
 		let lba = self
 			.cache
 			.allocator
@@ -208,8 +207,7 @@ impl<'a, S: Storage> Write<'a, S> {
 	}
 }
 
-fn calc_block_count(len: u32, block_size_p2: u8, max_record_size: MaxRecordSize) -> usize {
-	debug_assert!(len <= 1 << max_record_size.to_raw(), "{} <= 1 << {}", len, max_record_size.to_raw());
+fn calc_block_count(len: u32, block_size_p2: u8) -> usize {
 	let bs = 1 << block_size_p2;
 	((len + bs - 1) / bs) as _
 }

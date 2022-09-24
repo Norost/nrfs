@@ -15,11 +15,11 @@ impl Compression {
 	/// While [`Self::compress`] will always ensure that the compressed data is no larger than
 	/// the uncompressed data, there still has to be some slack to ensure the compression
 	/// algorithms do not run out of memory.
-	pub(crate) fn max_output_size(self, len: usize, max_record_size: MaxRecordSize) -> usize {
+	pub(crate) fn max_output_size(self, len: usize) -> usize {
 		match self {
 			Compression::None => none::max_output_size(len),
 			Compression::Lz4 => lz4::max_output_size(len),
-		}.min(1 << max_record_size.to_raw())
+		}
 	}
 
 	/// # Note
