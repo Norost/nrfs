@@ -28,6 +28,8 @@ mod record_tree;
 pub mod storage;
 #[cfg(test)]
 mod test;
+mod util;
+mod write_buffer;
 
 pub use {
 	record::{Compression, MaxRecordSize},
@@ -36,13 +38,15 @@ pub use {
 
 use {
 	core::fmt, rangemap::RangeSet, record::Record, record_cache::RecordCache,
-	record_tree::RecordTree,
+	record_tree::RecordTree, std::collections::BTreeMap, write_buffer::WriteBuffer,
 };
 
 pub struct Nros<S: Storage> {
 	storage: RecordCache<S>,
 	header: header::Header,
 	used_objects: RangeSet<u64>,
+	/// Write buffer for the object list.
+	object_list_wb: WriteBuffer,
 }
 impl<S: Storage> Nros<S> {
 	pub fn new(
@@ -59,7 +63,7 @@ impl<S: Storage> Nros<S> {
 
 		let h = header::Header {
 			block_length_p2,
-			max_record_length_p2: max_record_size as _,
+			max_record_length_p2: max_record_size.to_raw(),
 			compression: compression.to_raw(),
 			..Default::default()
 		};
@@ -69,6 +73,7 @@ impl<S: Storage> Nros<S> {
 		w.finish().map_err(NewError::Storage)?;
 		Ok(Self {
 			storage: RecordCache::new(storage, max_record_size, compression, cache_size),
+			object_list_wb: WriteBuffer::new(&h.object_list),
 			header: h,
 			used_objects: Default::default(),
 		})
@@ -111,7 +116,12 @@ impl<S: Storage> Nros<S> {
 			}
 		}
 
-		Ok(Self { storage, header: h, used_objects })
+		Ok(Self {
+			storage,
+			object_list_wb: WriteBuffer::new(&h.object_list),
+			header: h,
+			used_objects,
+		})
 	}
 
 	fn alloc_ids(&mut self, count: u64) -> u64 {
@@ -131,12 +141,13 @@ impl<S: Storage> Nros<S> {
 
 	pub fn new_object(&mut self) -> Result<u64, Error<S>> {
 		let id = self.alloc_ids(1);
-		let r = &mut self.header.object_list;
+		let r = &mut self.object_list_wb;
 		if r.len() < id * 64 + 64 {
-			r.resize(&mut self.storage, id * 64 + 64)?;
+			r.resize(id * 64 + 64);
 		}
 		r.write(
 			&mut self.storage,
+			&self.header.object_list,
 			id * 64,
 			Record { reference_count: 1, ..Default::default() }.as_ref(),
 		)?;
@@ -146,15 +157,15 @@ impl<S: Storage> Nros<S> {
 	/// Return IDs for two objects, one at ID and one at ID + 1
 	pub fn new_object_pair(&mut self) -> Result<u64, Error<S>> {
 		let id = self.alloc_ids(2);
-		let r = &mut self.header.object_list;
-		if r.len() <= id * 64 + 128 {
-			r.resize(&mut self.storage, id * 64 + 128)?;
+		let w = &mut self.object_list_wb;
+		if w.len() <= id * 64 + 128 {
+			w.resize(id * 64 + 128);
 		}
 		let rec = Record { reference_count: 1, ..Default::default() };
 		let mut b = [0; 128];
 		b[..64].copy_from_slice(rec.as_ref());
 		b[64..].copy_from_slice(rec.as_ref());
-		r.write(&mut self.storage, id * 64, &b)?;
+		w.write(&mut self.storage, &self.header.object_list, id * 64, &b)?;
 		Ok(id)
 	}
 
@@ -180,10 +191,6 @@ impl<S: Storage> Nros<S> {
 		self.set_object_root(from_id, &Default::default())?;
 		self.dealloc_id(from_id);
 		Ok(())
-	}
-
-	pub fn object_count(&mut self) -> u64 {
-		self.header.object_list.len() / 64
 	}
 
 	pub fn object_len(&mut self, id: u64) -> Result<u64, Error<S>> {
@@ -219,22 +226,31 @@ impl<S: Storage> Nros<S> {
 		let l = (data.len() as u64).min(l);
 		let data = &data[..l as _];
 		obj.write(&mut self.storage, offset, data)?;
-		self.header
-			.object_list
-			.write(&mut self.storage, id * 64, obj.0.as_ref())?;
+		self.object_list_wb.write(
+			&mut self.storage,
+			&self.header.object_list,
+			id * 64,
+			obj.0.as_ref(),
+		)?;
 		Ok(data.len())
 	}
 
 	pub fn resize(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
 		let mut rec = self.object_root(id)?;
 		rec.resize(&mut self.storage, len)?;
-		self.header
-			.object_list
-			.write(&mut self.storage, id * 64, rec.0.as_ref())?;
+		self.object_list_wb.write(
+			&mut self.storage,
+			&self.header.object_list,
+			id * 64,
+			rec.0.as_ref(),
+		)?;
 		Ok(())
 	}
 
 	pub fn finish_transaction(&mut self) -> Result<(), Error<S>> {
+		// Flush write buffers
+		self.object_list_wb.flush(&mut self.storage, &mut self.header.object_list)?;
+
 		// Save allocation log
 		let (lba, len) = self.storage.finish_transaction()?;
 		self.header.allocation_log_lba = lba.into();
@@ -251,19 +267,22 @@ impl<S: Storage> Nros<S> {
 
 	/// This function *must not* be used on invalid objects!
 	fn object_root(&mut self, id: u64) -> Result<record_tree::RecordTree, Error<S>> {
-		debug_assert!(id * 64 < self.header.object_list.len());
+		let w = &mut self.object_list_wb;
+		debug_assert!(id * 64 < w.len());
 		let mut rec = RecordTree::default();
-		self.header
-			.object_list
-			.read(&mut self.storage, id * 64, rec.0.as_mut())?;
+		w.read(
+			&mut self.storage,
+			&self.header.object_list,
+			id * 64,
+			rec.0.as_mut(),
+		)?;
 		debug_assert!(rec.0.reference_count > 0, "invalid object {}", id);
 		Ok(rec)
 	}
 
 	fn set_object_root(&mut self, id: u64, rec: &record_tree::RecordTree) -> Result<(), Error<S>> {
-		self.header
-			.object_list
-			.write(&mut self.storage, id * 64, rec.0.as_ref())
+		self.object_list_wb
+			.write(&mut self.storage, &self.header.object_list, id * 64, rec.0.as_ref())
 	}
 
 	pub fn storage(&self) -> &S {

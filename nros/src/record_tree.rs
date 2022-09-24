@@ -1,4 +1,9 @@
-use crate::{record::Record, storage::Storage, Error, RecordCache};
+use crate::{
+	record::Record,
+	storage::Storage,
+	util::{read_from, write_to},
+	Error, RecordCache,
+};
 
 #[derive(Debug, Default)]
 #[repr(transparent)]
@@ -22,6 +27,26 @@ impl RecordTree {
 		S: Storage,
 	{
 		NodeRef(&self.0).read(self.len(), sto, offset, buf)
+	}
+
+	/// Insert records, completely overwriting the previous records.
+	///
+	/// The records *must* be sorted.
+	pub fn insert_records<S>(
+		&mut self,
+		sto: &mut RecordCache<S>,
+		iter: &mut dyn Iterator<Item = (u64, Vec<u8>)>,
+	) -> Result<(), Error<S>>
+	where
+		S: Storage,
+	{
+		// TODO optimize
+		for (o, mut r) in iter {
+			let l = (self.len() - o).min(1 << sto.max_record_size.to_raw());
+			r.resize(l as _, 0);
+			self.write(sto, o, &r)?;
+		}
+		Ok(())
 	}
 
 	/// # Note
@@ -50,7 +75,9 @@ impl RecordTree {
 	where
 		S: Storage,
 	{
-		if len < self.len() {
+		if len == self.len() {
+			Ok(())
+		} else if len < self.len() {
 			self.shrink(sto, len)
 		} else {
 			self.grow(sto, len)
@@ -239,24 +266,6 @@ fn get(r: &[u8], index: u32) -> Record {
 
 fn set(w: &mut Vec<u8>, index: u32, rec: &Record) {
 	write_to(w, index as usize * 64, rec.as_ref())
-}
-
-fn read_from(r: &[u8], offt: usize, buf: &mut [u8]) {
-	if offt >= r.len() {
-		buf.fill(0);
-		return;
-	}
-	let i = r.len().min(offt + buf.len());
-	let (l, h) = buf.split_at_mut(i - offt);
-	l.copy_from_slice(&r[offt..][..l.len()]);
-	h.fill(0);
-}
-
-fn write_to(w: &mut Vec<u8>, offt: usize, data: &[u8]) {
-	if offt + data.len() > w.len() {
-		w.resize(offt + data.len(), 0);
-	}
-	w[offt..][..data.len()].copy_from_slice(data);
 }
 
 /// Calculate the amount of data each chunk / child can hold.

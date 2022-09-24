@@ -21,10 +21,9 @@ struct Node<K, V> {
 
 impl<K: Clone, V> Lru<K, V>
 where
-	K: Default + Hash + Eq,
+	K: Default + Hash + Eq + core::fmt::Debug,
 {
 	pub fn new(max: u16) -> Self {
-		let max = 1;
 		Self {
 			nodes: (0..max)
 				.map(|i| Node { key_value: None, prev: u16::MAX, next: i + 1 })
@@ -48,10 +47,11 @@ where
 		} else {
 			i = self.tail;
 			let n = &self.nodes[usize::from(i)];
-			self.tail = n.next;
+			let nn = n.next;
 			self.map.remove(&n.key_value.as_ref().unwrap().0);
 			self.remove_node(i);
 			self.map.insert(key.clone(), i);
+			self.tail = nn;
 		};
 		self.node(i).key_value = Some((key, value));
 		self.push_node(i);
@@ -65,6 +65,7 @@ where
 		Some(&mut self.node(i).key_value.as_mut().unwrap().1)
 	}
 
+	#[cfg(test)]
 	pub fn get(&mut self, key: &K) -> Option<&V> {
 		self.get_mut(key).map(|v| &*v)
 	}
@@ -95,9 +96,11 @@ where
 			self.node(self.head).next = i;
 		}
 		self.head = i;
-		if self.map.len() == 1 {
+		if self.tail >= self.cap() {
 			self.tail = i;
 		}
+		debug_assert!(self.head != u16::MAX);
+		debug_assert!(self.tail != u16::MAX);
 	}
 
 	fn remove_node(&mut self, i: u16) {
@@ -224,5 +227,22 @@ mod test {
 	#[test]
 	fn fuzz_a() {
 		fuzz(13, 7, 7, 3);
+	}
+
+	// Real case minified
+	#[test]
+	fn nrfs_real_case_fail_000_minified() {
+		let mut lru = Lru::new(32);
+		lru.insert(1, ());
+		lru.insert(0, ());
+		lru.insert(2, ());
+		lru.remove(&2);
+		lru.insert(5, ());
+		lru.insert(7, ());
+		lru.remove(&0);
+		lru.insert(15, ());
+		lru.insert(14, ());
+		lru.remove(&14);
+		lru.insert(0, ());
 	}
 }

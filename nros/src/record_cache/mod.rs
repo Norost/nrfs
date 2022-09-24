@@ -93,6 +93,7 @@ impl<S: Storage> RecordCache<S> {
 	///
 	/// This is useful in conjunction with [`Self::take`].
 	pub fn insert(&mut self, record: &Record, data: Vec<u8>) -> Result<Record, Error<S>> {
+		debug_assert!(data.len() <= 1 << self.max_record_size.to_raw());
 		self.free(record);
 		Write { data, cache: self }.finish()
 	}
@@ -142,6 +143,7 @@ impl<S: Storage> RecordCache<S> {
 		record
 			.unpack(&rd.get()[..len as _], &mut v, self.max_record_size)
 			.map_err(Error::RecordUnpack)?;
+		debug_assert!(v.len() <= 1 << self.max_record_size.to_raw());
 		self.cache.insert(lba, v);
 		Ok(self.cache.get_mut(&lba))
 	}
@@ -185,7 +187,7 @@ impl<S: Storage> DerefMut for Write<'_, S> {
 
 impl<'a, S: Storage> Write<'a, S> {
 	pub fn finish(self) -> Result<Record, Error<S>> {
-		let len = self.cache.compression.max_output_size(self.data.len());
+		let len = self.cache.compression.max_output_size(self.data.len(), self.cache.max_record_size);
 		let max_blks = self.cache.calc_block_count(len as _);
 		let block_count = self.cache.storage.block_count();
 		let bs_p2 = self.cache.storage.block_size_p2();
@@ -207,7 +209,7 @@ impl<'a, S: Storage> Write<'a, S> {
 }
 
 fn calc_block_count(len: u32, block_size_p2: u8, max_record_size: MaxRecordSize) -> usize {
-	debug_assert!(len <= 1 << max_record_size.to_raw(), "{:?}", len);
+	debug_assert!(len <= 1 << max_record_size.to_raw(), "{} <= 1 << {}", len, max_record_size.to_raw());
 	let bs = 1 << block_size_p2;
 	((len + bs - 1) / bs) as _
 }
