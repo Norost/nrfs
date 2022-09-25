@@ -753,11 +753,19 @@ impl Filesystem for Fs {
 struct S {
 	file: fs::File,
 	block_count: u64,
+	block_size_p2: u8,
 }
 
 impl S {
-	fn new(file: fs::File) -> Self {
-		Self { block_count: file.metadata().unwrap().len() >> 9, file }
+	fn new(mut file: fs::File) -> Self {
+		let mut b = [0];
+		file.seek(SeekFrom::Start(23)).unwrap();
+		file.read_exact(&mut b).unwrap();
+		Self {
+			block_count: file.metadata().unwrap().len() >> b[0],
+			file,
+			block_size_p2: b[0],
+		}
 	}
 }
 
@@ -765,7 +773,7 @@ impl nrfs::Storage for S {
 	type Error = io::Error;
 
 	fn block_size_p2(&self) -> u8 {
-		9
+		self.block_size_p2
 	}
 
 	fn block_count(&self) -> u64 {
@@ -819,8 +827,8 @@ impl<'a> nrfs::Write for W<'a> {
 	}
 
 	fn set_region(&mut self, lba: u64, blocks: usize) -> Result<(), Self::Error> {
-		self.offset = lba << 9;
-		self.buf.resize(blocks << 9, 0);
+		self.offset = lba << self.s.block_size_p2;
+		self.buf.resize(blocks << self.s.block_size_p2, 0);
 		Ok(())
 	}
 
