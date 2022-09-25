@@ -24,7 +24,7 @@ impl Default for Header {
 	fn default() -> Self {
 		Self {
 			magic: *b"Nora Reliable FS",
-			version: 0x00_00_0001.into(),
+			version: 0x00_00_0002.into(),
 			hash_algorithm: 0,
 			compression: 0,
 			max_record_length_p2: 17,

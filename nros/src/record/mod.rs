@@ -25,7 +25,7 @@ mod compression;
 use {
 	alloc::vec::Vec,
 	core::fmt,
-	endian::{u32le, u64le},
+	endian::{u16le, u32le, u64le},
 };
 
 pub use compression::Compression;
@@ -38,11 +38,9 @@ pub struct Record {
 	pub length: u32le,
 	pub hash_algorithm: u8,
 	pub compression: u8,
-	pub ty: u8,
-	pub flags: u8,
+	pub reference_count: u16le,
 	pub total_length: u64le,
-	pub _reserved: [u8; 7],
-	pub reference_count: u8,
+	pub _reserved: [u8; 8],
 }
 
 raw!(Record);
@@ -90,8 +88,6 @@ impl fmt::Debug for Record {
 		} else {
 			f.field("compression_algorithm", &self.compression);
 		}
-		f.field("ty", &self.ty);
-		f.field("flags", &format_args!("{:08b}", self.flags));
 		f.field("total_length", &self.total_length);
 		f.field("reference_count", &self.reference_count);
 		f.finish()

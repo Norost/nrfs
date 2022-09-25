@@ -108,7 +108,7 @@ impl RecordTree {
 		for _ in old_depth..new_depth {
 			let mut w = sto.write(&Record::default())?;
 			set(&mut w, 0, &self.0);
-			self.0.reference_count = 0;
+			self.0.reference_count = 0.into();
 			self.0 = w.finish()?;
 		}
 		self.0.reference_count = ref_c;

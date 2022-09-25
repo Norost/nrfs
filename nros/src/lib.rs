@@ -149,7 +149,7 @@ impl<S: Storage> Nros<S> {
 			&mut self.storage,
 			&self.header.object_list,
 			id * 64,
-			Record { reference_count: 1, ..Default::default() }.as_ref(),
+			Record { reference_count: 1.into(), ..Default::default() }.as_ref(),
 		)?;
 		Ok(id)
 	}
@@ -161,7 +161,7 @@ impl<S: Storage> Nros<S> {
 		if w.len() <= id * 64 + 128 {
 			w.resize(id * 64 + 128);
 		}
-		let rec = Record { reference_count: 1, ..Default::default() };
+		let rec = Record { reference_count: 1.into(), ..Default::default() };
 		let mut b = [0; 128];
 		b[..64].copy_from_slice(rec.as_ref());
 		b[64..].copy_from_slice(rec.as_ref());
@@ -277,7 +277,7 @@ impl<S: Storage> Nros<S> {
 			id * 64,
 			rec.0.as_mut(),
 		)?;
-		debug_assert!(rec.0.reference_count > 0, "invalid object {}", id);
+		debug_assert!(u16::from(rec.0.reference_count) > 0, "invalid object {}", id);
 		Ok(rec)
 	}
 
