@@ -1,13 +1,13 @@
 use {
 	arena::{Arena, Handle},
 	fuser::*,
-	log::{debug, *},
+	log::debug,
 	nrfs::{Name, Storage},
 	std::{
 		collections::HashMap,
 		ffi::OsStr,
 		fs,
-		hash::{BuildHasher, Hash, Hasher},
+		hash::Hash,
 		io::{self, Read, Seek, SeekFrom, Write},
 		os::unix::ffi::OsStrExt,
 		path::Path,
@@ -414,7 +414,7 @@ impl Filesystem for Fs {
 
 	fn read(
 		&mut self,
-		req: &Request,
+		_req: &Request,
 		ino: u64,
 		_fh: u64,
 		offset: i64,
@@ -434,7 +434,7 @@ impl Filesystem for Fs {
 
 	fn write(
 		&mut self,
-		req: &Request,
+		_req: &Request,
 		ino: u64,
 		_fh: u64,
 		offset: i64,
@@ -455,7 +455,7 @@ impl Filesystem for Fs {
 		self.sto.finish_transaction().unwrap();
 	}
 
-	fn readlink(&mut self, req: &Request, ino: u64, reply: ReplyData) {
+	fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
 		let mut buf = [0; 1 << 15];
 		let f = self.ino.get_sym(ino);
 		let mut d = self.sto.get_dir(f.dir).unwrap();
@@ -467,7 +467,7 @@ impl Filesystem for Fs {
 
 	fn readdir(
 		&mut self,
-		req: &Request<'_>,
+		_req: &Request<'_>,
 		ino: u64,
 		_fh: u64,
 		mut offset: i64,
@@ -570,7 +570,7 @@ impl Filesystem for Fs {
 
 	fn fallocate(
 		&mut self,
-		req: &Request<'_>,
+		_req: &Request<'_>,
 		ino: u64,
 		_fh: u64,
 		_offset: i64,
@@ -670,7 +670,7 @@ impl Filesystem for Fs {
 		name: &OsStr,
 		newparent: u64,
 		newname: &OsStr,
-		flags: u32,
+		_flags: u32,
 		reply: ReplyEmpty,
 	) {
 		if let (Ok(n), Ok(nn)) = (name.as_bytes().try_into(), newname.as_bytes().try_into()) {

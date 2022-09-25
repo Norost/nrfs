@@ -38,7 +38,7 @@ pub use {
 
 use {
 	core::fmt, rangemap::RangeSet, record::Record, record_cache::RecordCache,
-	record_tree::RecordTree, std::collections::BTreeMap, write_buffer::WriteBuffer,
+	record_tree::RecordTree, write_buffer::WriteBuffer,
 };
 
 pub struct Nros<S: Storage> {

@@ -1,7 +1,4 @@
-use {
-	core::{hash::Hash, mem},
-	rustc_hash::FxHashMap,
-};
+use {core::hash::Hash, rustc_hash::FxHashMap};
 
 #[derive(Debug)]
 pub struct Lru<K, V> {

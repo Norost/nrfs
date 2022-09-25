@@ -47,7 +47,7 @@ fn make(args: Args) {
 	let mut extensions = nrfs::dir::EnableExtensions::default();
 	extensions.add_unix();
 	extensions.add_mtime();
-	let mut opt = nrfs::DirOptions { extensions, ..Default::default() };
+	let opt = nrfs::DirOptions { extensions, ..Default::default() };
 	let rec_size = nrfs::MaxRecordSize::K128; // TODO
 	let compr = nrfs::Compression::Lz4;
 	let mut nrfs = nrfs::Nrfs::new(S::new(f), rec_size, &opt, compr, 32).unwrap();

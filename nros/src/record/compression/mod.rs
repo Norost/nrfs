@@ -1,8 +1,6 @@
 mod lz4;
 mod none;
 
-use crate::MaxRecordSize;
-
 n2e! {
 	[Compression]
 	0 None

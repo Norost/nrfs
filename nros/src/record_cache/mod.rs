@@ -1,10 +1,7 @@
 mod lru;
 
 use {
-	crate::{
-		allocator::Allocator, Compression, Error, LoadError, MaxRecordSize, Read as _, Record,
-		Storage, Write as _,
-	},
+	crate::{allocator::Allocator, Compression, Error, LoadError, MaxRecordSize, Record, Storage},
 	alloc::vec::Vec,
 	core::{
 		fmt,

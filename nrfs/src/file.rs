@@ -1,5 +1,5 @@
 use {
-	crate::{dir::Type, Dir, Error, Nrfs, Storage},
+	crate::{dir::Type, Dir, Error, Storage},
 	core::fmt,
 };
 
@@ -80,7 +80,7 @@ impl<'a, 'b, S: Storage> File<'a, 'b, S> {
 	pub fn write(&mut self, offset: u64, data: &[u8]) -> Result<usize, Error<S>> {
 		match &self.inner {
 			Inner::Object { id, .. } => self.dir.fs.write(*id, offset, data),
-			Inner::Embed { offset: offt, length, index } => {
+			Inner::Embed { offset: offt, length, index: _ } => {
 				if offset >= u64::from(*length) {
 					return Ok(0);
 				}
@@ -94,7 +94,7 @@ impl<'a, 'b, S: Storage> File<'a, 'b, S> {
 	pub fn write_all(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
 		match &self.inner {
 			Inner::Object { id, .. } => self.dir.fs.write_all(*id, offset, data),
-			Inner::Embed { offset: offt, length, index } => {
+			Inner::Embed { offset: offt, length, index: _ } => {
 				if offset >= u64::from(*length) {
 					return Err(Error::Truncated);
 				}

@@ -23,20 +23,12 @@ macro_rules! n2e {
 mod compression;
 
 use {
-	crate::{
-		storage::{Read, Storage},
-		Error,
-	},
 	alloc::vec::Vec,
-	core::{fmt, time::Duration},
+	core::fmt,
 	endian::{u32le, u64le},
 };
 
 pub use compression::Compression;
-
-pub const COMPRESSION_NONE: u8 = 0;
-
-pub const HASH_NONE: u8 = 0;
 
 #[derive(Clone, Copy, Default)]
 #[repr(C, align(64))]

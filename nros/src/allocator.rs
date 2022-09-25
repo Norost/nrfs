@@ -1,8 +1,5 @@
 use {
-	crate::{
-		storage::{Storage, Write},
-		Error, LoadError,
-	},
+	crate::{storage::Storage, Error, LoadError},
 	endian::u64le,
 	rangemap::RangeSet,
 };
