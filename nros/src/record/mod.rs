@@ -49,7 +49,7 @@ pub struct Record {
 	pub ty: u8,
 	pub flags: u8,
 	pub total_length: u64le,
-	pub modification_time: [u8; 7],
+	pub _reserved: [u8; 7],
 	pub reference_count: u8,
 }
 
@@ -85,9 +85,6 @@ impl Record {
 
 impl fmt::Debug for Record {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let [a, b, c, d, e, g, h] = self.modification_time;
-		let t = u64::from_le_bytes([a, b, c, d, e, g, h, 0]);
-		let t = Duration::from_millis(t);
 		let (a, b) = self.hash.split_at(16);
 		let a = u128::from_be_bytes(a.try_into().unwrap());
 		let b = u128::from_be_bytes(b.try_into().unwrap());
@@ -104,7 +101,6 @@ impl fmt::Debug for Record {
 		f.field("ty", &self.ty);
 		f.field("flags", &format_args!("{:08b}", self.flags));
 		f.field("total_length", &self.total_length);
-		f.field("modification_time", &t);
 		f.field("reference_count", &self.reference_count);
 		f.finish()
 	}

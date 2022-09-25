@@ -66,8 +66,14 @@ impl WriteBuffer {
 				b.extend_from_slice(trim_zeroes(d));
 			} else {
 				(d, data) = data.split_at(data.len().min(bs - o));
-				let d = trim_zeroes(d);
-				let f = |b: &mut Vec<u8>| util::write_to(b, o, d);
+				let f = |b: &mut Vec<u8>| {
+					if o + d.len() < b.len() {
+						util::write_to(b, o, d);
+					} else {
+						b.resize(o, 0);
+						b.extend_from_slice(trim_zeroes(d));
+					};
+				};
 				// Get the record from our caches or fetch it.
 				match self.records.entry(k) {
 					Entry::Occupied(mut e) => f(e.get_mut()),
@@ -113,21 +119,6 @@ impl WriteBuffer {
 
 		let bs = 1 << sto.max_record_size.to_raw();
 
-		// xxxxxx
-		//   yyyyyy
-		let b;
-		if let Some((o, r)) = self.records.range(..offset).next_back() {
-			if offset < o + r.len() as u64 {
-				let r = &r[(offset - o) as _..];
-				let l = r.len().min(buf.len());
-				(b, buf) = buf.split_at_mut(l);
-				b[..l].copy_from_slice(&r[..l]);
-				offset += l as u64;
-			}
-		}
-
-		//    xxxxxx      xxxxxx
-		// yyyyyyyyyyyyyyyyyy
 		while !buf.is_empty() {
 			let k = offset & !(bs as u64 - 1);
 			let o = (offset & (bs as u64 - 1)) as usize;
@@ -146,16 +137,16 @@ impl WriteBuffer {
 	}
 
 	pub fn resize(&mut self, new_len: u64) {
+		// Remove out of range records
+		while let Some((&o, _)) = self.records.range(new_len..).next_back() {
+			self.records.remove(&o);
+		}
+
 		// Truncate overlapping record
 		if let Some((o, r)) = self.records.range_mut(..new_len).next_back() {
 			if new_len < o + r.len() as u64 {
 				r.resize((o - new_len) as _, 0);
 			}
-		}
-
-		// Remove out of range records
-		while let Some((&o, _)) = self.records.range(new_len..).next() {
-			self.records.remove(&o);
 		}
 
 		self.total_length = new_len;

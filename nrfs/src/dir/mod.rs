@@ -752,6 +752,8 @@ impl<S: Storage + fmt::Debug> fmt::Debug for Entry<'_, '_, S> {
 				"key",
 				&String::from_utf8_lossy(&self.key[..self.key_len.into()]),
 			)
+			.field("key_offset", &self.key_offset)
+			.field("key_len", &self.key_len)
 			.field("unix", &self.unix)
 			.finish_non_exhaustive()
 	}

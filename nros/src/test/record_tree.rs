@@ -57,5 +57,5 @@ fn write_0_twice() {
 	let mut t = RecordTree::default();
 	t.resize(&mut c, 1024).unwrap();
 	t.write(&mut c, 0, &[0xcc; 1024]).unwrap();
-	t.write(&mut c, 0, &[0xcc; 1024]).unwrap();
+	t.write(&mut c, 0, &[0xdd; 1024]).unwrap();
 }

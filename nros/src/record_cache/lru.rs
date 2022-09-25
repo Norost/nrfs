@@ -19,9 +19,9 @@ struct Node<K, V> {
 	prev: u16,
 }
 
-impl<K: Clone, V> Lru<K, V>
+impl<K, V> Lru<K, V>
 where
-	K: Default + Hash + Eq + core::fmt::Debug,
+	K: Clone + Hash + Eq,
 {
 	pub fn new(max: u16) -> Self {
 		Self {
@@ -80,7 +80,8 @@ where
 	pub fn remove(&mut self, key: &K) -> Option<V> {
 		let i = self.map.remove(key)?;
 		self.remove_node(i);
-		let (_, v) = self.nodes[usize::from(i)].key_value.take().unwrap();
+		let (_, v) = self.node(i).key_value.take().unwrap();
+		self.node(i).next = self.free;
 		self.free = i;
 		Some(v)
 	}
@@ -99,8 +100,8 @@ where
 		if self.tail >= self.cap() {
 			self.tail = i;
 		}
-		debug_assert!(self.head != u16::MAX);
-		debug_assert!(self.tail != u16::MAX);
+		debug_assert!(self.head < self.cap());
+		debug_assert!(self.tail < self.cap());
 	}
 
 	fn remove_node(&mut self, i: u16) {
@@ -229,7 +230,6 @@ mod test {
 		fuzz(13, 7, 7, 3);
 	}
 
-	// Real case minified
 	#[test]
 	fn nrfs_real_case_fail_000_minified() {
 		let mut lru = Lru::new(32);

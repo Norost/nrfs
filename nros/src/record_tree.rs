@@ -1,9 +1,8 @@
 use crate::{
-	MaxRecordSize,
 	record::Record,
 	storage::Storage,
 	util::{read_from, write_to},
-	Error, RecordCache,
+	Error, MaxRecordSize, RecordCache,
 };
 
 #[derive(Debug, Default)]

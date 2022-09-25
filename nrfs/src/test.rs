@@ -206,3 +206,19 @@ fn remove_collision() {
 	// it impossible to find "g" with linear probing
 	assert!(d.remove(b"g".into()).unwrap());
 }
+
+#[test]
+fn real_case_find_000_minified() {
+	let mut fs = new();
+	let mut d = fs.root_dir().unwrap();
+	d.create_dir(b"d".into(), &Default::default(), &Default::default())
+		.unwrap();
+	d.create_file(b"C".into(), &Default::default()).unwrap();
+	d.create_file(b".rustc_info.json".into(), &Default::default())
+		.unwrap();
+	d.create_dir(b"p".into(), &Default::default(), &Default::default())
+		.unwrap();
+	assert_eq!(d.len(), fs.root_dir().unwrap().len());
+	let mut d = fs.root_dir().unwrap();
+	d.find(b".rustc_info.json".into()).unwrap().unwrap();
+}

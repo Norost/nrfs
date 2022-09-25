@@ -1,5 +1,6 @@
 mod record;
 mod record_tree;
+mod write_buffer;
 
 use crate::*;
 
@@ -94,4 +95,30 @@ fn write_tx_read_many() {
 	let mut buf = [0];
 	s.read(id3, 0, &mut buf).unwrap();
 	assert_eq!(buf, [1]);
+}
+
+#[test]
+fn write_new_write() {
+	let mut s = new(MaxRecordSize::K1);
+
+	let id = s.new_object().unwrap();
+	let id2 = s.new_object().unwrap();
+
+	s.resize(id2, 64).unwrap();
+	s.write(id2, 42, &[0xde; 2]).unwrap();
+
+	s.resize(id, 2000).unwrap();
+	s.write(id, 1000, &[0xcc; 1000]).unwrap();
+
+	let mut buf = [0; 1000];
+	s.read(id, 0, &mut buf).unwrap();
+	assert_eq!(buf, [0; 1000]);
+	s.read(id, 1000, &mut buf).unwrap();
+	assert_eq!(buf, [0xcc; 1000]);
+
+	s.move_object(id, id2).unwrap();
+
+	let mut buf = [0; 2];
+	s.read(id, 42, &mut buf).unwrap();
+	assert_eq!(buf, [0xde; 2]);
 }

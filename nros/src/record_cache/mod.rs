@@ -93,7 +93,12 @@ impl<S: Storage> RecordCache<S> {
 	///
 	/// This is useful in conjunction with [`Self::take`].
 	pub fn insert(&mut self, record: &Record, data: Vec<u8>) -> Result<Record, Error<S>> {
-		debug_assert!(data.len() <= 1 << self.max_record_size.to_raw(), "{} <= {:?}", data.len(), self.max_record_size);
+		debug_assert!(
+			data.len() <= 1 << self.max_record_size.to_raw(),
+			"{} <= {:?}",
+			data.len(),
+			self.max_record_size
+		);
 		self.free(record);
 		Write { data, cache: self }.finish()
 	}
