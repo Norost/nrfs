@@ -28,13 +28,11 @@ impl<S: Storage> Nrfs<S> {
 		dir: &DirOptions,
 		compression: Compression,
 		cache_size: u16,
-	) -> Result<Self, nros::NewError<S>> {
-		let storage = nros::Nros::new(storage, max_record_size, compression, cache_size)?;
+	) -> Result<Self, NewError<S>> {
+		let storage = nros::Nros::new(storage, max_record_size, compression, cache_size)
+			.map_err(NewError::Nros)?;
 		let mut s = Self { storage };
-		match Dir::new(&mut s, dir) {
-			Ok(_) => {}
-			_ => todo!(),
-		}
+		Dir::new(&mut s, dir).map_err(NewError::Error)?;
 		Ok(s)
 	}
 
@@ -93,6 +91,14 @@ impl<S: Storage> Nrfs<S> {
 	}
 }
 
+pub enum NewError<S>
+where
+	S: Storage,
+{
+	Nros(nros::NewError<S>),
+	Error(Error<S>),
+}
+
 pub enum Error<S>
 where
 	S: Storage,
@@ -101,6 +107,19 @@ where
 	Truncated,
 	CorruptExtension,
 	UnknownHashAlgorithm(u8),
+}
+
+impl<S> fmt::Debug for NewError<S>
+where
+	S: Storage,
+	S::Error: fmt::Debug,
+{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Nros(e) => f.debug_tuple("Nros").field(e).finish(),
+			Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
+		}
+	}
 }
 
 impl<S> fmt::Debug for Error<S>

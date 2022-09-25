@@ -316,7 +316,6 @@ impl<S: Storage> fmt::Debug for Nros<S> {
 	}
 }
 
-#[derive(Debug)]
 pub enum NewError<S: Storage> {
 	BlockTooSmall,
 	Storage(S::Error),
@@ -334,6 +333,18 @@ pub enum Error<S: Storage> {
 	Storage(S::Error),
 	RecordUnpack(record::UnpackError),
 	NotEnoughSpace,
+}
+
+impl<S: Storage> fmt::Debug for NewError<S>
+where
+	S::Error: fmt::Debug,
+{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::BlockTooSmall => f.debug_tuple("BlockTooSmall").finish(),
+			Self::Storage(e) => f.debug_tuple("Storage").field(&e).finish(),
+		}
+	}
 }
 
 impl<S: Storage> fmt::Debug for Error<S>

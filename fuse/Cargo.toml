@@ -14,7 +14,7 @@ version = "*"
 path = "../nrfs"
 
 [dependencies.arena]
-path = "../../arena"
+git = "https://git.sr.ht/~demindiro/arena"
 
 [dependencies.env_logger]
 version = "0.9"

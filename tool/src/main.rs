@@ -1,3 +1,8 @@
+#[cfg(target_family = "unix")]
+use std::os::unix::{
+	fs::{FileTypeExt, MetadataExt, PermissionsExt},
+	io::AsRawFd,
+};
 use {
 	clap::Parser,
 	std::{
@@ -7,50 +12,93 @@ use {
 	},
 };
 
-#[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
-struct Args {
-	#[clap(value_enum)]
-	command: Command,
-	file: String,
-	#[clap(short)]
-	directory: Option<PathBuf>,
-	#[clap(long)]
-	follow: bool,
-	#[clap(short, long, default_value_t = 17)]
-	record_size_p2: u8,
+#[derive(Debug, Parser)]
+#[clap(
+	author = "David Hoppenbrouwers",
+	version = "0.1",
+	about = "Tool for creating & working with NRFS filesystems"
+)]
+enum Command {
+	Make(Make),
+	Dump(Dump),
 }
 
-#[derive(Clone, Debug, clap::ValueEnum)]
-enum Command {
-	Make,
-	Dump,
+#[derive(Debug, clap::StructOpt)]
+#[clap(about = "Create a new filesystem")]
+struct Make {
+	#[clap(help = "The path to the image to put the filesystem in")]
+	path: String,
+	#[clap(short, long, help = "The directory to copy to the image")]
+	directory: Option<PathBuf>,
+	#[clap(
+		short,
+		long,
+		help = "Whether to resolve symlinks when copying a directory"
+	)]
+	follow: bool,
+	#[clap(short, long, default_value_t = 17, help = "The record size to use")]
+	record_size_p2: u8,
+	#[clap(
+		short,
+		long,
+		help = "The block size to use",
+		long_help = "If not specified it is derived automatically\n\
+		If derivation fails, it defaults to 12 (4K)"
+	)]
+	block_size_p2: Option<u8>,
+	#[clap(short, long, value_enum, default_value_t = Compression::Lz4, help = "The compression to use")]
+	compression: Compression,
+}
+
+#[derive(Clone, Debug, clap::ArgEnum)]
+enum Compression {
+	None,
+	Lz4,
+}
+
+#[derive(Debug, clap::StructOpt)]
+#[clap(about = "Dump the contents of a filesystem")]
+struct Dump {
+	#[clap(help = "The path to the filesystem image")]
+	path: String,
 }
 
 fn main() {
-	let args = Args::parse();
-
-	match args.command {
-		Command::Make => make(args),
-		Command::Dump => dump(args),
+	match Command::parse() {
+		Command::Make(args) => make(args),
+		Command::Dump(args) => dump(args),
 	}
 }
 
-fn make(args: Args) {
+fn make(args: Make) {
 	let f = OpenOptions::new()
 		.truncate(false)
 		.read(true)
 		.write(true)
-		.open(&args.file)
+		.open(&args.path)
 		.unwrap();
+
+	let block_size_p2 = if let Some(v) = args.block_size_p2 {
+		v
+	} else {
+		#[cfg(target_family = "unix")]
+		let bs = f.metadata().unwrap().blksize().trailing_zeros() as _;
+		#[cfg(not(target_family = "unix"))]
+		let bs = 12;
+		bs
+	};
 
 	let mut extensions = nrfs::dir::EnableExtensions::default();
 	extensions.add_unix();
 	extensions.add_mtime();
 	let opt = nrfs::DirOptions { extensions, ..Default::default() };
 	let rec_size = nrfs::MaxRecordSize::K128; // TODO
-	let compr = nrfs::Compression::Lz4;
-	let mut nrfs = nrfs::Nrfs::new(S::new(f), rec_size, &opt, compr, 32).unwrap();
+	let compr = match args.compression {
+		Compression::None => nrfs::Compression::None,
+		Compression::Lz4 => nrfs::Compression::Lz4,
+	};
+	let s = S::new(f, block_size_p2);
+	let mut nrfs = nrfs::Nrfs::new(s, rec_size, &opt, compr, 32).unwrap();
 
 	if let Some(d) = &args.directory {
 		let mut root = nrfs.root_dir().unwrap();
@@ -61,7 +109,7 @@ fn make(args: Args) {
 	fn add_files(
 		root: &mut nrfs::Dir<'_, S>,
 		from: &Path,
-		args: &Args,
+		args: &Make,
 		extensions: nrfs::dir::EnableExtensions,
 	) {
 		for f in fs::read_dir(from).expect("failed to read dir") {
@@ -78,7 +126,6 @@ fn make(args: Args) {
 				let p = m.permissions();
 				#[cfg(target_family = "unix")]
 				{
-					use std::os::unix::fs::{MetadataExt, PermissionsExt};
 					u.permissions = (p.mode() & 0o777) as _;
 					u.uid = m.uid();
 					u.gid = m.gid();
@@ -114,10 +161,15 @@ fn make(args: Args) {
 	}
 }
 
-fn dump(args: Args) {
-	let f = File::open(args.file).unwrap();
-	let mut nrfs = nrfs::Nrfs::load(S::new(f), 32).unwrap();
+fn dump(args: Dump) {
+	let mut f = File::open(args.path).unwrap();
+	let mut block_size_p2 = [0];
+	f.seek(SeekFrom::Start(23)).unwrap();
+	f.read_exact(&mut block_size_p2).unwrap();
+	let s = S::new(f, block_size_p2[0]);
+	let mut nrfs = nrfs::Nrfs::load(s, 32).unwrap();
 	let mut root = nrfs.root_dir().unwrap();
+	println!("block size: 2**{}", block_size_p2[0]);
 	list_files(&mut root, 0);
 
 	fn list_files(root: &mut nrfs::Dir<'_, S>, indent: usize) {
@@ -189,11 +241,26 @@ fn dump(args: Args) {
 struct S {
 	file: File,
 	block_count: u64,
+	block_size_p2: u8,
 }
 
 impl S {
-	fn new(file: File) -> Self {
-		Self { block_count: file.metadata().unwrap().len() >> 9, file }
+	fn new(file: File, block_size_p2: u8) -> Self {
+		let m = file.metadata().unwrap();
+		#[cfg(target_family = "unix")]
+		let block_count = if m.file_type().is_block_device() {
+			nix::ioctl_read!(blkgetsize64, 0x12, 114, u64);
+			let mut c = 0;
+			unsafe { blkgetsize64(file.as_raw_fd(), &mut c).unwrap() };
+			c >> block_size_p2
+		} else if m.file_type().is_file() {
+			m.len() >> block_size_p2
+		} else {
+			panic!("can't handle file type {:?}", m.file_type())
+		};
+		#[cfg(not(target_family = "unix"))]
+		let block_count = m.len() >> block_size_p2;
+		Self { block_count, file, block_size_p2 }
 	}
 }
 
@@ -201,7 +268,7 @@ impl nrfs::Storage for S {
 	type Error = io::Error;
 
 	fn block_size_p2(&self) -> u8 {
-		9
+		self.block_size_p2
 	}
 
 	fn block_count(&self) -> u64 {
@@ -254,8 +321,8 @@ impl<'a> nrfs::Write for W<'a> {
 	}
 
 	fn set_region(&mut self, lba: u64, blocks: usize) -> Result<(), Self::Error> {
-		self.offset = lba << 9;
-		self.buf.resize(blocks << 9, 0);
+		self.offset = lba << self.s.block_size_p2;
+		self.buf.resize(blocks << self.s.block_size_p2, 0);
 		Ok(())
 	}
 
