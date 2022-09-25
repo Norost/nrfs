@@ -174,6 +174,12 @@ impl<'a, 'b, S: Storage> HashMap<'a, 'b, S> {
 		Ok(())
 	}
 
+	/// Set arbitrary data.
+	pub fn set_raw(&mut self, index: u32, offset: u16, data: &[u8]) -> Result<(), Error<S>> {
+		let o = self.get_offset(index) + u64::from(offset);
+		self.dir.fs.write_all(self.id, o, data)
+	}
+
 	/// Determine the offset of an entry.
 	///
 	/// This does *not* check if the index is in range.

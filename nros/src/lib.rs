@@ -249,7 +249,8 @@ impl<S: Storage> Nros<S> {
 
 	pub fn finish_transaction(&mut self) -> Result<(), Error<S>> {
 		// Flush write buffers
-		self.object_list_wb.flush(&mut self.storage, &mut self.header.object_list)?;
+		self.object_list_wb
+			.flush(&mut self.storage, &mut self.header.object_list)?;
 
 		// Save allocation log
 		let (lba, len) = self.storage.finish_transaction()?;
@@ -281,8 +282,12 @@ impl<S: Storage> Nros<S> {
 	}
 
 	fn set_object_root(&mut self, id: u64, rec: &record_tree::RecordTree) -> Result<(), Error<S>> {
-		self.object_list_wb
-			.write(&mut self.storage, &self.header.object_list, id * 64, rec.0.as_ref())
+		self.object_list_wb.write(
+			&mut self.storage,
+			&self.header.object_list,
+			id * 64,
+			rec.0.as_ref(),
+		)
 	}
 
 	pub fn storage(&self) -> &S {

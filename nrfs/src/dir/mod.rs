@@ -733,6 +733,18 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 		self.mtime.as_ref()
 	}
 
+	pub fn ext_set_unix(&mut self, unix: ext::unix::Entry) -> Result<bool, Error<S>> {
+		let r = self.dir.ext_set_unix(self.index, unix)?;
+		self.unix = r.then(|| unix);
+		Ok(r)
+	}
+
+	pub fn ext_set_mtime(&mut self, mtime: ext::mtime::Entry) -> Result<bool, Error<S>> {
+		let r = self.dir.ext_set_mtime(self.index, mtime)?;
+		self.mtime = r.then(|| mtime);
+		Ok(r)
+	}
+
 	pub fn is_embedded(&self) -> bool {
 		match &self.ty {
 			Ok(Type::EmbedSym { .. }) | Ok(Type::EmbedFile { .. }) => true,

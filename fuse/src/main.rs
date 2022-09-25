@@ -70,12 +70,14 @@ struct InodeStore {
 struct Dir {
 	id: u64,
 	unix: nrfs::dir::ext::unix::Entry,
+	mtime: nrfs::dir::ext::mtime::Entry,
 }
 
 struct File {
 	dir: u64,
 	name: Rc<Name>,
 	unix: nrfs::dir::ext::unix::Entry,
+	mtime: nrfs::dir::ext::mtime::Entry,
 }
 
 enum Inode<D, F, S> {
@@ -92,21 +94,31 @@ impl Fs {
 		let gid = unsafe { libc::getgid() };
 		let mut s = Self { sto, ino: InodeStore { uid, gid, ..Default::default() } };
 		s.ino.add_dir(
-			Dir { id: 0, unix: nrfs::dir::ext::unix::Entry { permissions: 0o777, uid, gid } },
+			Dir {
+				id: 0,
+				unix: nrfs::dir::ext::unix::Entry { permissions: 0o777, uid, gid },
+				mtime: Default::default(),
+			},
 			true,
 		);
 		s
 	}
 
 	fn attr(&self, ty: FileType, size: u64, ino: u64) -> FileAttr {
-		let u = match self.ino.get(ino) {
-			Inode::Dir(d) => &d.unix,
-			Inode::File(f) | Inode::Sym(f) => &f.unix,
+		let (u, t) = match self.ino.get(ino) {
+			Inode::Dir(d) => (&d.unix, &d.mtime),
+			Inode::File(f) | Inode::Sym(f) => (&f.unix, &f.mtime),
 		};
+		let mtime = if t.mtime > 0 {
+			UNIX_EPOCH.checked_add(Duration::from_millis(t.mtime as _))
+		} else {
+			UNIX_EPOCH.checked_sub(Duration::from_millis(-i128::from(t.mtime) as _))
+		}
+		.unwrap();
 		let blksize = 1u32 << self.sto.storage().block_size_p2();
 		FileAttr {
 			atime: UNIX_EPOCH,
-			mtime: UNIX_EPOCH,
+			mtime,
 			ctime: UNIX_EPOCH,
 			crtime: UNIX_EPOCH,
 			perm: u.permissions,
@@ -171,6 +183,16 @@ impl InodeStore {
 		}
 	}
 
+	fn get_mut(&mut self, ino: u64) -> Inode<&mut Dir, &mut File, &mut File> {
+		let h = Handle::from_raw((ino & !INO_TY_MASK) as usize - 1, ());
+		match ino & INO_TY_MASK {
+			INO_TY_DIR => Inode::Dir(&mut self.dir[h].0),
+			INO_TY_FILE => Inode::File(&mut self.file[h].0),
+			INO_TY_SYM => Inode::Sym(&mut self.sym[h].0),
+			_ => unreachable!(),
+		}
+	}
+
 	fn get_dir(&self, ino: u64) -> &Dir {
 		&self.dir[Handle::from_raw((ino ^ INO_TY_DIR) as usize - 1, ())].0
 	}
@@ -227,6 +249,10 @@ impl InodeStore {
 				gid: self.gid,
 			})
 	}
+
+	fn get_mtime(&self, entry: &nrfs::dir::Entry<'_, '_, S>) -> nrfs::dir::ext::mtime::Entry {
+		entry.ext_mtime().copied().unwrap_or_default()
+	}
 }
 
 impl Filesystem for Fs {
@@ -250,15 +276,21 @@ impl Filesystem for Fs {
 			Some(mut e) if e.is_dir() => {
 				let d = e.as_dir().unwrap().unwrap();
 				let l = d.len().into();
-				let ino = self
-					.ino
-					.add_dir(Dir { id: d.id(), unix: self.ino.get_unix(&e) }, true);
+				let ino = self.ino.add_dir(
+					Dir { id: d.id(), unix: self.ino.get_unix(&e), mtime: self.ino.get_mtime(&e) },
+					true,
+				);
 				reply.entry(&TTL, &self.attr(FileType::Directory, l, ino), 0)
 			}
 			Some(mut e) if e.is_file() => {
 				let l = e.as_file().unwrap().len().unwrap();
 				let ino = self.ino.add_file(
-					File { name: e.name().into(), unix: self.ino.get_unix(&e), dir: d.id() },
+					File {
+						name: e.name().into(),
+						unix: self.ino.get_unix(&e),
+						mtime: self.ino.get_mtime(&e),
+						dir: d.id(),
+					},
 					true,
 				);
 				reply.entry(&TTL, &self.attr(FileType::RegularFile, l, ino), 0)
@@ -266,7 +298,12 @@ impl Filesystem for Fs {
 			Some(mut e) if e.is_sym() => {
 				let l = e.as_sym().unwrap().len().unwrap();
 				let ino = self.ino.add_sym(
-					File { name: e.name().into(), unix: self.ino.get_unix(&e), dir: d.id() },
+					File {
+						name: e.name().into(),
+						unix: self.ino.get_unix(&e),
+						mtime: self.ino.get_mtime(&e),
+						dir: d.id(),
+					},
 					true,
 				);
 				reply.entry(&TTL, &self.attr(FileType::Symlink, l, ino), 0)
@@ -306,11 +343,11 @@ impl Filesystem for Fs {
 		_req: &Request<'_>,
 		ino: u64,
 		mode: Option<u32>,
-		_uid: Option<u32>,
-		_gid: Option<u32>,
+		uid: Option<u32>,
+		gid: Option<u32>,
 		size: Option<u64>,
 		_atime: Option<TimeOrNow>,
-		_mtime: Option<TimeOrNow>,
+		mtime: Option<TimeOrNow>,
 		_ctime: Option<SystemTime>,
 		_fh: Option<u64>,
 		_crtime: Option<SystemTime>,
@@ -319,7 +356,26 @@ impl Filesystem for Fs {
 		_flags: Option<u32>,
 		reply: ReplyAttr,
 	) {
-		let (ty, size) = match self.ino.get(ino) {
+		let unix = |mut e: nrfs::dir::ext::unix::Entry, i: &mut _| {
+			mode.map(|m| e.permissions = m as u16 & 0o777);
+			uid.map(|u| e.uid = u);
+			gid.map(|g| e.gid = g);
+			*i = e;
+			e
+		};
+		let mtime = |mut e: nrfs::dir::ext::mtime::Entry, i: &mut _| {
+			mtime.map(|m| {
+				e = match m {
+					TimeOrNow::Now => mtime_now(),
+					TimeOrNow::SpecificTime(t) => mtime_sys(t),
+				}
+			});
+			*i = e;
+			e
+		};
+
+		// Set size, if possible
+		let (ty, size) = match self.ino.get_mut(ino) {
 			Inode::Dir(d) => {
 				let d = self.sto.get_dir(d.id).unwrap();
 				(FileType::Directory, d.len().into())
@@ -327,6 +383,12 @@ impl Filesystem for Fs {
 			Inode::File(f) => {
 				let mut d = self.sto.get_dir(f.dir).unwrap();
 				let mut e = d.find(&f.name).unwrap().unwrap();
+				e.ext_unix()
+					.copied()
+					.map(|u| e.ext_set_unix(unix(u, &mut f.unix)));
+				e.ext_mtime()
+					.copied()
+					.map(|t| e.ext_set_mtime(mtime(t, &mut f.mtime)));
 				let mut f = e.as_file().unwrap();
 				size.map(|s| f.resize(s).unwrap());
 				(FileType::RegularFile, f.len().unwrap())
@@ -334,10 +396,19 @@ impl Filesystem for Fs {
 			Inode::Sym(s) => {
 				let mut d = self.sto.get_dir(s.dir).unwrap();
 				let mut e = d.find(&s.name).unwrap().unwrap();
+				e.ext_unix()
+					.copied()
+					.map(|u| e.ext_set_unix(unix(u, &mut s.unix)));
+				e.ext_mtime()
+					.copied()
+					.map(|t| e.ext_set_mtime(mtime(t, &mut s.mtime)));
 				let mut s = e.as_file().unwrap();
 				(FileType::RegularFile, s.len().unwrap())
 			}
 		};
+
+		self.sto.finish_transaction().unwrap();
+
 		reply.attr(&TTL, &self.attr(ty, size, ino));
 	}
 
@@ -374,6 +445,7 @@ impl Filesystem for Fs {
 		reply: ReplyWrite,
 	) {
 		let f = self.ino.get_file(ino);
+
 		let mut d = self.sto.get_dir(f.dir).unwrap();
 		let mut e = d.find(&f.name).unwrap().unwrap();
 		let mut f = e.as_file().unwrap();
@@ -422,22 +494,27 @@ impl Filesystem for Fs {
 		let mut index = Some(offset as u32 - 2);
 		while let Some((mut e, i)) = index.and_then(|i| d.next_from(i).unwrap()) {
 			let unix = self.ino.get_unix(&e);
+			let mtime = self.ino.get_mtime(&e);
 			let (ty, ino) = if let Some(id) = e.dir_id() {
 				(
 					FileType::Directory,
-					self.ino.add_dir(Dir { id, unix }, false),
+					self.ino.add_dir(Dir { id, unix, mtime }, false),
 				)
 			} else if e.as_file().is_some() {
 				(
 					FileType::RegularFile,
-					self.ino
-						.add_file(File { dir: d_id, name: e.name().into(), unix }, false),
+					self.ino.add_file(
+						File { dir: d_id, name: e.name().into(), unix, mtime },
+						false,
+					),
 				)
 			} else if e.as_sym().is_some() {
 				(
 					FileType::Symlink,
-					self.ino
-						.add_sym(File { dir: d_id, name: e.name().into(), unix }, false),
+					self.ino.add_sym(
+						File { dir: d_id, name: e.name().into(), unix, mtime },
+						false,
+					),
 				)
 			} else {
 				unreachable!("miscellaneous file type");
@@ -471,14 +548,19 @@ impl Filesystem for Fs {
 				uid: req.uid(),
 				gid: req.gid(),
 			};
+			let mtime = mtime_now();
 			d.create_file(
 				name,
-				&nrfs::dir::Extensions { unix: Some(unix), ..Default::default() },
+				&nrfs::dir::Extensions {
+					unix: Some(unix),
+					mtime: Some(mtime),
+					..Default::default()
+				},
 			)
 			.unwrap();
 			let ino = self
 				.ino
-				.add_file(File { dir: d.id(), name: name.into(), unix }, false);
+				.add_file(File { dir: d.id(), name: name.into(), unix, mtime }, false);
 			reply.created(&TTL, &self.attr(FileType::RegularFile, 0, ino), 0, 0, 0);
 			self.sto.finish_transaction().unwrap();
 		} else {
@@ -522,13 +604,18 @@ impl Filesystem for Fs {
 		if let Ok(name) = name.as_bytes().try_into() {
 			let unix =
 				nrfs::dir::ext::unix::Entry { permissions: 0o777, uid: req.uid(), gid: req.gid() };
-			let ext = nrfs::dir::Extensions { unix: Some(unix), ..Default::default() };
+			let mtime = mtime_now();
+			let ext = nrfs::dir::Extensions {
+				unix: Some(unix),
+				mtime: Some(mtime),
+				..Default::default()
+			};
 			if let Some(mut f) = d.create_sym(name, &ext).unwrap() {
 				let link = link.as_os_str().as_bytes();
 				f.write_grow(0, link).unwrap();
 				let ino = self
 					.ino
-					.add_sym(File { dir: d.id(), name: name.into(), unix }, false);
+					.add_sym(File { dir: d.id(), name: name.into(), unix, mtime }, false);
 				let attr = self.attr(FileType::Symlink, link.len() as _, ino);
 				reply.entry(&TTL, &attr, 0);
 			} else {
@@ -556,6 +643,7 @@ impl Filesystem for Fs {
 				uid: req.uid(),
 				gid: req.gid(),
 			};
+			let mtime = mtime_now();
 			let ext = nrfs::dir::Extensions { unix: Some(unix), ..Default::default() };
 			let opt = nrfs::DirOptions {
 				extensions: *nrfs::dir::EnableExtensions::default()
@@ -564,7 +652,7 @@ impl Filesystem for Fs {
 				..Default::default()
 			};
 			if let Some(dd) = d.create_dir(name, &opt, &ext).unwrap() {
-				let ino = self.ino.add_dir(Dir { id: dd.id(), unix }, false);
+				let ino = self.ino.add_dir(Dir { id: dd.id(), unix, mtime }, false);
 				let attr = self.attr(FileType::Directory, 0, ino);
 				reply.entry(&TTL, &attr, 0);
 			} else {
@@ -739,5 +827,18 @@ impl<'a> nrfs::Write for W<'a> {
 	fn finish(self: Box<Self>) -> Result<(), Self::Error> {
 		self.s.file.seek(SeekFrom::Start(self.offset))?;
 		self.s.file.write_all(&self.buf)
+	}
+}
+
+fn mtime_now() -> nrfs::dir::ext::mtime::Entry {
+	mtime_sys(SystemTime::now())
+}
+
+fn mtime_sys(t: SystemTime) -> nrfs::dir::ext::mtime::Entry {
+	nrfs::dir::ext::mtime::Entry {
+		mtime: t.duration_since(UNIX_EPOCH).map_or_else(
+			|t| -t.duration().as_millis().try_into().unwrap_or(i64::MAX),
+			|t| t.as_millis().try_into().unwrap_or(i64::MAX),
+		),
 	}
 }
