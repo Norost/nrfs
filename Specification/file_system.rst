@@ -14,21 +14,23 @@ Features
 File types
 ----------
 
-+------+-----------------------------+
-|  ID  |         Description         |
-+======+=============================+
-|    0 | Invalid / empty             |
-+------+-----------------------------+
-|    1 | Regular file                |
-+------+-----------------------------+
-|    2 | Directory                   |
-+------+-----------------------------+
-|    3 | Symbolic link               |
-+------+-----------------------------+
-|    4 | Embedded regular file       |
-+------+-----------------------------+
-|    5 | Embedded symbolic link      |
-+------+-----------------------------+
+.. table:: File types
+
+  +------+-----------------------------+
+  |  ID  |         Description         |
+  +======+=============================+
+  |    0 | Invalid / empty             |
+  +------+-----------------------------+
+  |    1 | Regular file                |
+  +------+-----------------------------+
+  |    2 | Directory                   |
+  +------+-----------------------------+
+  |    3 | Symbolic link               |
+  +------+-----------------------------+
+  |    4 | Embedded regular file       |
+  +------+-----------------------------+
+  |    5 | Embedded symbolic link      |
+  +------+-----------------------------+
 
 Remaining IDs are free for use by extensions.
 Entries with unrecognized IDs may be shown and moved but no other operations
@@ -94,7 +96,7 @@ A hashmap [#hashmap]_ is used to keep track of files.
     * Growing is slow, as it requires a full reallocation.
       This may result in performance hiccups when growing an extremely large
       directory, though this is not expected to be a problem for all but the
-      largest directories (billions of entries).
+      largest directories (millions of entries).
 
 Every directory begins with a variable-sized byte header.
 

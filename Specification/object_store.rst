@@ -27,7 +27,7 @@ Allocation
 Free & allocated space is tracked in a log.
 When loading the filesystem this log is replayed to initialize the allocator.
 When allocating or freeing space a new entry is appended.
-The space map Space Map  is occasionaly rewritten to reduce space usage.
+The log is occasionaly rewritten to reduce space usage.
 By default, all space is assumed to be free.
 
 Storage
@@ -121,6 +121,24 @@ Record
   |   56 |                                                       |
   +------+-------------------------------------------------------+
 
+.. table:: Hash algorithms
+
+  +----+------+
+  | ID | Name |
+  +====+======+
+  |  0 | None |
+  +----+------+
+
+.. table:: Compression algorithms
+
+  +----+------+
+  | ID | Name |
+  +====+======+
+  |  0 | None |
+  +----+------+
+  |  1 | LZ4  |
+  +----+------+
+
 ² Only used by record trees.
 
 
@@ -129,13 +147,13 @@ Record tree
 
 A record tree respresents a group of data.
 If a tree has a depth greater than 0 it consists of multiple subtrees.
-These trees do *not* have a total length set.
+These subtrees do *not* have a total length set.
 The depth is derived from the total length and the maximum record size.
 
 The type should be set to 0 to ensure deduplication & recovery is effective.
 
 The depth of a record tree depends on the size of the data.
-`ceil(log2(length / 64))`
+``ceil(log2(length / size of record))``
 
 Some records may not unpack to the expected length.
 The remaining length is all zeroes.
