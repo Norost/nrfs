@@ -26,21 +26,21 @@ use {
 	alloc::vec::Vec,
 	core::fmt,
 	endian::{u16le, u32le, u64le},
+	xxhash_rust::xxh3::xxh3_64,
 };
 
 pub use compression::Compression;
 
 #[derive(Clone, Copy, Default)]
-#[repr(C, align(64))]
+#[repr(C, align(32))]
 pub struct Record {
-	pub hash: [u8; 32],
 	pub lba: u64le,
 	pub length: u32le,
-	pub hash_algorithm: u8,
 	pub compression: u8,
-	pub reference_count: u16le,
+	pub _reserved: u8,
+	pub references: u16le,
+	pub xxh3: u64le,
 	pub total_length: u64le,
-	pub _reserved: [u8; 8],
 }
 
 raw!(Record);
@@ -51,6 +51,13 @@ impl Record {
 		Self {
 			length: length.into(),
 			compression: compression.to_raw(),
+			// Zero out hash to allow zero optimization ("sparse objects")
+			xxh3: if buf.is_empty() {
+				0
+			} else {
+				xxh3_64(&buf[..length as _])
+			}
+			.into(),
 			..Default::default()
 		}
 	}
@@ -61,8 +68,12 @@ impl Record {
 		buf: &mut Vec<u8>,
 		max_record_size: MaxRecordSize,
 	) -> Result<(), UnpackError> {
+		debug_assert_eq!(data.len() as u32, self.length);
 		if data.len() > 1 << max_record_size.to_raw() {
 			return Err(UnpackError::ExceedsRecordSize);
+		}
+		if !data.is_empty() && xxh3_64(data) != self.xxh3 {
+			return Err(UnpackError::Xxh3Mismatch);
 		}
 		buf.clear();
 		Compression::from_raw(self.compression)
@@ -75,21 +86,17 @@ impl Record {
 
 impl fmt::Debug for Record {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let (a, b) = self.hash.split_at(16);
-		let a = u128::from_be_bytes(a.try_into().unwrap());
-		let b = u128::from_be_bytes(b.try_into().unwrap());
 		let mut f = f.debug_struct(stringify!(Record));
-		f.field("hash", &format_args!("{:016x}{:016x}", a, b));
 		f.field("lba", &self.lba);
 		f.field("length", &self.length);
-		f.field("hash_algorithm", &self.hash_algorithm);
 		if let Some(c) = Compression::from_raw(self.compression) {
 			f.field("compression_algorithm", &c);
 		} else {
 			f.field("compression_algorithm", &self.compression);
 		}
 		f.field("total_length", &self.total_length);
-		f.field("reference_count", &self.reference_count);
+		f.field("xxh3", &self.xxh3);
+		f.field("references", &self.references);
 		f.finish()
 	}
 }
@@ -98,6 +105,7 @@ impl fmt::Debug for Record {
 pub enum UnpackError {
 	ExceedsRecordSize,
 	UnknownCompressionAlgorithm,
+	Xxh3Mismatch,
 }
 
 n2e! {

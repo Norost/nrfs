@@ -1,8 +1,11 @@
-use crate::{
-	record::Record,
-	storage::Storage,
-	util::{read_from, write_to},
-	Error, MaxRecordSize, RecordCache,
+use {
+	crate::{
+		record::Record,
+		storage::Storage,
+		util::{read_from, write_to},
+		Error, MaxRecordSize, RecordCache,
+	},
+	core::mem,
 };
 
 #[derive(Debug, Default)]
@@ -64,9 +67,9 @@ impl RecordTree {
 		S: Storage,
 	{
 		let len = self.len();
-		let ref_c = self.0.reference_count;
+		let ref_c = self.0.references;
 		NodeMut(&mut self.0).write(len, sto, offset, data)?;
-		self.0.reference_count = ref_c;
+		self.0.references = ref_c;
 		self.0.total_length = len.into();
 		Ok(())
 	}
@@ -89,9 +92,9 @@ impl RecordTree {
 		S: Storage,
 	{
 		let len = self.len();
-		let ref_c = self.0.reference_count;
+		let ref_c = self.0.references;
 		NodeMut(&mut self.0).shrink(len, sto, new_len)?;
-		self.0.reference_count = ref_c;
+		self.0.references = ref_c;
 		self.0.total_length = new_len.into();
 		Ok(())
 	}
@@ -104,14 +107,14 @@ impl RecordTree {
 		let (old_depth, _) = depth(self.len(), sto.max_record_size);
 		self.0.total_length = len.into();
 		let (new_depth, _) = depth(self.len(), sto.max_record_size);
-		let ref_c = self.0.reference_count;
+		let ref_c = self.0.references;
 		for _ in old_depth..new_depth {
 			let mut w = sto.write(&Record::default())?;
 			set(&mut w, 0, &self.0);
-			self.0.reference_count = 0.into();
+			self.0.references = 0.into();
 			self.0 = w.finish()?;
 		}
-		self.0.reference_count = ref_c;
+		self.0.references = ref_c;
 		self.0.total_length = len.into();
 		Ok(())
 	}
@@ -228,7 +231,7 @@ impl NodeMut<'_> {
 			for i in start..end {
 				NodeMut(&mut get(&w, i as _)).shrink(chunk_size, sto, 0)?;
 			}
-			w.resize(start * 64, 0);
+			w.resize(start * mem::size_of::<Record>(), 0);
 			// Resize tail record, if necessary.
 			let tail = (new_len / chunk_size) as u32;
 			let clen = new_len % chunk_size;
@@ -260,12 +263,12 @@ impl NodeMut<'_> {
 
 fn get(r: &[u8], index: u32) -> Record {
 	let mut rec = Record::default();
-	read_from(r, index as usize * 64, rec.as_mut());
+	read_from(r, index as usize * mem::size_of::<Record>(), rec.as_mut());
 	rec
 }
 
 fn set(w: &mut Vec<u8>, index: u32, rec: &Record) {
-	write_to(w, index as usize * 64, rec.as_ref())
+	write_to(w, index as usize * mem::size_of::<Record>(), rec.as_ref())
 }
 
 /// Calculate the amount of data each chunk / child can hold.
@@ -287,8 +290,7 @@ fn depth(len: u64, max_record_size: MaxRecordSize) -> (u8, u8) {
 	let max_rec_size = 1 << max_record_size.to_raw();
 	let len = (len + max_rec_size - 1) & !(max_rec_size - 1);
 
-	// mem::size_of<Record>() = 64 = 2^6
-	let lvl_shift = max_record_size.to_raw() - 6;
+	let lvl_shift = max_record_size.to_raw() - mem::size_of::<Record>().trailing_zeros() as u8;
 
 	let (mut lvl, mut depth) = (len, 0);
 	while lvl > max_rec_size {
@@ -303,43 +305,54 @@ fn depth(len: u64, max_record_size: MaxRecordSize) -> (u8, u8) {
 mod test {
 	use super::*;
 
+	const RECS_PER_1K: u64 = 1024 / mem::size_of::<Record>() as u64;
+
 	#[test]
 	fn depth_0_min() {
-		assert_eq!(depth(0, MaxRecordSize::K1), (0, 4));
+		assert_eq!(depth(0, MaxRecordSize::K1), (0, 5));
 	}
 
 	#[test]
 	fn depth_0() {
-		assert_eq!(depth(1000, MaxRecordSize::K1), (0, 4));
+		assert_eq!(depth(1000, MaxRecordSize::K1), (0, 5));
 	}
 
 	#[test]
 	fn depth_0_max() {
-		assert_eq!(depth(1024, MaxRecordSize::K1), (0, 4));
+		assert_eq!(depth(1024, MaxRecordSize::K1), (0, 5));
 	}
 
 	#[test]
 	fn depth_1_min() {
-		assert_eq!(depth(1025, MaxRecordSize::K1), (1, 4));
+		assert_eq!(depth(1025, MaxRecordSize::K1), (1, 5));
 	}
 
 	#[test]
 	fn depth_2_min() {
-		assert_eq!(depth(1024 * 16 + 1, MaxRecordSize::K1), (2, 4));
+		assert_eq!(depth(1024 * RECS_PER_1K + 1, MaxRecordSize::K1), (2, 5));
 	}
 
 	#[test]
 	fn depth_2_min2() {
-		assert_eq!(depth(1024 * 31, MaxRecordSize::K1), (2, 4));
+		assert_eq!(
+			depth(1024 * (RECS_PER_1K * 2 - 1), MaxRecordSize::K1),
+			(2, 5)
+		);
 	}
 
 	#[test]
 	fn depth_2_min3() {
-		assert_eq!(depth(1024 * 31 + 1, MaxRecordSize::K1), (2, 4));
+		assert_eq!(
+			depth(1024 * (RECS_PER_1K * 2 - 1) + 1, MaxRecordSize::K1),
+			(2, 5)
+		);
 	}
 
 	#[test]
 	fn depth_2_max() {
-		assert_eq!(depth(1024 * 16 * 16, MaxRecordSize::K1), (2, 4));
+		assert_eq!(
+			depth(1024 * RECS_PER_1K * RECS_PER_1K, MaxRecordSize::K1),
+			(2, 5)
+		);
 	}
 }

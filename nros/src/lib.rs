@@ -37,9 +37,15 @@ pub use {
 };
 
 use {
-	core::fmt, rangemap::RangeSet, record::Record, record_cache::RecordCache,
-	record_tree::RecordTree, write_buffer::WriteBuffer,
+	core::{fmt, mem},
+	rangemap::RangeSet,
+	record::Record,
+	record_cache::RecordCache,
+	record_tree::RecordTree,
+	write_buffer::WriteBuffer,
 };
+
+const RTREE_SIZE: u64 = mem::size_of::<RecordTree>() as _;
 
 pub struct Nros<S: Storage> {
 	storage: RecordCache<S>,
@@ -48,6 +54,7 @@ pub struct Nros<S: Storage> {
 	/// Write buffer for the object list.
 	object_list_wb: WriteBuffer,
 }
+
 impl<S: Storage> Nros<S> {
 	pub fn new(
 		mut storage: S,
@@ -102,16 +109,16 @@ impl<S: Storage> Nros<S> {
 			cache_size,
 		)?;
 
-		let upper_obj_id = h.object_list.len() / 64;
+		let upper_obj_id = h.object_list.len() / RTREE_SIZE;
 		let mut used_objects = RangeSet::from_iter([0..upper_obj_id]);
 		for id in 0..upper_obj_id {
 			let mut rec = Record::default();
 			h.object_list
-				.read(&mut storage, id * 64, rec.as_mut())
+				.read(&mut storage, id * RTREE_SIZE, rec.as_mut())
 				.map_err(|e| match e {
 					_ => todo!(),
 				})?;
-			if rec.reference_count == 0 {
+			if rec.references == 0 {
 				used_objects.remove(id..id + 1);
 			}
 		}
@@ -142,14 +149,14 @@ impl<S: Storage> Nros<S> {
 	pub fn new_object(&mut self) -> Result<u64, Error<S>> {
 		let id = self.alloc_ids(1);
 		let r = &mut self.object_list_wb;
-		if r.len() < id * 64 + 64 {
-			r.resize(id * 64 + 64);
+		if r.len() < (id + 1) * RTREE_SIZE {
+			r.resize((id + 1) * RTREE_SIZE);
 		}
 		r.write(
 			&mut self.storage,
 			&self.header.object_list,
-			id * 64,
-			Record { reference_count: 1.into(), ..Default::default() }.as_ref(),
+			id * RTREE_SIZE,
+			Record { references: 1.into(), ..Default::default() }.as_ref(),
 		)?;
 		Ok(id)
 	}
@@ -158,14 +165,19 @@ impl<S: Storage> Nros<S> {
 	pub fn new_object_pair(&mut self) -> Result<u64, Error<S>> {
 		let id = self.alloc_ids(2);
 		let w = &mut self.object_list_wb;
-		if w.len() <= id * 64 + 128 {
-			w.resize(id * 64 + 128);
+		if w.len() <= (id + 2) * RTREE_SIZE {
+			w.resize((id + 2) * RTREE_SIZE);
 		}
-		let rec = Record { reference_count: 1.into(), ..Default::default() };
-		let mut b = [0; 128];
-		b[..64].copy_from_slice(rec.as_ref());
-		b[64..].copy_from_slice(rec.as_ref());
-		w.write(&mut self.storage, &self.header.object_list, id * 64, &b)?;
+		let rec = Record { references: 1.into(), ..Default::default() };
+		let mut b = [0; 2 * RTREE_SIZE as usize];
+		b[..RTREE_SIZE as _].copy_from_slice(rec.as_ref());
+		b[RTREE_SIZE as _..].copy_from_slice(rec.as_ref());
+		w.write(
+			&mut self.storage,
+			&self.header.object_list,
+			id * RTREE_SIZE,
+			&b,
+		)?;
 		Ok(id)
 	}
 
@@ -176,8 +188,8 @@ impl<S: Storage> Nros<S> {
 	/// This function *must not* be used on invalid objects!
 	pub fn decr_ref(&mut self, id: u64) -> Result<(), Error<S>> {
 		let mut obj = self.object_root(id)?;
-		obj.0.reference_count -= 1;
-		if obj.0.reference_count == 0 {
+		obj.0.references -= 1;
+		if obj.0.references == 0 {
 			obj.resize(&mut self.storage, 0)?;
 			self.dealloc_id(id);
 		}
@@ -229,7 +241,7 @@ impl<S: Storage> Nros<S> {
 		self.object_list_wb.write(
 			&mut self.storage,
 			&self.header.object_list,
-			id * 64,
+			id * RTREE_SIZE,
 			obj.0.as_ref(),
 		)?;
 		Ok(data.len())
@@ -241,7 +253,7 @@ impl<S: Storage> Nros<S> {
 		self.object_list_wb.write(
 			&mut self.storage,
 			&self.header.object_list,
-			id * 64,
+			id * RTREE_SIZE,
 			rec.0.as_ref(),
 		)?;
 		Ok(())
@@ -269,15 +281,15 @@ impl<S: Storage> Nros<S> {
 	/// This function *must not* be used on invalid objects!
 	fn object_root(&mut self, id: u64) -> Result<record_tree::RecordTree, Error<S>> {
 		let w = &mut self.object_list_wb;
-		debug_assert!(id * 64 < w.len());
+		debug_assert!(id * RTREE_SIZE < w.len());
 		let mut rec = RecordTree::default();
 		w.read(
 			&mut self.storage,
 			&self.header.object_list,
-			id * 64,
+			id * RTREE_SIZE,
 			rec.0.as_mut(),
 		)?;
-		debug_assert!(u16::from(rec.0.reference_count) > 0, "invalid object {}", id);
+		debug_assert!(u16::from(rec.0.references) > 0, "invalid object {}", id);
 		Ok(rec)
 	}
 
@@ -285,7 +297,7 @@ impl<S: Storage> Nros<S> {
 		self.object_list_wb.write(
 			&mut self.storage,
 			&self.header.object_list,
-			id * 64,
+			id * RTREE_SIZE,
 			rec.0.as_ref(),
 		)
 	}

@@ -4,7 +4,7 @@
 
 &check; = implemented, &cross; = planned
 
-* &cross; Error detection
+* &check; Error detection
 * &cross; Error correction (with mirrors only!)
 * &check; Compression
 * &check; Transactional updates
