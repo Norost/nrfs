@@ -1,8 +1,5 @@
 #[cfg(target_family = "unix")]
-use std::os::unix::{
-	fs::{FileTypeExt, MetadataExt, PermissionsExt},
-	io::AsRawFd,
-};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use {
 	clap::Parser,
 	std::{
@@ -245,21 +242,9 @@ struct S {
 }
 
 impl S {
-	fn new(file: File, block_size_p2: u8) -> Self {
-		let m = file.metadata().unwrap();
-		#[cfg(target_family = "unix")]
-		let block_count = if m.file_type().is_block_device() {
-			nix::ioctl_read!(blkgetsize64, 0x12, 114, u64);
-			let mut c = 0;
-			unsafe { blkgetsize64(file.as_raw_fd(), &mut c).unwrap() };
-			c >> block_size_p2
-		} else if m.file_type().is_file() {
-			m.len() >> block_size_p2
-		} else {
-			panic!("can't handle file type {:?}", m.file_type())
-		};
-		#[cfg(not(target_family = "unix"))]
-		let block_count = m.len() >> block_size_p2;
+	fn new(mut file: File, block_size_p2: u8) -> Self {
+		let l = file.seek(SeekFrom::End(0)).unwrap();
+		let block_count = l >> block_size_p2;
 		Self { block_count, file, block_size_p2 }
 	}
 }
