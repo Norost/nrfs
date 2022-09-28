@@ -73,3 +73,10 @@ Unmount with:
 ```
 fusermount -u /tmp/mnt
 ```
+
+## Crates:
+
+* [`nros`](nros): Object store implementation
+* [`nrfs`](nrfs): Filesystem implementation
+* [`tool`](tool): Filesystem tool (make, dump ...)
+* [`fuse`](fuse): FUSE driver

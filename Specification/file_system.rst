@@ -15,6 +15,8 @@ File types
 ----------
 
 .. table:: File types
+  :align: center
+  :widths: grid
 
   +------+-----------------------------+
   |  ID  |         Description         |
@@ -46,6 +48,14 @@ If a write is made to an object with a reference count higher than 1 a copy
 will be made first.
 
 
+Deduplication
+~~~~~~~~~~~~~
+
+Tools can scan for duplicate files and make a CoW copy [#]_.
+
+.. [#] On UNIX systems this is achieved with ``cp --reflink``.
+
+
 Embedded data
 -------------
 
@@ -59,17 +69,17 @@ Directory
 A directory is a special type of file that points to other files.
 
 It consists of two objects: one object with a header and hashmap at ID
-and one object for "heap" data at ID + 1 [#two_objects]_
+and one object for "heap" data at ID + 1 [#]_
 
-.. [#two_objects]
+.. [#]
 
   The map and heap are split so the map can grow without needing to shift the
   heap data or leave large holes.
   Fixing the heap ID relative to the map's ID allows loading it concurrently.
 
-A hashmap [#hashmap]_ is used to keep track of files.
+A hashmap [#]_ is used to keep track of files.
 
-.. [#hashmap]
+.. [#]
 
   Hashmaps are used as they are very simple to implement.
   They also scale and perform well.
@@ -101,6 +111,8 @@ A hashmap [#hashmap]_ is used to keep track of files.
 Every directory begins with a variable-sized byte header.
 
 .. table:: Header
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -122,17 +134,19 @@ MLen represents a power of 2.
 Extensions define metadata to be attached to entries.
 Each extension is prefixed with a 4 byte header.
 
-Hash algorithms are [#hashing_algorithm]_:
+Hash algorithms are [#]_:
 
 * 0: No hash
 * 1: SipHash13 with Robin Hood hashing
 
-.. [#unknown_hash]
+.. [#]
 
    If the hashing algorithm isn't known the table can still be iterated as a
    fallback (i.e. assume "No hash").
 
 .. table:: Extension header
+  :align: center
+  :widths: grid
 
   +------+------+------+
   | Byte |    1 |    0 |
@@ -145,6 +159,8 @@ Hash algorithms are [#hashing_algorithm]_:
   +------+-------------+
 
 .. table:: Regular entry
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -161,6 +177,8 @@ Hash algorithms are [#hashing_algorithm]_:
   +------+-------------------------------------------------------+
 
 .. table:: Embedded entry
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -182,6 +200,8 @@ After the hashmap comes an allocation log.
 Each entry in the log indicates a single allocation or deallocation.
 
 .. table:: Log entry
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -208,6 +228,8 @@ name: "unix"
 The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
 
 .. table:: Extension data
+  :align: center
+  :widths: grid
 
   +------+------+------+
   | Byte |    1 |    0 |
@@ -216,6 +238,8 @@ The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
   +------+-------------+
 
 .. table:: Entry data
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -224,6 +248,8 @@ The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
   +------+--------------------+--------------------+-------------+
 
 .. table:: Permissions
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -245,6 +271,8 @@ It is expressed in milliseconds, which gives it a range of ~584 million years.
 The timestamp is relative to the UNIX epoch.
 
 .. table:: Extension data
+  :align: center
+  :widths: grid
 
   +------+------+------+
   | Byte |    1 |    0 |
@@ -253,6 +281,8 @@ The timestamp is relative to the UNIX epoch.
   +------+-------------+
 
 .. table:: Entry data
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
