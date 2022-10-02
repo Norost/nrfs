@@ -210,8 +210,6 @@ A record represents a single unit of data.
 * Total length: The total length of all data.
   Only used by record trees.
 
-0 is recommended for compression efficiency.
-
 
 Record tree
 ~~~~~~~~~~~
