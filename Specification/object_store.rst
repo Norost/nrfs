@@ -86,18 +86,16 @@ A header has a variable size, up to 64 KiB.
   |    0 |                                                       |
   +------+            Magic string ("Nora Reliable FS")          |
   |    8 |                                                       |
-  +------+-------------+-------------+---------------------------+
-  |   16 | Pool index  |  Pool size  |   Version (0x00_00_0003)  |
-  +------+-------------+-------------+---------------------------+
-  |   24 |                      Block count                      |
-  +------+---------------------------+------+------+------+------+
-  |   32 |                           | MirC | CAlg | RLen | BLen |
-  +------+---------------------------+------+------+------+------+
-  |   40 |                          UID                          |
+  +------+------+------+------+------+---------------------------+
+  |   16 | MirC | CAlg | RLen | BLen |   Version (0x00_00_0003)  |
+  +------+------+------+------+------+---------------------------+
+  |   24 |                          UID                          |
   +------+-------------------------------------------------------+
-  |   48 |                                                       |
-  +------+                                                       |
-  |   56 |                                                       |
+  |   32 |                   Total block count                   |
+  +------+-------------------------------------------------------+
+  |   40 |                      LBA offset                       |
+  +------+-------------------------------------------------------+
+  |   48 |                      Block count                      |
   +------+-------------------------------------------------------+
   |   64 |                                                       |
   +------+                                                       |
@@ -120,14 +118,6 @@ A header has a variable size, up to 64 KiB.
 
 * Version: The version of the data storage format.
 
-* Pool size: How many disks are pooled.
-
-* Pool index: The index of this volume in the pool.
-  Affects LBA offset.
-
-* Block count: The total amount of blocks this pool consists of.
-  Affects LBA offset.
-
 * BLen: The length of a single block as a power of two.
   Affects LBA addressing.
 
@@ -136,14 +126,24 @@ A header has a variable size, up to 64 KiB.
 * CAlg: The default compression algorithm to use.
 
 * MirC: The amount of mirror volumes.
+  Useful to determine how many mirrors should be waited for before allowing
+  writes.
 
 * UID: Unique filesystem identifier [#]_.
 
 .. [#] Using the system time in microseconds as UID is recommended.
 
+* Total block count:
+  The total amount of blocks this pool consists of.
+
+* LBA offset: The offset to add to all LBAs on this disk.
+
+* Block count: The amount of blocks in this pool.
+
 * Object list: Record tree containing a list of objects.
 
 * Allocation log LBA: The start block of the allocation log.
+  There is one log per pool.
 
 * Allocation log length: The length of the allocation log in bytes.
 
@@ -157,6 +157,9 @@ A header has a variable size, up to 64 KiB.
 
 All bytes between 128 and the header length are free for use by the filesystem
 layer.
+
+  When updating the headers, ensure the updates *do not* happen concurrently.
+
 
 Record
 ~~~~~~
