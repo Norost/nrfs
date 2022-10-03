@@ -8,7 +8,7 @@ Features
 * Error correction (with mirrors only!)
 * Compression
 * Transactional updates
-* Mirroring & pooling (RAID 1+0)
+* Pooling with mirroring & chaining (RAID 1+0)
 * Defragmentation
 * Sparse objects
 
@@ -58,8 +58,8 @@ Mirroring
 The filesystem can be mirrored to any number of disks.
 This allows restoring corrupted data.
 
-Pooling
-~~~~~~~
+Chaining
+~~~~~~~~
 
 Multiple disks can be used for a single filesystem, increasing the capacity of
 that filesystem.
