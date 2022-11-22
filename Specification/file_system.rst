@@ -15,6 +15,8 @@ File types
 ----------
 
 .. table:: File types
+  :align: center
+  :widths: grid
 
   +------+-----------------------------+
   |  ID  |         Description         |
@@ -46,6 +48,14 @@ If a write is made to an object with a reference count higher than 1 a copy
 will be made first.
 
 
+Deduplication
+~~~~~~~~~~~~~
+
+Tools can scan for duplicate files and make a CoW copy [#]_.
+
+.. [#] On UNIX systems this is achieved with ``cp --reflink``.
+
+
 Embedded data
 -------------
 
@@ -59,17 +69,17 @@ Directory
 A directory is a special type of file that points to other files.
 
 It consists of two objects: one object with a header and hashmap at ID
-and one object for "heap" data at ID + 1 [#two_objects]_
+and one object for "heap" data at ID + 1 [#]_
 
-.. [#two_objects]
+.. [#]
 
   The map and heap are split so the map can grow without needing to shift the
   heap data or leave large holes.
   Fixing the heap ID relative to the map's ID allows loading it concurrently.
 
-A hashmap [#hashmap]_ is used to keep track of files.
+A hashmap [#]_ is used to keep track of files.
 
-.. [#hashmap]
+.. [#]
 
   Hashmaps are used as they are very simple to implement.
   They also scale and perform well.
@@ -101,6 +111,8 @@ A hashmap [#hashmap]_ is used to keep track of files.
 Every directory begins with a variable-sized byte header.
 
 .. table:: Header
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -122,17 +134,19 @@ MLen represents a power of 2.
 Extensions define metadata to be attached to entries.
 Each extension is prefixed with a 4 byte header.
 
-Hash algorithms are [#hashing_algorithm]_:
+Hash algorithms are [#]_:
 
 * 0: No hash
 * 1: SipHash13 with Robin Hood hashing
 
-.. [#unknown_hash]
+.. [#]
 
    If the hashing algorithm isn't known the table can still be iterated as a
    fallback (i.e. assume "No hash").
 
 .. table:: Extension header
+  :align: center
+  :widths: grid
 
   +------+------+------+
   | Byte |    1 |    0 |
@@ -144,44 +158,139 @@ Hash algorithms are [#hashing_algorithm]_:
   |  N+2 |    Data     |
   +------+-------------+
 
-.. table:: Regular entry
+Hashmap entry
+~~~~~~~~~~~~~
+
+.. table:: Entry header if KLen <= 16
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 | Type | KLen |               Key offset                |
-  +------+------+------+-----------------------------------------+
-  |    8 |                     Object index                      |
+  |    0 |              Key (0 to 5)               | KLen | Type |
+  +------+-----------------------------------------+------+------+
+  |    8 |                     Key (6 to 15)                     |
+  +------+-------------------------------------------------------+
+
+.. table:: Entry header if KLen > 16
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |               Key offset                | KLen | Type |
+  +------+---------------------------+-------------+------+------+
+  |    8 |                           |           Hash            |
   +------+---------------------------+---------------------------+
-  |   16 |                           |           Hash            |
-  +------+---------------------------+---------------------------+
+
+* Type: The type of the entry.
+  If 0, it is empty / invalid.
+
+* KLen: The length of the key.
+
+* Key: The key string.
+  Only valid if KLen is 16 or less [#]_.
+
+* Key offset: Pointer to the key in the heap
+
+* Hash: The 32-bit hash of the key.
+  Only valid if KLen is larger than 16.
+
+.. [#]
+
+  Embedding the key avoids an indirection.
+
+  The maximum length of the embedded key is based on data from a Devuan
+  desktop:
+
+  * Total amount of files: 18094927
+
+  ================ ======= ================ ============
+  File name length  Count  Cumulative count Cumulative %
+  ================ ======= ================ ============
+                 1   47985            47986         0.27
+                 2  292412           340398         1.88
+                 3  271133           611531         3.38
+                 4  383093           994624         5.50
+                 5 1459539          2454163        13.56
+                 6 4328975          6783138        37.49
+                 7  797426          7580564        41.89
+                 8 1324312          8904876        49.21
+                 9 1129762         10034638        55.46
+                10  726535         10761173        59.47
+                11  818181         11579354        63.99
+                12  718414         12297768        67.96
+                13  518331         12816099        70.83
+                14  504373         13320472        73.61
+                15  422600         13743072        75.95
+                16  381073         14124145        78.06
+                17  375204         14499349        80.13
+                18  450636         14949985        82.62
+                19  284422         15234407        84.19
+                20  248121         15482528        85.56
+  ================ ======= ================ ============
+
+
+.. table:: Regular entry
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                                                       |
+  +------+                        Header                         |
+  |    8 |                                                       |
+  +------+-------------------------------------------------------+
+  |   16 |                       Object ID                       |
+  +------+-------------------------------------------------------+
   |   24 |                    Extension data                     |
   +------+-------------------------------------------------------+
   |  ... |                          ...                          |
   +------+-------------------------------------------------------+
 
 .. table:: Embedded entry
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 | Type | KLen |               Key offset                |
-  +------+------+------+-----------------------------------------+
-  |    8 | Data Length |               Data offset               |
-  +------+-------------+-------------+---------------------------+
-  |   16 |                           |           Hash            |
-  +------+---------------------------+---------------------------+
+  |    0 |                                                       |
+  +------+                        Header                         |
+  |    8 |                                                       |
+  +------+-------------+-----------------------------------------+
+  |   16 | Data Length |               Data offset               |
+  +------+-------------+-----------------------------------------+
   |   24 |                    Extension data                     |
   +------+-------------------------------------------------------+
   |  ... |                          ...                          |
   +------+-------------------------------------------------------+
 
-If the type is 0, the entry is empty.
+* Object index: The ID of the corresponding object.
+  Only valid if the type is 1, 2 or 3.
+
+* Data offset: The offset of the entry's data in the heap.
+  Only valid if the type is 4 or 5.
+
+* Data length: The offset of the entry's data in the heap.
+  Only valid if the type is 4 or 5.
+
+* Extension data: Optional metadata associated with the entry.
+  See Extensions_.
+
+
+Allocation log
+~~~~~~~~~~~~~~
 
 After the hashmap comes an allocation log.
 Each entry in the log indicates a single allocation or deallocation.
 
 .. table:: Log entry
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -208,6 +317,8 @@ name: "unix"
 The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
 
 .. table:: Extension data
+  :align: center
+  :widths: grid
 
   +------+------+------+
   | Byte |    1 |    0 |
@@ -216,6 +327,8 @@ The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
   +------+-------------+
 
 .. table:: Entry data
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -224,12 +337,14 @@ The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
   +------+--------------------+--------------------+-------------+
 
 .. table:: Permissions
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
   |    0 |   User WX   |     Group RWX      |     Global RWX     |
-  +------+------+------+----------------------------------+------+
+  +------+-------------+--------------------+-------------+------+
   |    8 |                                                | U. R |
   +------+------------------------------------------------+------+
 
@@ -245,6 +360,8 @@ It is expressed in milliseconds, which gives it a range of ~584 million years.
 The timestamp is relative to the UNIX epoch.
 
 .. table:: Extension data
+  :align: center
+  :widths: grid
 
   +------+------+------+
   | Byte |    1 |    0 |
@@ -253,6 +370,8 @@ The timestamp is relative to the UNIX epoch.
   +------+-------------+
 
 .. table:: Entry data
+  :align: center
+  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
