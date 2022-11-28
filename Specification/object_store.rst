@@ -89,15 +89,15 @@ A header has a variable size, up to 64 KiB.
   +------+------+------+------+------+---------------------------+
   |   16 | MirC | CAlg | RLen | BLen |   Version (0x00_00_0003)  |
   +------+------+------+------+------+---------------------------+
-  |   24 |                          UID                          |
+  |   24 |                                                       |
+  +------+                          UID                          |
+  |   32 |                                                       |
   +------+-------------------------------------------------------+
   |   32 |                   Total block count                   |
   +------+-------------------------------------------------------+
   |   40 |                      LBA offset                       |
   +------+-------------------------------------------------------+
   |   48 |                      Block count                      |
-  +------+-------------------------------------------------------+
-  |   56 |                                                       |
   +------+-------------------------------------------------------+
   |   64 |                                                       |
   +------+                                                       |
@@ -107,14 +107,26 @@ A header has a variable size, up to 64 KiB.
   +------+                                                       |
   |   88 |                                                       |
   +------+-------------------------------------------------------+
-  |   96 |                   Allocation log LBA                  |
+  |   96 |                                                       |
+  +------+                                                       |
+  |  104 |                                                       |
+  +------+                     Allocation log                    |
+  |  112 |                                                       |
+  +------+                                                       |
+  |  120 |                                                       |
   +------+-------------------------------------------------------+
-  |  104 |                  Allocation log length                |
+  |  128 |                         XXH3                          |
   +------+-------------------------------------------------------+
-  |  112 |                         XXH3                          |
-  +------+-------------+-------------+---------------------------+
-  |  120 | Header len  |             |        Generation         |
-  +------+-------------+-------------+---------------------------+
+  |  136 |                      Generation                       |
+  +------+-------------------------------------------------------+
+  |  ... |                                                       |
+  +------+                       Reserved                        |
+  |  256 |                                                       |
+  +------+-------------------------------------------------------+
+  |  ... |                                                       |
+  +------+              Free for use by filesystem               |
+  |  504 |                                                       |
+  +------+-------------------------------------------------------+
 
 * Magic string: Must always be "Nora reliable FS"
 
@@ -131,9 +143,7 @@ A header has a variable size, up to 64 KiB.
   Useful to determine how many mirrors should be waited for before allowing
   writes.
 
-* UID: Unique filesystem identifier [#]_.
-
-.. [#] Using the system time in microseconds as UID is recommended.
+* UID: Unique filesystem identifier.
 
 * Total block count:
   The total amount of blocks this pool consists of.
@@ -154,11 +164,7 @@ A header has a variable size, up to 64 KiB.
 
 * Generation: Counts updates. Wraps arounds.
 
-* Header len: The total length of the header.
-  May span multiple blocks.
-
-All bytes between 128 and the header length are free for use by the filesystem
-layer.
+All bytes between 256 and 512 are free for use by the filesystem layer.
 
   When updating the headers, ensure the updates *do not* happen concurrently.
 
@@ -251,52 +257,3 @@ Determining which slots are free is done by scanning the entire list [#]_.
 Allocation log
 ~~~~~~~~~~~~~~
 
-To ensure the log is not corrupted entries are grouped and prefixed with a
-length and suffixed with a hash [#]_.
-
-.. [#] Suffixing the hash allows writing & hashing the log without seeking back
-   to the start.
-
-By default, all space is assumed to be free.
-
-.. table:: Log header
-  :align: center
-  :widths: grid
-
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |                        Length                         |
-  +------+-------------------------------------------------------+
-
-* Length: The size of the group in bytes.
-
-.. table:: Log entry
-  :align: center
-  :widths: grid
-
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |                          LBA                          |
-  +------+-------------------------------------------------------+
-  |    8 |                          Size                         |
-  +------+-------------------------------------------------------+
-
-* LBA: The start address of the blocks.
-
-* Size: The lower 63 bits indicate the amount of blocks being addresses.
-  If the highest bit is cleared, the entry is an allocation.
-  Otherwise, it is a deallocation.
-
-.. table:: Log tail
-  :align: center
-  :widths: grid
-
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |                         XXH3                          |
-  +------+-------------------------------------------------------+
-
-* XXH3: Hash of all entries in this group, excluding the length.

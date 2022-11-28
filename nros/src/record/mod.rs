@@ -1,5 +1,10 @@
 macro_rules! n2e {
-	{ [$name:ident] $($v:literal $k:ident)* } => {
+	{
+		$(#[doc = $doc:literal])*
+		[$name:ident]
+		$($v:literal $k:ident)*
+	} => {
+		$(#[doc = $doc])*
 		#[derive(Clone, Copy, Debug)]
 		pub enum $name {
 			$($k = $v,)*
@@ -109,10 +114,9 @@ pub enum UnpackError {
 }
 
 n2e! {
+	/// Records sizes are at least 8 KiB to ensure the depth of a tree does
+	/// not exceed 5 levels.
 	[MaxRecordSize]
-	10 K1
-	11 K2
-	12 K4
 	13 K8
 	14 K16
 	15 K32

@@ -1,120 +1,130 @@
-use alloc::boxed::Box;
+mod allocator;
+pub mod dev;
 
-pub trait Storage {
-	type Error;
+use {
+	crate::{header::Header, Compression, Error, LoadError, MaxRecordSize, Record, NewError},
+	alloc::vec::Vec,
+	allocator::Allocator,
+	core::{
+		fmt,
+		marker::PhantomData,
+		ops::{Deref, DerefMut, Range},
+	},
+	dev::Allocator as _,
+};
 
-	fn block_size_p2(&self) -> u8;
+pub use dev::{Dev, DevSet};
 
-	fn block_count(&self) -> u64;
-
-	// TODO stop using Box as soon as GATs are somewhat stable.
-	fn read(&mut self, lba: u64, blocks: usize) -> Result<Box<dyn Read + '_>, Self::Error>;
-
-	fn write(
-		&mut self,
-		max_blocks: usize,
-	) -> Result<Box<dyn Write<Error = Self::Error> + '_>, Self::Error>;
-
-	fn fence(&mut self) -> Result<(), Self::Error>;
-}
-
-pub trait Read {
-	fn get(&self) -> &[u8];
-}
-
-pub trait Write {
-	type Error;
-
-	fn get_mut(&mut self) -> &mut [u8];
-
-	fn set_region(&mut self, lba: u64, blocks: usize) -> Result<(), Self::Error>;
-
-	fn finish(self: Box<Self>) -> Result<(), Self::Error>;
-}
-
-/// A pseudo-device entirely in memory. Useful for testing.
+/// A single store of records.
+///
+/// It manages allocations on the devices and ensures records are mirrored properly.
+///
+/// It also handles conflicts in block sizes.
+///
+/// It does *not* handle caching.
+/// Records are read and written as a single unit.
 #[derive(Debug)]
-pub struct MemoryDev {
-	buf: Box<[u8]>,
+pub struct Store<D>
+where
+	D: Dev,
+{
+	devices: DevSet<D>,
+	allocator: Allocator,
+	max_record_size: MaxRecordSize,
 	block_size_p2: u8,
+	compression: Compression,
 }
 
-#[derive(Debug)]
-pub enum MemoryDevError {
-	OutOfRange,
-}
-
-impl MemoryDev {
-	pub fn new(blocks: usize, block_size_p2: u8) -> Self {
-		Self { buf: vec![0; blocks << block_size_p2].into(), block_size_p2 }
-	}
-}
-
-impl Storage for MemoryDev {
-	type Error = MemoryDevError;
-
-	fn block_count(&self) -> u64 {
-		self.buf.len() as u64 >> self.block_size_p2
+impl<D> Store<D>
+where
+	D: Dev,
+{
+	pub fn new(devices: DevSet<D>) -> Result<Self, NewError<D>> {
+		todo!()
 	}
 
-	fn block_size_p2(&self) -> u8 {
+	pub async fn load(devices: DevSet<D>, record_size: MaxRecordSize, compression: Compression, block_size_p2: u8) -> Result<Self, LoadError<D>> {
+		let header = devices.header().await;
+		Ok(Self {
+			allocator: Allocator::load(&mut devices, header.allocation_log_lba, header.allocation_log_length)?,
+			devices,
+			max_record_size: record_size,
+			compression,
+			block_size_p2,
+		})
+	}
+
+	/// Read a record.
+	pub async fn read(&mut self, record: &Record) -> Result<Vec<u8>, Error<D>> {
+		if record.lba == 0 {
+			debug_assert!(record.length == 0);
+			return Ok(None);
+		}
+		debug_assert!(record.lba != 0);
+
+		let lba = record.lba.into();
+		let len = record.length.into();
+
+		let count = self.calc_block_count(len);
+		let rd = self.storage.read(lba, count).map_err(Error::Storage)?;
+		let mut v = Vec::new();
+		record
+			.unpack(&rd.get()[..len as _], &mut v, self.max_record_size)
+			.map_err(Error::RecordUnpack)?;
+		Ok(v)
+	}
+
+	/// Write a record.
+	pub async fn write(&mut self, record: &Record, data: &[u8]) -> Result<(), Error<D>> {
+		let len = self.cache.compression.max_output_size(self.data.len());
+		let max_blks = self.cache.calc_block_count(len as _);
+		let block_count = self.cache.storage.block_count();
+		let mut w = self.cache.storage.write(max_blks).map_err(Error::Storage)?;
+		let mut rec = Record::pack(&self.data, w.get_mut(), self.cache.compression);
+		let blks = self.calc_block_count(rec.length.into());
+		let lba = self
+			.cache
+			.allocator
+			.alloc(blks as _, block_count)
+			.ok_or(Error::NotEnoughSpace)?;
+		rec.lba = lba.into();
+		w.set_region(lba, blks).map_err(Error::Storage)?;
+		w.finish().map_err(Error::Storage)?;
+		self.cache.cache.insert(lba, self.data);
+		self.cache.dirty.insert(lba);
+		Ok(rec)
+	}
+
+	/// Destroy a record.
+	pub fn destroy(&mut self, record: &Record) {
+		self.allocator
+			.free(record.lba.into(), self.calc_block_count(record.length.into()) as _)
+	}
+
+	/// Finish the current transaction.
+	///
+	/// This saves the allocation log, ensures all writes are committed and makes blocks
+	/// freed in this transaction available for the next transaction.
+	pub async fn finish_transaction(&mut self) -> Result<(), Error<D>> {
+		self.allocator.serialize_full(&mut self.storage)
+	}
+
+	fn calc_block_count(&self, len: u32) -> usize {
+		let bs = 1 << self.block_size_p2();
+		((len + bs - 1) / bs) as _
+	}
+
+	pub fn block_size_p2(&self) -> u8 {
 		self.block_size_p2
 	}
 
-	fn read(&mut self, lba: u64, blocks: usize) -> Result<Box<dyn Read + '_>, Self::Error> {
-		struct R<'a>(&'a [u8]);
-		impl Read for R<'_> {
-			fn get(&self) -> &[u8] {
-				self.0
-			}
-		}
-		let start = (lba as usize) << self.block_size_p2;
-		Ok(Box::new(R(
-			&self.buf[start..][..blocks << self.block_size_p2]
-		)))
-	}
-
-	fn write(
-		&mut self,
-		max_blocks: usize,
-	) -> Result<Box<dyn Write<Error = Self::Error> + '_>, Self::Error> {
-		Ok(Box::new(W {
-			offset: usize::MAX,
-			buf: vec![0; max_blocks << self.block_size_p2],
-			dev: self,
-		}))
-	}
-
-	fn fence(&mut self) -> Result<(), Self::Error> {
-		Ok(())
+	pub fn max_record_size(&self) -> MaxRecordSize {
+		self.max_record_size
 	}
 }
 
-struct W<'a> {
-	dev: &'a mut MemoryDev,
-	offset: usize,
-	buf: Vec<u8>,
-}
-
-impl Write for W<'_> {
-	type Error = MemoryDevError;
-
-	fn get_mut(&mut self) -> &mut [u8] {
-		&mut self.buf
-	}
-
-	fn set_region(&mut self, lba: u64, blocks: usize) -> Result<(), Self::Error> {
-		if lba + blocks as u64 > self.dev.buf.len() as u64 >> self.dev.block_size_p2 {
-			return Err(MemoryDevError::OutOfRange);
-		}
-		self.offset = (lba as usize) << self.dev.block_size_p2;
-		self.buf.resize(blocks << self.dev.block_size_p2, 0);
-		Ok(())
-	}
-
-	fn finish(self: Box<Self>) -> Result<(), Self::Error> {
-		self.dev.buf[self.offset..][..self.buf.len()].copy_from_slice(&self.buf);
-		core::mem::forget(*self);
-		Ok(())
-	}
+#[derive(Clone, Copy, Debug)]
+pub struct AllocLog {
+	pub lba: u64,
+	pub len: u64,
 }
