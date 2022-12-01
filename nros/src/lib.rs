@@ -156,6 +156,7 @@ where
 	}
 }
 
+#[derive(Clone, Copy, Debug)]
 enum BlockSize {
 	B512 = 9,
 	K1,

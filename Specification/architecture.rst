@@ -22,15 +22,31 @@ Object store
 
   +-----------------------------------------------+   +-----------+
   |                 Record store                  +---+ Allocator |
-  +------+----------------+----------------+------+   +-----------+
+  +-----------------------+-----------------------+   +-----------+
+                          |                 
+  +-----------------------+-----------------------+   +--------------+
+  |                     Cache                     +---+ Record tree* |
+  +------+----------------+----------------+------+   +--------------+
          |                |                |
   +------+------+  +------+------+  +------+------+
-  | Record tree |  | Record tree |  | Record tree |
+  | Record Tree |  | Record Tree |  | Record Tree |
   +------+------+  +------+------+  +------+------+
-         |                |                |
-  +------+----------------+----------------+------+
-  |                     Cache                     |
-  +-----------------------------------------------+
+
+
+Record tree*
+^^^^^^^^^^^^
+
+The implementation of record trees is not as trivial as may seem from the
+graph.
+In particular, one must be careful with writes as naively updating every record
+from leaf to root on every write requires an excessive amount of hashing and
+compression to create the records themselves.
+
+To deal with this issue, record trees *on top* of the cache layer should only
+update leaf records.
+Parent records will remain unchanged.
+When the cache needs to evict dirty records, it will instantiate a record tree
+itself, which then updates parent records accordingly.
 
 
 Resilvering

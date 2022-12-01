@@ -7,6 +7,8 @@ use {
 	crate::{Dev, Store, RecordTree, Record, Error},
 	alloc::collections::BTreeMap,
 	core::{cmp::Ordering, ptr::NonNull, mem},
+	std::rc::Rc,
+	core::cell::{RefCell, RefMut},
 	rustc_hash::FxHashMap,
 	rangemap::RangeSet,
 };
@@ -17,54 +19,96 @@ struct Key {
 	offset: u64,
 }
 
+/// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
+const OBJECT_LIST_ID: u64 = u64::MAX;
+
+/// The maximum depth of a record tree.
+///
+/// A record tree can contain up to 2^64 bytes of data.
+/// The maximum record size is 8 KiB = 2^13 bytes.
+/// Each record is 32 = 2^5 bytes large.
+///
+/// Ergo, maximum depth is `ceil((64 - 13) / (13 - 5)) + 1 = 8`, including leaves.
+///
+/// However, we don't need to include the root itself, so substract one -> `8 - 1 = 7`.
+const MAX_DEPTH: u8 = 7;
+
+/// Cache data.
 #[derive(Debug)]
-pub(crate) struct Cache<D: Dev> {
+pub(crate) struct CacheData<D: Dev> {
 	/// The non-volatile backing store.
 	store: Store<D>,
-	/// Cached object table.
-	object_table: TreeCache,
-	/// Cached objects.
-	objects: FxHashMap<u64, TreeCache>,
-	/// Read LRU queue.
-	read_lru: lru::LruList<Key>,
-	/// Write LRU queue.
-	write_lru: lru::LruList<Key>,
+	/// Cached records of objects and the object list.
+	///
+	/// The key, in order, is `(id, depth, offset)`.
+	/// Using separate hashmaps allows using only a prefix of the key.
+	data: FxHashMap<u64, [FxHashMap<u64, Vec<u8>>; MAX_DEPTH as _]>,
+	/// Linked list for global LRU evictions.
+	global_lru: lru::LruList<(u64, u8, u64)>,
+	/// Linked list for flushing dirty records.
+	///
+	/// This is not used for eviction but ensures an excessive amount of writes does not hold up
+	/// reads.
+	// TODO consider adding a sort of dirty map so records are grouped by object & sorted,
+	// which may improve read performance.
+	write_lru: lru::LruList<(u64, u8, u64)>,
+	/// The maximum amount of total bytes to keep cache.
+	global_cache_max: usize,
+	/// The maximum amount of dirty bytes to keep.
+	write_cache_max: usize,
+	/// The total amount of cached bytes.
+	global_cache_size: usize,
+	/// The total amount of dirty cached bytes.
+	write_cache_size: usize,
 	/// Used object IDs.
 	used_objects_ids: RangeSet<u64>,
 }
 
+/// Cache algorithm.
+#[derive(Debug)]
+pub(crate) struct Cache<D: Dev>(Rc<RefCell<CacheData<D>>>);
+
 impl<D: Dev> Cache<D> {
 	/// Initialize a cache layer.
 	///
-	/// # Note
+	/// # Panics
 	///
-	/// `write_cache_max` is additive to `read_cache_max`, i.e. total cache usage is up
-	/// to `read_cache_max + write_cache_max`.
+	/// If `global_cache_max` is smaller than `write_cache_max`.
 	///
-	/// The read cache may use unused write cache space.
-	pub fn new(store: Store<D>, read_cache_max: usize, write_cache_max: usize) -> Self {
-		Self {
+	/// If `write_cache_max` is smaller than the maximum record size.
+	pub fn new(store: Store<D>, global_cache_max: usize, write_cache_max: usize) -> Self {
+		assert!(global_cache_max >= write_cache_max, "global cache size is smaller than write cache");
+		assert!(write_cache_max >= 1 << store.max_record_size().to_raw(), "write cache size is smaller than the maximum record size");
+		Self(Rc::new(RefCell::new(CacheData {
 			store,
-			object_table: Default::default(),
-			objects: Default::default(),
-			read_lru: Default::default(),
+			data: Default::default(),
+			global_lru: Default::default(),
 			write_lru: Default::default(),
-		}
+			global_cache_max,
+			write_cache_max,
+			global_cache_size: 0,
+			write_cache_size: 0,
+			used_objects_ids: Default::default(),
+		})))
 	}
 
-	fn alloc_ids(&mut self, count: u64) -> u64 {
-		for r in self.used_objects_ids.gaps(&(0..u64::MAX)) {
+	/// Allocate an arbitrary amount of object IDs.
+	fn alloc_ids(&self, count: u64) -> u64 {
+		let mut slf = self.0.borrow_mut();
+		for r in slf.used_objects_ids.gaps(&(0..u64::MAX)) {
 			if r.end - r.start >= count {
-				self.used_objects_ids.insert(r.start..r.start + count);
+				slf.used_objects_ids.insert(r.start..r.start + count);
 				return r.start;
 			}
 		}
 		unreachable!("more than 2**64 objects allocated");
 	}
 
-	fn dealloc_id(&mut self, id: u64) {
-		debug_assert!(self.used_objects_ids.contains(&id), "double free");
-		self.used_objects_ids.remove(id..id + 1);
+	/// Deallocate a single object ID.
+	fn dealloc_id(&self, id: u64) {
+		let mut slf = self.borrow_mut();
+		debug_assert!(slf.used_objects_ids.contains(&id), "double free");
+		slf.used_objects_ids.remove(id..id + 1);
 	}
 
 	async fn write_object_table(&mut self, id: u64, data: &[u8]) -> Result<(), Error<D>> {
@@ -192,7 +236,8 @@ impl<D: Dev> Cache<D> {
 	}
 
 	/// Zeroize data.
-	/// This is equivalent to `read(id, offset, &[0; len])` but more efficient.
+	/// This is equivalent to `read(id, offset, &[0; len])` though more efficient as it
+	/// can erase large ranges at once.
 	pub async fn zeroize(&mut self, id: u64, offset: u64, len: u64) -> Result<(), Error<D>> {
 		todo!()
 	}
