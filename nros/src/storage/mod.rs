@@ -2,7 +2,7 @@ mod allocator;
 pub mod dev;
 
 use {
-	crate::{header::Header, Compression, Error, LoadError, MaxRecordSize, Record, NewError},
+	crate::{header::Header, Compression, Error, LoadError, MaxRecordSize, Record, NewError, BlockSize},
 	alloc::vec::Vec,
 	allocator::Allocator,
 	core::{
@@ -31,7 +31,7 @@ where
 	devices: DevSet<D>,
 	allocator: Allocator,
 	max_record_size: MaxRecordSize,
-	block_size_p2: u8,
+	block_size: BlockSize,
 	compression: Compression,
 }
 
@@ -75,11 +75,13 @@ where
 	}
 
 	/// Write a record.
-	pub async fn write(&mut self, record: &Record, data: &[u8]) -> Result<(), Error<D>> {
-		let len = self.cache.compression.max_output_size(self.data.len());
-		let max_blks = self.cache.calc_block_count(len as _);
-		let block_count = self.cache.storage.block_count();
-		let mut w = self.cache.storage.write(max_blks).map_err(Error::Storage)?;
+	pub async fn write(&self, record: &Record, data: &[u8]) -> Result<(), Error<D>> {
+		let len = self.compression.max_output_size(data.len());
+		let max_blks = self.calc_block_count(len as _);
+		let block_count = self.devices.block_count();
+		
+		self.devices.alloc()
+		let mut w = self.devices.write(max_blks).map_err(Error::Storage)?;
 		let mut rec = Record::pack(&self.data, w.get_mut(), self.cache.compression);
 		let blks = self.calc_block_count(rec.length.into());
 		let lba = self
@@ -106,16 +108,16 @@ where
 	/// This saves the allocation log, ensures all writes are committed and makes blocks
 	/// freed in this transaction available for the next transaction.
 	pub async fn finish_transaction(&mut self) -> Result<(), Error<D>> {
-		self.allocator.serialize_full(&mut self.storage)
+		self.allocator.save(&self.devices).await
 	}
 
 	fn calc_block_count(&self, len: u32) -> usize {
-		let bs = 1 << self.block_size_p2();
+		let bs = 1 << self.block_size().to_raw();
 		((len + bs - 1) / bs) as _
 	}
 
-	pub fn block_size_p2(&self) -> u8 {
-		self.block_size_p2
+	pub fn block_size(&self) -> BlockSize {
+		self.block_size
 	}
 
 	pub fn max_record_size(&self) -> MaxRecordSize {

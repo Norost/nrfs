@@ -1,16 +1,17 @@
 mod tree;
 mod lru;
 
-use tree::TreeCache;
+use tree::Tree;
 
 use {
-	crate::{Dev, Store, RecordTree, Record, Error},
+	crate::{Dev, Store, RecordTree, Record, Error, BlockSize, MaxRecordSize},
 	alloc::collections::BTreeMap,
-	core::{cmp::Ordering, ptr::NonNull, mem},
+	core::{cmp::Ordering, ptr::NonNull, mem, task::{Waker, Poll, Context}, future::Future, pin::Pin},
 	std::rc::Rc,
-	core::cell::{RefCell, RefMut},
+	core::cell::{RefCell, RefMut, Ref},
 	rustc_hash::FxHashMap,
 	rangemap::RangeSet,
+	std::collections::hash_map::Entry,
 };
 
 /// Key to a cache entry.
@@ -35,9 +36,7 @@ const MAX_DEPTH: u8 = 7;
 
 /// Cache data.
 #[derive(Debug)]
-pub(crate) struct CacheData<D: Dev> {
-	/// The non-volatile backing store.
-	store: Store<D>,
+pub(crate) struct CacheData {
 	/// Cached records of objects and the object list.
 	///
 	/// The key, in order, is `(id, depth, offset)`.
@@ -60,13 +59,22 @@ pub(crate) struct CacheData<D: Dev> {
 	global_cache_size: usize,
 	/// The total amount of dirty cached bytes.
 	write_cache_size: usize,
+	/// Cache entries that are currently in use and must not be evicted.
+	locked: FxHashMap<(u64, u8, u64), usize>,
+	/// Cache entries that are currently being fetched.
+	fetching: FxHashMap<(u64, u8, u64), Vec<Waker>>,
 	/// Used object IDs.
 	used_objects_ids: RangeSet<u64>,
 }
 
 /// Cache algorithm.
 #[derive(Debug)]
-pub(crate) struct Cache<D: Dev>(Rc<RefCell<CacheData<D>>>);
+pub(crate) struct Cache<D: Dev> {
+	/// The non-volatile backing store.
+	store: Store<D>,
+	/// The cached data.
+	data: RefCell<CacheData>,
+}
 
 impl<D: Dev> Cache<D> {
 	/// Initialize a cache layer.
@@ -79,22 +87,26 @@ impl<D: Dev> Cache<D> {
 	pub fn new(store: Store<D>, global_cache_max: usize, write_cache_max: usize) -> Self {
 		assert!(global_cache_max >= write_cache_max, "global cache size is smaller than write cache");
 		assert!(write_cache_max >= 1 << store.max_record_size().to_raw(), "write cache size is smaller than the maximum record size");
-		Self(Rc::new(RefCell::new(CacheData {
+		Self {
 			store,
-			data: Default::default(),
-			global_lru: Default::default(),
-			write_lru: Default::default(),
-			global_cache_max,
-			write_cache_max,
-			global_cache_size: 0,
-			write_cache_size: 0,
-			used_objects_ids: Default::default(),
-		})))
+			data: RefCell::new(CacheData {
+				data: Default::default(),
+				global_lru: Default::default(),
+				write_lru: Default::default(),
+				global_cache_max,
+				write_cache_max,
+				global_cache_size: 0,
+				write_cache_size: 0,
+				locked: Default::default(),
+				fetching: Default::default(),
+				used_objects_ids: Default::default(),
+			}),
+		}
 	}
 
 	/// Allocate an arbitrary amount of object IDs.
 	fn alloc_ids(&self, count: u64) -> u64 {
-		let mut slf = self.0.borrow_mut();
+		let mut slf = self.data.borrow_mut();
 		for r in slf.used_objects_ids.gaps(&(0..u64::MAX)) {
 			if r.end - r.start >= count {
 				slf.used_objects_ids.insert(r.start..r.start + count);
@@ -106,7 +118,7 @@ impl<D: Dev> Cache<D> {
 
 	/// Deallocate a single object ID.
 	fn dealloc_id(&self, id: u64) {
-		let mut slf = self.borrow_mut();
+		let mut slf = self.data.borrow_mut();
 		debug_assert!(slf.used_objects_ids.contains(&id), "double free");
 		slf.used_objects_ids.remove(id..id + 1);
 	}
@@ -248,7 +260,153 @@ impl<D: Dev> Cache<D> {
 	}
 
 	/// The block size used by the underlying [`Store`].
-	pub fn block_size_p2(&self) -> u8 {
-		self.store.block_size_p2()
+	pub fn block_size(&self) -> BlockSize {
+		self.store.block_size()
+	}
+
+	/// The maximum record size used by the underlying [`Store`].
+	pub fn max_record_size(&self) -> MaxRecordSize {
+		self.store.max_record_size()
+	}
+
+	/// Lock a cache entry, preventing it from being evicted.
+	///
+	/// Returns `true` if the cache entry was already locked, `false` otherwise.
+	fn lock_entry(self: Rc<Self>, id: u64, depth: u8, offset: u64) -> CacheRef<D> {
+		CacheRef::new(self, id, depth, offset)
+	}
+
+	/// Fetch a record for a cache entry.
+	///
+	/// If the entry is already being fetched,
+	/// the caller is instead added to a list to be waken up when the fetcher has finished.
+	fn fetch_entry(self: Rc<Self>, id: u64, depth: u8, offset: u64, record: &Record) -> impl Future<Output = Result<CacheRef<D>, Error<D>>> {
+		struct Fetch<D: Dev> {
+			cache: Rc<Cache<D>>,
+			id: u64,
+			depth: u8,
+			offset: u64,
+		}
+
+		impl<D: Dev> Future for Fetch<D> {
+			type Output = Result<CacheRef<D>, Error<D>>;
+
+			fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+				if self.cache.has_entry(self.id, self.depth, self.offset) {
+					return Poll::Ready(Ok(CacheRef::new(self.cache, self.id, self.depth, self.offset)));
+				}
+
+				let mut cache = self.cache.data.borrow_mut();
+				match cache.fetching.entry((self.id, self.depth, self.offset)) {
+					Entry::Vacant(e) => {
+						e.insert(Default::default());
+						drop(cache);
+						todo!()
+					}
+					Entry::Occupied(e) => {
+						e.get_mut().push(cx.waker().clone());
+					}
+				}
+				Poll::Pending
+			}
+		}
+
+		Fetch {
+			cache: self,
+			id,
+			depth,
+			offset,
+		}
+	}
+
+	/// Check if a cache entry is present.
+	fn has_entry(&self, id: u64, depth: u8, offset: u64) -> bool {
+		self.data
+			.borrow()
+			.data
+			.get(&id)
+			.and_then(|m| m[usize::from(depth)].get(&offset))
+			.is_some()
+	}
+
+	/// Get a cached entry.
+	///
+	/// # Panics
+	///
+	/// If another borrow is alive.
+	///
+	/// If the entry is not present.
+	fn get_entry(&self, id: u64, depth: u8, offset: u64) -> RefMut<Vec<u8>> {
+		self.get_entry_mut(id, depth, offset)
+	}
+
+	/// Get a cached entry.
+	///
+	/// # Panics
+	///
+	/// If another borrow is alive.
+	///
+	/// If the entry is not present.
+	fn get_entry_mut(&self, id: u64, depth: u8, offset: u64) -> RefMut<Vec<u8>> {
+		RefMut::map(self.data.borrow_mut(), |data| {
+			data.data
+				.get_mut(&id)
+				.expect("cache entry by id does not exist")
+				[usize::from(depth)]
+				.get_mut(&offset)
+				.expect("cache entry by offset does not exist")
+		})
+	}
+}
+
+/// A cache entry.
+///
+/// It is a relatively cheap way to avoid lifetimes while helping ensure consistency.
+/// 
+/// Cache entries referenced by this structure cannot be removed until all corresponding
+/// `CacheRef`s are dropped.
+///
+/// # Note
+///
+/// `CacheRef` is safe to hold across `await` points.
+struct CacheRef<D: Dev> {
+	cache: Rc<Cache<D>>,
+	id: u64,
+	depth: u8,
+	offset: u64,
+}
+
+impl<D: Dev> CacheRef<D> {
+	/// Create a new reference to a cache entry.
+	///
+	/// Returns `true` if the cache entry was already locked, `false` otherwise.
+	fn new(cache: Rc<Cache<D>>, id: u64, depth: u8, offset: u64) -> Self {
+		*cache.data.borrow_mut().locked.entry((id, depth, offset)).or_default() += 1;
+		Self { cache, id, depth, offset }
+	}
+
+	/// Get a mutable reference to the data.
+	///
+	/// # Note
+	///
+	/// The reference **must not** be held across `await` points!
+	///
+	/// # Panics
+	///
+	/// If something is already borrowing the underlying [`TreeData`].
+	fn get_mut(&self) -> RefMut<Vec<u8>> {
+		self.cache.get_entry_mut(self.id, self.depth, self.offset)
+	}
+}
+
+impl<D: Dev> Drop for CacheRef<D> {
+	fn drop(&mut self) {
+		let mut tree = self.cache.data.borrow_mut();
+		let key = (self.id, self.depth, self.offset);
+		let count = tree.locked.get_mut(&key).expect("cache entry is not locked");
+		*count -= 1;
+		if *count == 0 {
+			tree.locked.remove(&key);
+		}
 	}
 }

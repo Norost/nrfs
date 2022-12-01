@@ -13,6 +13,7 @@ mod set;
 pub use mem::{MemDev, MemDevError};
 pub use set::DevSet;
 
+use crate::BlockSize;
 use core::future::Future;
 
 pub trait Dev {
@@ -30,15 +31,13 @@ pub trait Dev {
 	where
 		Self: 'a;
 	/// Task that represents a pending fence operation.
-	type FenceTask<'a>: Future<Output = Result<(), Self::Error>>
-	where
-		Self: 'a;
+	type FenceTask: Future<Output = Result<(), Self::Error>>;
 
 	/// The amount of useable blocks.
 	fn block_count(&self) -> u64;
 
-	/// The size of a block, as a power of 2.
-	fn block_size_p2(&self) -> u8;
+	/// The size of a block.
+	fn block_size(&self) -> BlockSize;
 
 	/// Read a range of blocks.
 	fn read(
@@ -60,7 +59,6 @@ pub trait Dev {
 		&self,
 		lba: u64,
 		buf: <Self::Allocator as Allocator>::Buf<'_>,
-		len: usize,
 	);
 
 	/// Execute a fence.
@@ -71,7 +69,7 @@ pub trait Dev {
 	/// # Panics
 	///
 	/// If a fence is already in progress.
-	fn fence(&self) -> Self::FenceTask<'_>;
+	fn fence(&self) -> Self::FenceTask;
 
 	/// Get the memory allocator used by this device.
 	/// Used to allocate buffers for writing.
@@ -98,21 +96,17 @@ pub trait Allocator {
 	///
 	/// The buffer may be larger than the requested size.
 	fn alloc(&self, size: usize) -> Self::AllocTask<'_>;
-
-	/// Check if this allocator is compatible with another allocator.
-	///
-	/// This is used in conjunction with [`Buf::clone`] to avoid redundant copies.
-	fn is_compatible(&self, other: &Self) -> bool;
 }
 
 /// A memory buffer for use with [`Dev`].
-pub trait Buf {
+pub trait Buf: Sized {
 	/// Error that may occur when implicitly cloning.
 	type Error;
 	/// Task that may create a copy of this buffer.
 	type MutTask<'a>: Future<Output = Result<&'a mut [u8], Self::Error>>
 	where
 		Self: 'a;
+	type CloneTask: Future<Output = Result<Self, Self::Error>>;
 
 	/// Get an immutable reference to the buffer.
 	fn get(&self) -> &[u8];
@@ -122,4 +116,6 @@ pub trait Buf {
 	/// This may make a copy of the data.
 	/// As this may require a new allocation it is async.
 	fn get_mut(&mut self) -> Self::MutTask<'_>;
+
+	fn deep_clone(&self) -> Self::CloneTask;
 }

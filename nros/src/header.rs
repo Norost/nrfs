@@ -1,5 +1,5 @@
 use {
-	crate::{Compression, MaxRecordSize, RecordTree},
+	crate::{Compression, MaxRecordSize, Record},
 	core::fmt,
 	endian::{u16le, u32le, u64le},
 };
@@ -21,7 +21,7 @@ pub(crate) struct Header {
 	pub block_count: u64le,
 	pub _reserved_0: u64,
 
-	pub object_list: RecordTree,
+	pub object_list: Record,
 
 	pub allocation_log_lba: u64le,
 	pub allocation_log_length: u64le,
@@ -39,7 +39,7 @@ impl Default for Header {
 		Self {
 			magic: Self::MAGIC,
 
-			version: 0x00_00_0003,
+			version: 0x00_00_0003.into(),
 			block_length_p2: Default::default(),
 			max_record_length_p2: MaxRecordSize::K128.to_raw(),
 			compression: Compression::Lz4.to_raw(),
@@ -60,14 +60,14 @@ impl Default for Header {
 			xxh3: Default::default(),
 			generation: Default::default(),
 			_reserved_1: Default::default(),
-			header_length: 4096, // Should be sufficient for at least a while
+			header_length: 4096.into(), // Should be sufficient for at least a while
 		}
 	}
 }
 
 impl Header {
 	/// The magic every header begins with;
-	pub const MAGIC: [u8; 16] = *b"Nora Reliabe FS";
+	pub const MAGIC: [u8; 16] = *b"Nora Reliable FS";
 
 	/// Check if the magic is proper
 	pub fn verify_magic(&mut self) -> bool {
@@ -86,7 +86,7 @@ impl Header {
 	/// Update the `xxh3` field.
 	pub fn update_xxh3(&mut self) {
 		self.xxh3 = 0.into();
-		self.xxh3 = xxhash_rust::xxh3::xxh3_64(self.as_ref());
+		self.xxh3 = xxhash_rust::xxh3::xxh3_64(self.as_ref()).into();
 	}
 
 	/// Check whether two headers are part of the same filesystem.

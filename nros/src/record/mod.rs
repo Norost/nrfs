@@ -1,30 +1,3 @@
-macro_rules! n2e {
-	{
-		$(#[doc = $doc:literal])*
-		[$name:ident]
-		$($v:literal $k:ident)*
-	} => {
-		$(#[doc = $doc])*
-		#[derive(Clone, Copy, Debug)]
-		pub enum $name {
-			$($k = $v,)*
-		}
-
-		impl $name {
-			pub(crate) fn from_raw(n: u8) -> Option<Self> {
-				Some(match n {
-					$($v => Self::$k,)*
-					_ => return None,
-				})
-			}
-
-			pub(crate) fn to_raw(self) -> u8 {
-				self as _
-			}
-		}
-	};
-}
-
 mod compression;
 
 use {
@@ -36,7 +9,7 @@ use {
 
 pub use compression::Compression;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 #[repr(C, align(32))]
 pub struct Record {
 	pub lba: u64le,

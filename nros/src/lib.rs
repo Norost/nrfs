@@ -1,5 +1,6 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
+#![feature(int_roundings)]
 #![feature(nonzero_min_max)]
 
 extern crate alloc;
@@ -20,6 +21,33 @@ macro_rules! raw {
 	};
 }
 
+macro_rules! n2e {
+	{
+		$(#[doc = $doc:literal])*
+		[$name:ident]
+		$($v:literal $k:ident)*
+	} => {
+		$(#[doc = $doc])*
+		#[derive(Clone, Copy, Debug)]
+		pub enum $name {
+			$($k = $v,)*
+		}
+
+		impl $name {
+			pub(crate) fn from_raw(n: u8) -> Option<Self> {
+				Some(match n {
+					$($v => Self::$k,)*
+					_ => return None,
+				})
+			}
+
+			pub(crate) fn to_raw(self) -> u8 {
+				self as _
+			}
+		}
+	};
+}
+
 mod cache;
 mod directory;
 pub mod header;
@@ -32,7 +60,7 @@ mod util;
 
 pub use {
 	record::{Compression, MaxRecordSize},
-	storage::{dev::Allocator, Dev, Read, Store, Write, DevSet},
+	storage::{dev::{Allocator, Buf}, Dev, Read, Store, Write, DevSet},
 };
 
 use {
@@ -55,7 +83,7 @@ impl<D: Dev> Nros<D> {
 		max_record_size: MaxRecordSize,
 		compression: Compression,
 		cache_size: usize,
-		block_size_p2: BlockSize,
+		block_size: BlockSize,
 	) -> Result<Self, NewError<D>> {
 		todo!()
 	}
@@ -107,8 +135,8 @@ impl<D: Dev> Nros<D> {
 		self.store.finish_transaction().await
 	}
 
-	pub fn block_size_p2(&self) -> u8 {
-		self.store.block_size_p2()
+	pub fn block_size(&self) -> BlockSize {
+		self.store.block_size()
 	}
 }
 
@@ -156,28 +184,29 @@ where
 	}
 }
 
-#[derive(Clone, Copy, Debug)]
-enum BlockSize {
-	B512 = 9,
-	K1,
-	K2,
-	K4,
-	K8,
-	K16,
-	K32,
-	K64,
-	K128,
-	K256,
-	K512,
-	M1,
-	M2,
-	M4,
-	M8,
-	M16,
-	M32,
-	M64,
-	M128,
-	M256,
-	M512,
-	G1,
+n2e! {
+	[BlockSize]
+	9 B512
+	10 K1
+	11 K2
+	12 K4
+	13 K8
+	14 K16
+	15 K32
+	16 K64
+	17 K128
+	18 K256
+	19 K512
+	20 M1
+	21 M2
+	22 M4
+	23 M8
+	24 M16
+	25 M32
+	26 M64
+	27 M128
+	28 M256
+	29 M512
+	30 G1
+	31 G2
 }

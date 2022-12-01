@@ -1,6 +1,6 @@
 use {
 	super::{DevSet, Dev},
-	crate::{BlockSize, MaxRecordSize, storage::Storage, Error, LoadError},
+	crate::{BlockSize, MaxRecordSize, storage::Storage, Error, LoadError, Buf},
 	endian::u64le,
 	rangemap::RangeSet,
 };
@@ -31,16 +31,16 @@ pub struct Allocator {
 }
 
 impl Allocator {
-	pub fn load<D>(devices: &mut DevSet<D>, lba: u64, len: u64) -> Result<Self, LoadError<D>>
+	pub async fn load<D>(devices: &mut DevSet<D>, lba: u64, len: u64) -> Result<Self, Error<D>>
 	where
 		D: Dev,
 	{
 		let mut alloc_map = RangeSet::new();
-		let block_size = 1 << devices.block_size();
+		let block_size = 1 << devices.block_size().to_raw();
 		let blocks = (len + block_size - 1) / block_size;
 		let rd = devices
 			.read(lba, blocks.try_into().unwrap())
-			.map_err(LoadError::Dev)?;
+			.await?;
 		for r in rd.get()[..len as _].chunks_exact(16) {
 			let start = u64::from_le_bytes(r[..8].try_into().unwrap());
 			let len = u64::from_le_bytes(r[8..].try_into().unwrap());
@@ -88,7 +88,7 @@ impl Allocator {
 	}
 
 	/// Save the allocator state.
-	pub async fn save<D>(&mut self, devices: &mut DevSet<D>, record_size: MaxRecordSize) -> Result<(u64, u64), Error<D>>
+	pub async fn save<D>(&mut self, devs: &mut DevSet<D>, record_size: MaxRecordSize) -> Result<(), Error<D>>
 	where
 		D: Dev,
 	{
@@ -103,27 +103,27 @@ impl Allocator {
 		let (len_min, len_max) = alloc_map.iter().size_hint();
 		assert_eq!(Some(len_min), len_max);
 		let len = (len_min as u64 + 1) * 16;
-		assert!(len <= 1 << record_size.as_raw(), "todo: multiple records");
-		let block_size = 1 << devices.block_size().as_raw();
-		let blocks = (len + block_size - 1) / block_size;
+		assert!(len <= 1 << record_size.to_raw(), "todo: multiple records");
+		let blocks = (len + (1 << devs.block_size().to_raw()) - 1) >> devs.block_size().to_raw();
 		let lba = self
-			.alloc(blocks, devices.block_count())
+			.alloc(blocks, devs.block_count())
 			.ok_or(Error::NotEnoughSpace)?;
 
 		// Save map
-		let mut wr = devices.write(blocks as _).map_err(Error::Dev)?;
-		for (w, r) in wr.get_mut().chunks_exact_mut(16).zip(self.alloc_map.iter()) {
+		let mut buf = devs.alloc(usize::try_from(blocks).unwrap() << devs.block_size().to_raw()).await?;
+		for (w, r) in buf.get_mut().await.map_err(|_| todo!())?.chunks_exact_mut(16).zip(self.alloc_map.iter()) {
 			let len = r.end - r.start;
 			w[..8].copy_from_slice(&r.start.to_le_bytes());
 			w[8..].copy_from_slice(&len.to_le_bytes());
 		}
-		wr.set_region(lba, blocks as _).map_err(Error::Dev)?;
-		wr.finish().map_err(Error::Dev)?;
+		devs.write(lba, buf).await?;
 
 		self.alloc_map = alloc_map;
 		self.free_map = Default::default();
 		self.dirty_map = Default::default();
 
-		Ok((lba, len))
+		todo!("actually save the damn log");
+
+		Ok(())
 	}
 }

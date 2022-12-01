@@ -2,6 +2,7 @@ type Idx = arena::Handle<u8>;
 
 const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
 
+#[derive(Debug)]
 struct Node<V> {
 	next: Idx,
 	prev: Idx,
@@ -13,6 +14,7 @@ struct Node<V> {
 /// This is only a part of a LRU.
 /// It only keeps track of nodes and their ordering based on usage.
 /// Insertions and removals need to be done manually.
+#[derive(Debug)]
 pub struct LruList<V> {
 	/// The most recently used node, if any.
 	head: Idx,
