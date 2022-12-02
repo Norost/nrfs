@@ -1,16 +1,18 @@
-use super::{Buf, Dev, Allocator};
-use std::rc::Rc;
-use core::cell::{RefCell, RefMut};
-use core::future;
-use crate::BlockSize;
+use {
+	super::{Allocator, Buf, Dev},
+	crate::BlockSize,
+	core::{
+		cell::{RefCell, RefMut},
+		future,
+	},
+	std::rc::Rc,
+};
 
 /// A pseudo-device entirely in memory. Useful for testing.
 #[derive(Debug)]
 pub struct MemDev {
 	buf: RefCell<Box<[u8]>>,
 	block_size: BlockSize,
-	/// An unhandled error that may have occured during [`Self::write`].
-	write_error: Option<MemDevError>,
 }
 
 #[derive(Debug)]
@@ -22,9 +24,10 @@ pub enum MemDevError {
 impl MemDev {
 	pub fn new(blocks: usize, block_size: BlockSize) -> Self {
 		Self {
-			buf: vec![0; blocks << block_size.to_raw()].into_boxed_slice().into(),
+			buf: vec![0; blocks << block_size.to_raw()]
+				.into_boxed_slice()
+				.into(),
 			block_size,
-			write_error: None,
 		}
 	}
 
@@ -34,7 +37,8 @@ impl MemDev {
 			.checked_shl(self.block_size.to_raw().into())
 			.ok_or(MemDevError::OutOfRange)?;
 		let e = s.checked_add(len).ok_or(MemDevError::OutOfRange)?;
-		RefMut::filter_map(self.buf.borrow_mut(), |b| b.get_mut(s..e)).map_err(|_| MemDevError::OutOfRange)
+		RefMut::filter_map(self.buf.borrow_mut(), |b| b.get_mut(s..e))
+			.map_err(|_| MemDevError::OutOfRange)
 	}
 }
 
@@ -43,7 +47,12 @@ impl Dev for MemDev {
 	type ReadTask<'a> = future::Ready<Result<MemBuf, Self::Error>>
 	where
 		Self: 'a;
-	type FenceTask = future::Ready<Result<(), Self::Error>>;
+	type WriteTask<'a> = future::Ready<Result<(), Self::Error>>
+	where
+		Self: 'a;
+	type FenceTask<'a> = future::Ready<Result<(), Self::Error>>
+	where
+		Self: 'a;
 	type Allocator = MemAllocator;
 
 	fn block_count(&self) -> u64 {
@@ -54,24 +63,22 @@ impl Dev for MemDev {
 		self.block_size
 	}
 
-	fn read<'a>(
-		&self,
-		lba: u64,
-		len: usize,
-	) -> Self::ReadTask<'_> {
-		future::ready(self.get_mut(lba, len).map(|b| MemBuf(b.iter().copied().collect())))
+	fn read<'a>(&self, lba: u64, len: usize) -> Self::ReadTask<'_> {
+		future::ready(
+			self.get_mut(lba, len)
+				.map(|b| MemBuf(b.iter().copied().collect())),
+		)
 	}
 
-	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) {
-		if self.write_error.is_none() {
-			self.get_mut(lba, buf.0.len())
-				.map(|b| b.copy_from_slice(buf.get()))
-				.map_err(|e| self.write_error = Some(e));
-		}
+	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_> {
+		let res = self
+			.get_mut(lba, buf.0.len())
+			.map(|mut b| b.copy_from_slice(buf.get()));
+		future::ready(res)
 	}
 
-	fn fence(&self) -> Self::FenceTask {
-		future::ready(self.write_error.take().map_or(Ok(()), Err))
+	fn fence(&self) -> Self::FenceTask<'_> {
+		future::ready(Ok(()))
 	}
 
 	fn allocator(&self) -> &Self::Allocator {
@@ -101,22 +108,14 @@ pub struct MemBuf(Rc<[u8]>);
 
 impl Buf for MemBuf {
 	type Error = MemDevError;
-	type MutTask<'a> = future::Ready<Result<&'a mut [u8], Self::Error>>
-	where
-		Self: 'a;
 	type CloneTask = future::Ready<Result<Self, Self::Error>>;
 
 	fn get(&self) -> &[u8] {
 		&self.0
 	}
 
-	fn get_mut(&mut self) -> Self::MutTask<'_> {
-		if let Some(buf) = Rc::get_mut(&mut self.0) {
-			return future::ready(Ok(buf));
-		}
-		// Deep clone
-		self.0 = self.0.iter().copied().collect();
-		future::ready(Ok(Rc::get_mut(&mut self.0).unwrap()))
+	fn get_mut(&mut self) -> &mut [u8] {
+		Rc::get_mut(&mut self.0).expect("buffer was cloned")
 	}
 
 	fn deep_clone(&self) -> Self::CloneTask {

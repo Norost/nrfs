@@ -1,6 +1,6 @@
 use {
-	super::{DevSet, Dev},
-	crate::{BlockSize, MaxRecordSize, storage::Storage, Error, LoadError, Buf},
+	super::{Dev, DevSet},
+	crate::{BlockSize, Buf, Error, LoadError, MaxRecordSize},
 	endian::u64le,
 	rangemap::RangeSet,
 };
@@ -31,16 +31,14 @@ pub struct Allocator {
 }
 
 impl Allocator {
-	pub async fn load<D>(devices: &mut DevSet<D>, lba: u64, len: u64) -> Result<Self, Error<D>>
+	pub async fn load<D>(devices: &DevSet<D>, lba: u64, len: u64) -> Result<Self, Error<D>>
 	where
 		D: Dev,
 	{
 		let mut alloc_map = RangeSet::new();
 		let block_size = 1 << devices.block_size().to_raw();
 		let blocks = (len + block_size - 1) / block_size;
-		let rd = devices
-			.read(lba, blocks.try_into().unwrap())
-			.await?;
+		let rd = devices.read(lba, blocks.try_into().unwrap()).await?;
 		for r in rd.get()[..len as _].chunks_exact(16) {
 			let start = u64::from_le_bytes(r[..8].try_into().unwrap());
 			let len = u64::from_le_bytes(r[8..].try_into().unwrap());
@@ -88,7 +86,11 @@ impl Allocator {
 	}
 
 	/// Save the allocator state.
-	pub async fn save<D>(&mut self, devs: &mut DevSet<D>, record_size: MaxRecordSize) -> Result<(), Error<D>>
+	pub async fn save<D>(
+		&mut self,
+		devs: &DevSet<D>,
+		record_size: MaxRecordSize,
+	) -> Result<(), Error<D>>
 	where
 		D: Dev,
 	{
@@ -110,8 +112,14 @@ impl Allocator {
 			.ok_or(Error::NotEnoughSpace)?;
 
 		// Save map
-		let mut buf = devs.alloc(usize::try_from(blocks).unwrap() << devs.block_size().to_raw()).await?;
-		for (w, r) in buf.get_mut().await.map_err(|_| todo!())?.chunks_exact_mut(16).zip(self.alloc_map.iter()) {
+		let mut buf = devs
+			.alloc(usize::try_from(blocks).unwrap() << devs.block_size().to_raw())
+			.await?;
+		for (w, r) in buf
+			.get_mut()
+			.chunks_exact_mut(16)
+			.zip(self.alloc_map.iter())
+		{
 			let len = r.end - r.start;
 			w[..8].copy_from_slice(&r.start.to_le_bytes());
 			w[8..].copy_from_slice(&len.to_le_bytes());

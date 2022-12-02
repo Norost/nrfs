@@ -2,6 +2,7 @@
 #![deny(unused_must_use)]
 #![feature(int_roundings)]
 #![feature(nonzero_min_max)]
+#![feature(pin_macro)]
 
 extern crate alloc;
 
@@ -22,6 +23,15 @@ macro_rules! raw {
 }
 
 macro_rules! n2e {
+	(@INTERNAL $op:ident :: $fn:ident $int:ident $name:ident) => {
+		impl core::ops::$op<$name> for $int {
+			type Output = $int;
+
+			fn $fn(self, rhs: $name) -> Self::Output {
+				self.$fn(rhs.to_raw())
+			}
+		}
+	};
 	{
 		$(#[doc = $doc:literal])*
 		[$name:ident]
@@ -45,6 +55,11 @@ macro_rules! n2e {
 				self as _
 			}
 		}
+
+		n2e!(@INTERNAL Shl::shl u64 $name);
+		n2e!(@INTERNAL Shr::shr u64 $name);
+		n2e!(@INTERNAL Shl::shl usize $name);
+		n2e!(@INTERNAL Shr::shr usize $name);
 	};
 }
 
@@ -52,28 +67,26 @@ mod cache;
 mod directory;
 pub mod header;
 mod record;
-mod record_tree;
 pub mod storage;
 #[cfg(test)]
 mod test;
 mod util;
 
 pub use {
+	cache::Tree,
 	record::{Compression, MaxRecordSize},
-	storage::{dev::{Allocator, Buf}, Dev, Read, Store, Write, DevSet},
+	storage::{
+		dev::{Allocator, Buf},
+		Dev, DevSet, Store,
+	},
 };
 
-use {
-	core::fmt,
-	record::Record,
-	record_tree::RecordTree,
-	cache::Cache,
-};
+use {cache::Cache, core::fmt, record::Record, std::rc::Rc};
 
 #[derive(Debug)]
 pub struct Nros<D: Dev> {
 	/// Backing store with cache and allocator.
-	store: Cache<D>,
+	store: Rc<Cache<D>>,
 }
 
 impl<D: Dev> Nros<D> {
@@ -89,17 +102,22 @@ impl<D: Dev> Nros<D> {
 	}
 
 	/// Load an existing object store.
-	pub async fn load(storage: DevSet<D>, read_cache_size: usize, write_cache_size: usize) -> Result<Self, LoadError<D>> {
+	pub async fn load(
+		storage: DevSet<D>,
+		read_cache_size: usize,
+		write_cache_size: usize,
+	) -> Result<Self, LoadError<D>> {
 		todo!()
 	}
 
-	pub async fn new_object(&mut self) -> Result<u64, Error<D>> {
-		self.store.create().await
+	/// Create an objects.
+	pub async fn create(&mut self) -> Result<u64, Error<D>> {
+		self.store.clone().create().await
 	}
 
-	/// Return IDs for two objects, one at ID and one at ID + 1
-	pub async fn new_object_pair(&mut self) -> Result<u64, Error<D>> {
-		self.store.create_pair().await
+	/// Create two objects, one at ID and one at ID + 1.
+	pub async fn create_pair(&mut self) -> Result<u64, Error<D>> {
+		self.store.clone().create_pair().await
 	}
 
 	/// Decrement the reference count to an object.
@@ -108,35 +126,28 @@ impl<D: Dev> Nros<D> {
 	///
 	/// This function *must not* be used on invalid objects!
 	pub async fn decr_ref(&mut self, id: u64) -> Result<(), Error<D>> {
-		self.store.decrease_refcount(id).await
+		self.store.clone().decrease_refcount(id).await
 	}
 
 	pub async fn move_object(&mut self, to_id: u64, from_id: u64) -> Result<(), Error<D>> {
-		self.store.move_object(from_id, to_id).await
+		self.store.clone().move_object(from_id, to_id).await
 	}
 
-	pub async fn object_len(&mut self, id: u64) -> Result<u64, Error<D>> {
-		self.store.object_len(id).await
-	}
-
-	pub async fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
-		self.store.read(id, offset, buf).await
-	}
-
-	pub async fn write(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
-		self.store.write(id, offset, data).await
-	}
-
-	pub async fn resize(&mut self, id: u64, len: u64) -> Result<(), Error<D>> {
-		self.store.resize(id, len).await
-	}
-
-	pub async fn finish_transaction(&mut self) -> Result<(), Error<D>> {
+	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
 		self.store.finish_transaction().await
 	}
 
 	pub fn block_size(&self) -> BlockSize {
 		self.store.block_size()
+	}
+
+	/// Return an owned reference to an object.
+	///
+	/// # Note
+	///
+	/// This does not check if the object is valid.
+	pub fn get(&self, id: u64) -> Tree<D> {
+		self.store.clone().get(id)
 	}
 }
 

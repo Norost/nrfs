@@ -9,9 +9,13 @@ git = "https://git.sr.ht/~demindiro/arena"
 [dependencies.arrayvec]
 version = "0.7"
 
+[dependencies.async-recursion]
+version = "1.0"
+
 [dependencies.endian]
 package = "nora_endian"
-version = "0.1"
+#version = "0.1"
+git = "https://github.com/Demindiro/nora_endian"
 
 [dependencies.rangemap]
 version = "1.0"

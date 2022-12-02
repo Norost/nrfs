@@ -1,4 +1,4 @@
-type Idx = arena::Handle<u8>;
+pub type Idx = arena::Handle<u8>;
 
 const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
 
@@ -29,22 +29,16 @@ pub struct LruList<V> {
 
 impl<V> Default for LruList<V> {
 	fn default() -> Self {
-		Self {
-			head: IDX_NONE,
-			tail: IDX_NONE,
-			nodes: Default::default(),
-		}
+		Self { head: IDX_NONE, tail: IDX_NONE, nodes: Default::default() }
 	}
 }
 
 impl<V> LruList<V> {
 	/// Insert a new value at the top of the list..
 	pub fn insert(&mut self, value: V) -> Idx {
-		let idx = self.nodes.insert(Node {
-			next: IDX_NONE,
-			prev: IDX_NONE,
-			value,
-		});
+		let idx = self
+			.nodes
+			.insert(Node { next: IDX_NONE, prev: IDX_NONE, value });
 		self.push_front(idx);
 		idx
 	}
@@ -60,7 +54,7 @@ impl<V> LruList<V> {
 	}
 
 	/// Remove a node from the list.
-	/// 
+	///
 	/// # Panics
 	///
 	/// If the node at the index does not exist.
@@ -75,6 +69,11 @@ impl<V> LruList<V> {
 			let idx = self.pop_last();
 			self.nodes.remove(idx).unwrap().value
 		})
+	}
+
+	/// Get a value by node index.
+	pub fn get(&self, index: Idx) -> Option<&V> {
+		self.nodes.get(index).map(|node| &node.value)
 	}
 
 	/// Insert a value at the front of the list.

@@ -2,10 +2,13 @@ mod allocator;
 pub mod dev;
 
 use {
-	crate::{header::Header, Compression, Error, LoadError, MaxRecordSize, Record, NewError, BlockSize},
+	crate::{
+		header::Header, BlockSize, Compression, Error, LoadError, MaxRecordSize, NewError, Record,
+	},
 	alloc::vec::Vec,
 	allocator::Allocator,
 	core::{
+		cell::RefCell,
 		fmt,
 		marker::PhantomData,
 		ops::{Deref, DerefMut, Range},
@@ -29,7 +32,7 @@ where
 	D: Dev,
 {
 	devices: DevSet<D>,
-	allocator: Allocator,
+	allocator: RefCell<Allocator>,
 	max_record_size: MaxRecordSize,
 	block_size: BlockSize,
 	compression: Compression,
@@ -43,22 +46,33 @@ where
 		todo!()
 	}
 
-	pub async fn load(devices: DevSet<D>, record_size: MaxRecordSize, compression: Compression, block_size_p2: u8) -> Result<Self, LoadError<D>> {
+	pub async fn load(
+		devices: DevSet<D>,
+		record_size: MaxRecordSize,
+		compression: Compression,
+		block_size: BlockSize,
+	) -> Result<Self, Error<D>> {
 		let header = devices.header().await;
 		Ok(Self {
-			allocator: Allocator::load(&mut devices, header.allocation_log_lba, header.allocation_log_length)?,
+			allocator: Allocator::load(
+				&devices,
+				header.allocation_log_lba,
+				header.allocation_log_length,
+			)
+			.await?
+			.into(),
 			devices,
 			max_record_size: record_size,
 			compression,
-			block_size_p2,
+			block_size,
 		})
 	}
 
 	/// Read a record.
-	pub async fn read(&mut self, record: &Record) -> Result<Vec<u8>, Error<D>> {
+	pub async fn read(&self, record: &Record) -> Result<Vec<u8>, Error<D>> {
 		if record.lba == 0 {
 			debug_assert!(record.length == 0);
-			return Ok(None);
+			return Ok(Vec::new());
 		}
 		debug_assert!(record.lba != 0);
 
@@ -66,49 +80,69 @@ where
 		let len = record.length.into();
 
 		let count = self.calc_block_count(len);
-		let rd = self.storage.read(lba, count).map_err(Error::Storage)?;
+		let data = self.devices.read(lba, count).await?;
 		let mut v = Vec::new();
 		record
-			.unpack(&rd.get()[..len as _], &mut v, self.max_record_size)
+			.unpack(&data.get()[..len as _], &mut v, self.max_record_size)
 			.map_err(Error::RecordUnpack)?;
 		Ok(v)
 	}
 
 	/// Write a record.
-	pub async fn write(&self, record: &Record, data: &[u8]) -> Result<(), Error<D>> {
+	pub async fn write(&self, data: &[u8]) -> Result<Record, Error<D>> {
+		// Calculate minimum size of buffer necessary for the compression algorithm
+		// to work.
 		let len = self.compression.max_output_size(data.len());
 		let max_blks = self.calc_block_count(len as _);
 		let block_count = self.devices.block_count();
-		
-		self.devices.alloc()
-		let mut w = self.devices.write(max_blks).map_err(Error::Storage)?;
-		let mut rec = Record::pack(&self.data, w.get_mut(), self.cache.compression);
+
+		// Allocate and pack record.
+		let mut buf = self
+			.devices
+			.alloc(max_blks << self.block_size().to_raw())
+			.await?;
+		let mut rec = Record::pack(&data, buf.get_mut(), self.compression);
+
+		// Strip unused blocks from the buffer
 		let blks = self.calc_block_count(rec.length.into());
+		if blks == 0 {
+			// Return empty record.
+			return Ok(Record::default());
+		}
+		buf.shrink(blks << self.block_size().to_raw());
+
+		// Allocate storage space.
 		let lba = self
-			.cache
 			.allocator
+			.borrow_mut()
 			.alloc(blks as _, block_count)
 			.ok_or(Error::NotEnoughSpace)?;
+
+		// Write buffer.
 		rec.lba = lba.into();
-		w.set_region(lba, blks).map_err(Error::Storage)?;
-		w.finish().map_err(Error::Storage)?;
-		self.cache.cache.insert(lba, self.data);
-		self.cache.dirty.insert(lba);
+		self.devices.write(lba, buf).await?;
+
+		// Presto!
 		Ok(rec)
 	}
 
 	/// Destroy a record.
-	pub fn destroy(&mut self, record: &Record) {
-		self.allocator
-			.free(record.lba.into(), self.calc_block_count(record.length.into()) as _)
+	pub fn destroy(&self, record: &Record) {
+		self.allocator.borrow_mut().free(
+			record.lba.into(),
+			self.calc_block_count(record.length.into()) as _,
+		)
 	}
 
 	/// Finish the current transaction.
 	///
 	/// This saves the allocation log, ensures all writes are committed and makes blocks
 	/// freed in this transaction available for the next transaction.
-	pub async fn finish_transaction(&mut self) -> Result<(), Error<D>> {
-		self.allocator.save(&self.devices).await
+	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
+		self.allocator
+			.borrow_mut()
+			.save(&self.devices, self.max_record_size())
+			.await
 	}
 
 	fn calc_block_count(&self, len: u32) -> usize {

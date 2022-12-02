@@ -1,7 +1,9 @@
-use super::{Allocator, Dev, Buf};
-use crate::{RecordTree, BlockSize, header::Header, Error};
-use futures_util::stream::{FuturesUnordered, StreamExt, TryStreamExt};
-use core::future;
+use {
+	super::{Allocator, Buf, Dev},
+	crate::{header::Header, BlockSize, Error, Record},
+	core::future,
+	futures_util::stream::{FuturesUnordered, StreamExt, TryStreamExt},
+};
 
 /// A single device with some extra information.
 #[derive(Debug)]
@@ -32,7 +34,9 @@ impl<D: Dev> DevSet<D> {
 	pub async fn save_headers(&self) -> Result<(), D::Error> {
 		// Allocate buffers for headers & write to tails.
 		let block_size = self.block_size();
-		let fut = self.devices.iter()
+		let fut = self
+			.devices
+			.iter()
 			.map(|chain| {
 				let mut offset = self.block_count;
 				chain.iter().map(move |node| {
@@ -46,9 +50,7 @@ impl<D: Dev> DevSet<D> {
 			.collect::<FuturesUnordered<_>>();
 
 		// Wait for tail futures to finish & collect them.
-		let fut = fut
-			.try_collect::<Vec<_>>()
-			.await?;
+		let fut = fut.try_collect::<Vec<_>>().await?;
 
 		// Now save heads.
 		let fut: FuturesUnordered<_> = fut
@@ -63,12 +65,12 @@ impl<D: Dev> DevSet<D> {
 	/// Read a range of blocks.
 	///
 	/// A chain blacklist can be used in case corrupt data was returned.
-	pub async fn read(&self, lba: u64, count: usize) -> Result<<D::Allocator as Allocator>::Buf<'_>, Error<D>> {
+	pub async fn read(&self, lba: u64, count: usize) -> Result<SetBuf<D>, Error<D>> {
 		todo!()
 	}
 
 	/// Write a range of blocks.
-	pub async fn write(&self, lba: u64, data: <D::Allocator as Allocator>::Buf<'_>) -> Result<(), Error<D>> {
+	pub async fn write(&self, lba: u64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
 		todo!()
 	}
 
@@ -78,8 +80,14 @@ impl<D: Dev> DevSet<D> {
 	}
 
 	/// Allocate memory for writing.
-	pub async fn alloc(&self, len: usize) -> Result<<D::Allocator as Allocator>::Buf<'_>, Error<D>> {
-		self.devices[0][0].dev.allocator().alloc(len).await.map_err(Error::Dev)
+	pub async fn alloc(&self, size: usize) -> Result<SetBuf<'_, D>, Error<D>> {
+		self.devices[0][0]
+			.dev
+			.allocator()
+			.alloc(size)
+			.await
+			.map(SetBuf)
+			.map_err(Error::Dev)
 	}
 
 	/// Get a generic header.
@@ -101,6 +109,30 @@ impl<D: Dev> DevSet<D> {
 	}
 }
 
+/// Buffer for use with [`DevSet`].
+pub struct SetBuf<'a, D: Dev + 'a>(<D::Allocator as Allocator>::Buf<'a>);
+
+impl<D: Dev> SetBuf<'_, D> {
+	/// Get an immutable reference to the data.
+	pub fn get(&self) -> &[u8] {
+		self.0.get()
+	}
+
+	/// Get a mutable reference to the data.
+	pub fn get_mut(&mut self) -> &mut [u8] {
+		self.0.get_mut()
+	}
+
+	/// Deallocate blocks at the tail until the desired size is reached.
+	///
+	/// # Panics
+	///
+	/// If the new size is larger than the current size.
+	pub fn shrink(&mut self, size: usize) {
+		todo!()
+	}
+}
+
 /// Generic NROS header.
 /// That is, a header that has no device-specific information.
 pub struct GenericHeader {
@@ -113,7 +145,7 @@ pub struct GenericHeader {
 
 	pub total_block_count: u64,
 
-	pub object_list: RecordTree,
+	pub object_list: Record,
 
 	pub allocation_log_lba: u64,
 	pub allocation_log_length: u64,
@@ -122,26 +154,28 @@ pub struct GenericHeader {
 }
 
 /// Create a header for writing to a device.
-async fn create_header<D: Dev>(block_size: BlockSize, dev: &D, start: u64, len: u64) -> Result<<D::Allocator as Allocator>::Buf<'_>, D::Error> {
-	let mut header = Header {
-		..todo!()
-	};
+async fn create_header<D: Dev>(
+	block_size: BlockSize,
+	dev: &D,
+	start: u64,
+	len: u64,
+) -> Result<<D::Allocator as Allocator>::Buf<'_>, D::Error> {
+	let mut header = Header { ..todo!() };
 	header.update_xxh3();
 
 	let mut buf = dev.allocator().alloc(1 << block_size.to_raw()).await?;
-	//let buf = buf.get_mut().await?; // FIXME wtf?
-	let b = buf.get_mut().await.unwrap_or_else(|_| todo!());
-	b[..header.as_ref().len()].copy_from_slice(header.as_ref());
+	buf.get_mut()[..header.as_ref().len()].copy_from_slice(header.as_ref());
 	Ok(buf)
 }
 
 /// Save a single header to a device.
-async fn save_header<D: Dev>(tail: bool, dev: &D, len: u64, header: <D::Allocator as Allocator>::Buf<'_>) -> Result<(), D::Error> {
-	let lba = if tail {
-		0
-	} else {
-		len
-	};
+async fn save_header<D: Dev>(
+	tail: bool,
+	dev: &D,
+	len: u64,
+	header: <D::Allocator as Allocator>::Buf<'_>,
+) -> Result<(), D::Error> {
+	let lba = if tail { 0 } else { len };
 
 	dev.write(lba, header);
 	dev.fence().await

@@ -10,11 +10,12 @@
 mod mem;
 mod set;
 
-pub use mem::{MemDev, MemDevError};
-pub use set::DevSet;
+pub use {
+	mem::{MemDev, MemDevError},
+	set::DevSet,
+};
 
-use crate::BlockSize;
-use core::future::Future;
+use {crate::BlockSize, core::future::Future};
 
 pub trait Dev {
 	/// Error that may be returned by the device.
@@ -30,8 +31,16 @@ pub trait Dev {
 	type ReadTask<'a>: Future<Output = Result<<Self::Allocator as Allocator>::Buf<'a>, Self::Error>>
 	where
 		Self: 'a;
+	/// Task that represents a pending write operation.
+	///
+	/// This task may finish before the data has been flushed.
+	type WriteTask<'a>: Future<Output = Result<(), Self::Error>>
+	where
+		Self: 'a;
 	/// Task that represents a pending fence operation.
-	type FenceTask: Future<Output = Result<(), Self::Error>>;
+	type FenceTask<'a>: Future<Output = Result<(), Self::Error>>
+	where
+		Self: 'a;
 
 	/// The amount of useable blocks.
 	fn block_count(&self) -> u64;
@@ -40,26 +49,16 @@ pub trait Dev {
 	fn block_size(&self) -> BlockSize;
 
 	/// Read a range of blocks.
-	fn read(
-		&self,
-		lba: u64,
-		len: usize,
-	) -> Self::ReadTask<'_>;
+	fn read(&self, lba: u64, len: usize) -> Self::ReadTask<'_>;
 
 	/// Write data.
-	///
-	/// Any errors that may occur during writing should be returned by [`Self::FenceTask`].
 	///
 	/// # Panics
 	///
 	/// If `len > buf.len()`.
 	///
 	/// If a fence is in progress.
-	fn write(
-		&self,
-		lba: u64,
-		buf: <Self::Allocator as Allocator>::Buf<'_>,
-	);
+	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_>;
 
 	/// Execute a fence.
 	///
@@ -69,7 +68,7 @@ pub trait Dev {
 	/// # Panics
 	///
 	/// If a fence is already in progress.
-	fn fence(&self) -> Self::FenceTask;
+	fn fence(&self) -> Self::FenceTask<'_>;
 
 	/// Get the memory allocator used by this device.
 	/// Used to allocate buffers for writing.
@@ -91,10 +90,7 @@ pub trait Allocator {
 	/// Allocate a buffer.
 	/// `size` is in bytes.
 	///
-	/// This uses a shared ("immutable") reference as multiple devices may use this allocator
-	/// at once.
-	///
-	/// The buffer may be larger than the requested size.
+	/// The returned buffer **must** have a unique reference to its storage.
 	fn alloc(&self, size: usize) -> Self::AllocTask<'_>;
 }
 
@@ -103,9 +99,6 @@ pub trait Buf: Sized {
 	/// Error that may occur when implicitly cloning.
 	type Error;
 	/// Task that may create a copy of this buffer.
-	type MutTask<'a>: Future<Output = Result<&'a mut [u8], Self::Error>>
-	where
-		Self: 'a;
 	type CloneTask: Future<Output = Result<Self, Self::Error>>;
 
 	/// Get an immutable reference to the buffer.
@@ -113,9 +106,12 @@ pub trait Buf: Sized {
 
 	/// Get a mutable reference to the buffer.
 	///
-	/// This may make a copy of the data.
-	/// As this may require a new allocation it is async.
-	fn get_mut(&mut self) -> Self::MutTask<'_>;
+	/// This may only be called if no copies have been
+	///
+	/// # Panics
+	///
+	/// If [`Self::deep_clone`] was called on this buffer.
+	fn get_mut(&mut self) -> &mut [u8];
 
 	fn deep_clone(&self) -> Self::CloneTask;
 }
