@@ -31,26 +31,32 @@ pub struct Allocator {
 }
 
 impl Allocator {
-	pub async fn load<D>(devices: &DevSet<D>, lba: u64, len: u64) -> Result<Self, Error<D>>
+	pub async fn load<D>(devices: &DevSet<D>) -> Result<Self, Error<D>>
 	where
 		D: Dev,
 	{
+		let (lba, len) = (devices.allocation_log_lba, devices.allocation_log_length);
+
 		let mut alloc_map = RangeSet::new();
-		let block_size = 1 << devices.block_size().to_raw();
-		let blocks = (len + block_size - 1) / block_size;
-		let rd = devices.read(lba, blocks.try_into().unwrap()).await?;
-		for r in rd.get()[..len as _].chunks_exact(16) {
-			let start = u64::from_le_bytes(r[..8].try_into().unwrap());
-			let len = u64::from_le_bytes(r[8..].try_into().unwrap());
-			if len & !(1 << 63) == 0 {
-				continue;
-			}
-			if len & 1 << 63 != 0 {
-				alloc_map.remove(start..start + len ^ 1 << 63);
-			} else {
-				alloc_map.insert(start..start + len);
+
+		if len > 0 {
+			let block_size = 1 << devices.block_size().to_raw();
+			let blocks = (len + block_size - 1) / block_size;
+			let rd = devices.read(lba, blocks.try_into().unwrap()).await?;
+			for r in rd.get()[..len as _].chunks_exact(16) {
+				let start = u64::from_le_bytes(r[..8].try_into().unwrap());
+				let len = u64::from_le_bytes(r[8..].try_into().unwrap());
+				if len & !(1 << 63) == 0 {
+					continue;
+				}
+				if len & 1 << 63 != 0 {
+					alloc_map.remove(start..start + len ^ 1 << 63);
+				} else {
+					alloc_map.insert(start..start + len);
+				}
 			}
 		}
+
 		Ok(Self { alloc_map, free_map: Default::default(), dirty_map: Default::default() })
 	}
 

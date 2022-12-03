@@ -1,6 +1,6 @@
 use {
 	super::{Allocator, Buf, Dev},
-	crate::{header::Header, BlockSize, Error, Record},
+	crate::{header::Header, BlockSize, Compression, Error, MaxRecordSize, Record},
 	core::future,
 	futures_util::stream::{FuturesUnordered, StreamExt, TryStreamExt},
 };
@@ -23,11 +23,102 @@ pub struct DevSet<D: Dev> {
 	devices: Box<[Box<[Node<D>]>]>,
 	/// The size of a block.
 	block_size: BlockSize,
+	/// The maximum size of a single record.
+	max_record_size: MaxRecordSize,
+	/// The default compression to use for records.
+	compression: Compression,
 	/// The total amount of blocks covered in each chain.
 	block_count: u64,
+
+	pub allocation_log_lba: u64,
+	pub allocation_log_length: u64,
 }
 
 impl<D: Dev> DevSet<D> {
+	/// Create a new device set.
+	///
+	/// # Note
+	///
+	/// This writes new headers to the devices.
+	///
+	/// # Panics
+	///
+	/// If `mirror` is empty.
+	///
+	/// If any chain is empty.
+	///
+	/// If any device has no blocks.
+	pub async fn new<M, C>(
+		mirrors: M,
+		block_size: BlockSize,
+		max_record_size: MaxRecordSize,
+		compression: Compression,
+	) -> Result<Self, Error<D>>
+	where
+		M: IntoIterator<Item = C>,
+		C: IntoIterator<Item = D>,
+	{
+		// Collect devices into a convenient format.
+		let mut devices = mirrors
+			.into_iter()
+			.map(|chain| {
+				chain
+					.into_iter()
+					.map(|dev| Node { dev, block_offset: 0 })
+					.collect::<Box<_>>()
+			})
+			.collect::<Box<_>>();
+
+		assert!(devices.iter().all(|c| !c.is_empty()), "empty chain");
+		assert!(
+			devices
+				.iter()
+				.flat_map(|c| c.iter())
+				.all(|d| d.dev.block_count() > 0),
+			"device with no blocks"
+		);
+
+		// FIXME support mismatched block sizes.
+		assert!(
+			devices
+				.iter()
+				.flat_map(|c| c.iter())
+				.all(|d| d.dev.block_size().to_raw() == block_size.to_raw()),
+			"todo: support mismatched block sizes"
+		);
+
+		// Determine length of smallest chain.
+		let block_count = devices
+			.iter()
+			.map(|c| c.iter().map(|d| d.dev.block_count()).sum())
+			.min()
+			.expect("no chains");
+
+		// Assign block offsets to devices in chains and write headers.
+		for chain in devices.iter_mut() {
+			let mut block_offset = 0;
+			for node in chain.iter_mut() {
+				node.block_offset = block_offset;
+				block_offset += node.dev.block_count();
+			}
+		}
+
+		Ok(Self {
+			devices,
+			block_size,
+			max_record_size,
+			compression,
+			block_count,
+			allocation_log_lba: 0,
+			allocation_log_length: 0,
+		})
+	}
+
+	/// Load an existing device set.
+	pub async fn load<I>(devices: I) -> Result<Self, Error<D>> {
+		todo!()
+	}
+
 	/// Save headers to the head or tail all devices.
 	///
 	/// Headers **must** always be saved at the tail before the head.
@@ -90,17 +181,22 @@ impl<D: Dev> DevSet<D> {
 			.map_err(Error::Dev)
 	}
 
-	/// Get a generic header.
-	pub async fn header(&self) -> GenericHeader {
-		todo!()
-	}
-
 	/// The block size used by this device set.
 	///
 	/// This may differ from the underlying devices.
 	/// The device set will automatically compensate for this.
 	pub fn block_size(&self) -> BlockSize {
 		self.block_size
+	}
+
+	/// The maximum size of a single record.
+	pub fn max_record_size(&self) -> MaxRecordSize {
+		self.max_record_size
+	}
+
+	/// The default compression to use for records.
+	pub fn compression(&self) -> Compression {
+		self.compression
 	}
 
 	/// The total amount of blocks addressable by this device set.
@@ -135,15 +231,11 @@ impl<D: Dev> SetBuf<'_, D> {
 
 /// Generic NROS header.
 /// That is, a header that has no device-specific information.
+#[derive(Clone, Copy, Debug)]
 pub struct GenericHeader {
 	pub version: u32,
-	pub block_length_p2: u8,
-	pub max_record_length_p2: u8,
-	pub compression: u8,
 	pub mirror_count: u8,
 	pub uid: u64,
-
-	pub total_block_count: u64,
 
 	pub object_list: Record,
 

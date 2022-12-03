@@ -76,12 +76,12 @@ pub use {
 	cache::Tree,
 	record::{Compression, MaxRecordSize},
 	storage::{
-		dev::{Allocator, Buf},
-		Dev, DevSet, Store,
+		dev::{Allocator, Buf, MemDev, MemDevError},
+		Dev, Store,
 	},
 };
 
-use {cache::Cache, core::fmt, record::Record, std::rc::Rc};
+use {cache::Cache, core::fmt, record::Record, std::rc::Rc, storage::DevSet};
 
 #[derive(Debug)]
 pub struct Nros<D: Dev> {
@@ -91,23 +91,45 @@ pub struct Nros<D: Dev> {
 
 impl<D: Dev> Nros<D> {
 	/// Create a new object store.
-	pub fn new(
-		storage: DevSet<D>,
+	pub async fn new<M, C>(
+		mirrors: M,
+		block_size: BlockSize,
 		max_record_size: MaxRecordSize,
 		compression: Compression,
-		cache_size: usize,
-		block_size: BlockSize,
-	) -> Result<Self, NewError<D>> {
-		todo!()
+		read_cache_size: usize,
+		write_cache_size: usize,
+	) -> Result<Self, Error<D>>
+	where
+		M: IntoIterator<Item = C>,
+		C: IntoIterator<Item = D>,
+	{
+		let devs = DevSet::new(mirrors, block_size, max_record_size, compression).await?;
+		Self::load_inner(devs, read_cache_size, write_cache_size).await
 	}
 
 	/// Load an existing object store.
-	pub async fn load(
-		storage: DevSet<D>,
+	pub async fn load<I>(
+		devices: I,
 		read_cache_size: usize,
 		write_cache_size: usize,
-	) -> Result<Self, LoadError<D>> {
-		todo!()
+	) -> Result<Self, Error<D>>
+	where
+		I: IntoIterator<Item = D>,
+	{
+		let devs = DevSet::load(devices).await?;
+		Self::load_inner(devs, read_cache_size, write_cache_size).await
+	}
+
+	/// Load an object store.
+	pub async fn load_inner(
+		devices: DevSet<D>,
+		read_cache_size: usize,
+		write_cache_size: usize,
+	) -> Result<Self, Error<D>> {
+		let store = Store::new(devices).await.map_err(|_| todo!())?;
+		let store = Cache::new(store, read_cache_size, write_cache_size);
+		let store = Rc::new(store);
+		Ok(Self { store })
 	}
 
 	/// Create an objects.

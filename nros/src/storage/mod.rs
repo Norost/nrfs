@@ -33,38 +33,20 @@ where
 {
 	devices: DevSet<D>,
 	allocator: RefCell<Allocator>,
-	max_record_size: MaxRecordSize,
-	block_size: BlockSize,
-	compression: Compression,
 }
 
 impl<D> Store<D>
 where
 	D: Dev,
 {
-	pub fn new(devices: DevSet<D>) -> Result<Self, NewError<D>> {
-		todo!()
-	}
-
-	pub async fn load(
-		devices: DevSet<D>,
-		record_size: MaxRecordSize,
-		compression: Compression,
-		block_size: BlockSize,
-	) -> Result<Self, Error<D>> {
-		let header = devices.header().await;
+	pub async fn new(devices: DevSet<D>) -> Result<Self, Error<D>> {
 		Ok(Self {
 			allocator: Allocator::load(
 				&devices,
-				header.allocation_log_lba,
-				header.allocation_log_length,
 			)
 			.await?
 			.into(),
 			devices,
-			max_record_size: record_size,
-			compression,
-			block_size,
 		})
 	}
 
@@ -83,7 +65,7 @@ where
 		let data = self.devices.read(lba, count).await?;
 		let mut v = Vec::new();
 		record
-			.unpack(&data.get()[..len as _], &mut v, self.max_record_size)
+			.unpack(&data.get()[..len as _], &mut v, self.max_record_size())
 			.map_err(Error::RecordUnpack)?;
 		Ok(v)
 	}
@@ -92,7 +74,7 @@ where
 	pub async fn write(&self, data: &[u8]) -> Result<Record, Error<D>> {
 		// Calculate minimum size of buffer necessary for the compression algorithm
 		// to work.
-		let len = self.compression.max_output_size(data.len());
+		let len = self.compression().max_output_size(data.len());
 		let max_blks = self.calc_block_count(len as _);
 		let block_count = self.devices.block_count();
 
@@ -101,7 +83,7 @@ where
 			.devices
 			.alloc(max_blks << self.block_size().to_raw())
 			.await?;
-		let mut rec = Record::pack(&data, buf.get_mut(), self.compression);
+		let mut rec = Record::pack(&data, buf.get_mut(), self.compression());
 
 		// Strip unused blocks from the buffer
 		let blks = self.calc_block_count(rec.length.into());
@@ -151,11 +133,15 @@ where
 	}
 
 	pub fn block_size(&self) -> BlockSize {
-		self.block_size
+		self.devices.block_size()
 	}
 
 	pub fn max_record_size(&self) -> MaxRecordSize {
-		self.max_record_size
+		self.devices.max_record_size()
+	}
+
+	pub fn compression(&self) -> Compression {
+		self.devices.compression()
 	}
 }
 
