@@ -100,7 +100,7 @@ impl Allocator for MemAllocator {
 		Self: 'a;
 
 	fn alloc(&self, size: usize) -> Self::AllocTask<'_> {
-		todo!()
+		future::ready(Ok(MemBuf(vec![0; size].into())))
 	}
 }
 

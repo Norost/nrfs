@@ -1,6 +1,8 @@
 mod lru;
 mod tree;
 
+use std::hash;
+
 pub use tree::Tree;
 
 use {
@@ -29,16 +31,19 @@ struct Key {
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
 const OBJECT_LIST_ID: u64 = u64::MAX;
 
-/// The maximum depth of a record tree.
-///
-/// A record tree can contain up to 2^64 bytes of data.
-/// The maximum record size is 8 KiB = 2^13 bytes.
-/// Each record is 32 = 2^5 bytes large.
-///
-/// Ergo, maximum depth is `ceil((64 - 13) / (13 - 5)) + 1 = 8`, including leaves.
-///
-/// However, we don't need to include the root itself, so substract one -> `8 - 1 = 7`.
-const MAX_DEPTH: u8 = 7;
+/// A single cached record tree.
+#[derive(Debug)]
+struct TreeData {
+	/// The current length of the tree.
+	///
+	/// This may not match the length stored in the root if the tree was resized.
+	length: u64,
+	/// Cached records.
+	///
+	/// The index in the array is correlated with depth.
+	/// The key is correlated with offset.
+	data: Box<[FxHashMap<u64, Entry>]>,
+}
 
 /// Cache data.
 #[derive(Debug)]
@@ -47,7 +52,7 @@ pub(crate) struct CacheData {
 	///
 	/// The key, in order, is `(id, depth, offset)`.
 	/// Using separate hashmaps allows using only a prefix of the key.
-	data: FxHashMap<u64, [FxHashMap<u64, Entry>; MAX_DEPTH as _]>,
+	data: FxHashMap<u64, TreeData>,
 	/// Linked list for global LRU evictions.
 	global_lru: lru::LruList<(u64, u8, u64)>,
 	/// Linked list for flushing dirty records.
@@ -65,9 +70,11 @@ pub(crate) struct CacheData {
 	global_cache_size: usize,
 	/// The total amount of dirty cached bytes.
 	write_cache_size: usize,
-	/// Cache entries that are currently in use and must not be evicted.
-	locked: FxHashMap<(u64, u8, u64), usize>,
-	/// Cache entries that are currently being fetched.
+	/// Object entries that are currently in use and must not be evicted.
+	locked_objects: FxHashMap<u64, usize>,
+	/// Record entries that are currently in use and must not be evicted.
+	locked_records: FxHashMap<(u64, u8, u64), usize>,
+	/// Record entries that are currently being fetched.
 	fetching: FxHashMap<(u64, u8, u64), Vec<Waker>>,
 	/// Used object IDs.
 	used_objects_ids: RangeSet<u64>,
@@ -109,7 +116,8 @@ impl<D: Dev> Cache<D> {
 				write_cache_max,
 				global_cache_size: 0,
 				write_cache_size: 0,
-				locked: Default::default(),
+				locked_objects: Default::default(),
+				locked_records: Default::default(),
 				fetching: Default::default(),
 				used_objects_ids: Default::default(),
 			}),
@@ -139,7 +147,7 @@ impl<D: Dev> Cache<D> {
 		let offset = id * (mem::size_of::<Record>() as u64);
 		let min_len = offset + u64::try_from(data.len()).unwrap();
 
-		let list = self.get(OBJECT_LIST_ID);
+		let list = Tree::new_object_list(self).await?;
 
 		if min_len > list.len().await? {
 			list.resize(min_len).await?;
@@ -150,39 +158,39 @@ impl<D: Dev> Cache<D> {
 
 	async fn read_object_table(self: Rc<Self>, id: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
 		let offset = id * (mem::size_of::<Record>() as u64);
-		self.get(OBJECT_LIST_ID).read(offset, buf).await
+		Tree::new_object_list(self).await?.read(offset, buf).await
 	}
 
 	/// Create an object.
-	pub async fn create(self: Rc<Self>) -> Result<u64, Error<D>> {
+	pub async fn create(self: Rc<Self>) -> Result<Tree<D>, Error<D>> {
 		let id = self.alloc_ids(1);
-		self.write_object_table(
-			id,
-			Record { references: 1.into(), ..Default::default() }.as_ref(),
-		)
-		.await?;
-		Ok(id)
+		self.clone()
+			.write_object_table(
+				id,
+				Record { references: 1.into(), ..Default::default() }.as_ref(),
+			)
+			.await?;
+		Tree::new(self, id).await
 	}
 
 	/// Create a pair of objects.
 	/// The second object has ID + 1.
-	pub async fn create_pair(self: Rc<Self>) -> Result<u64, Error<D>> {
+	pub async fn create_pair(self: Rc<Self>) -> Result<(Tree<D>, Tree<D>), Error<D>> {
 		let id = self.alloc_ids(2);
 		let rec = Record { references: 1.into(), ..Default::default() };
 		let mut b = [0; 2 * mem::size_of::<Record>()];
 		b[..mem::size_of::<Record>()].copy_from_slice(rec.as_ref());
 		b[mem::size_of::<Record>()..].copy_from_slice(rec.as_ref());
-		self.write_object_table(id, &b).await?;
-		Ok(id)
+		self.clone().write_object_table(id, &b).await?;
+
+		let a = Tree::new(self.clone(), id).await?;
+		let b = Tree::new(self, id).await?;
+		Ok((a, b))
 	}
 
 	/// Get an object.
-	///
-	/// # Note
-	///
-	/// This does not check if the object is valid.
-	pub fn get(self: Rc<Self>, id: u64) -> Tree<D> {
-		Tree::new(self, id)
+	pub async fn get(self: Rc<Self>, id: u64) -> Result<Tree<D>, Error<D>> {
+		Tree::new(self, id).await
 	}
 
 	/// Destroy a record and it's associated cache entry, if any.
@@ -190,7 +198,7 @@ impl<D: Dev> Cache<D> {
 		let mut data = self.data.borrow_mut();
 		let data = &mut *data; // ok, mr. borrow checker
 		if let Some(obj) = data.data.get_mut(&id) {
-			if let Some(entry) = obj[usize::from(depth)].remove(&id) {
+			if let Some(entry) = obj.data[usize::from(depth)].remove(&id) {
 				// Remove entry from LRUs
 				let len = entry.data.len(); // TODO len() or capacity()?;
 				data.global_lru.remove(entry.global_index);
@@ -202,7 +210,7 @@ impl<D: Dev> Cache<D> {
 				}
 
 				// Remove object if there is no cached data for it.
-				if obj.iter().all(|m| m.is_empty()) {
+				if obj.data.iter().all(|m| m.is_empty()) {
 					data.data.remove(&id);
 				}
 			}
@@ -218,7 +226,7 @@ impl<D: Dev> Cache<D> {
 	pub async fn move_object(self: Rc<Self>, from: u64, to: u64) -> Result<(), Error<D>> {
 		let mut rec = Record::default();
 		// Free allocations
-		self.clone().get(to).resize(0).await?;
+		self.clone().get(to).await?.resize(0).await?;
 		// Copy
 		let l = self.clone().read_object_table(from, rec.as_mut()).await?;
 		assert!(l > 0, "ID out of range");
@@ -262,7 +270,7 @@ impl<D: Dev> Cache<D> {
 
 	/// Finish the current transaction, committing any changes to the underlying devices.
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
-		todo!()
+		self.store.finish_transaction().await
 	}
 
 	/// The block size used by the underlying [`Store`].
@@ -286,60 +294,81 @@ impl<D: Dev> Cache<D> {
 	///
 	/// If the entry is already being fetched,
 	/// the caller is instead added to a list to be waken up when the fetcher has finished.
-	fn fetch_entry(
+	async fn fetch_entry(
 		self: Rc<Self>,
 		id: u64,
 		depth: u8,
 		offset: u64,
 		record: &Record,
-	) -> impl Future<Output = Result<CacheRef<D>, Error<D>>> {
-		enum State {
-			/// Currently not doing anything.
-			// TODO we can remove this stage by running it outside the future,
-			// i.e. before returning the future.
-			Idle,
-			/// Currently fetching the record.
-			Fetching,
-			/// Waiting for other fetcher to finish.
-			WaitFetcher,
+	) -> Result<CacheRef<D>, Error<D>> {
+		// Lock now so the entry doesn't get fetched and evicted midway.
+		let mut entry = self.clone().lock_entry(id, depth, offset);
+
+		if self.has_entry(id, depth, offset) {
+			return Ok(entry);
 		}
 
-		let mut state = State::Idle;
-		// Lock now so that the entry doesn't get evicted if already present.
-		let mut entry = Some(self.clone().lock_entry(id, depth, offset));
+		let mut data = self.data.borrow_mut();
+		match data.fetching.entry((id, depth, offset)) {
+			hash_map::Entry::Vacant(e) => {
+				// Add list for other fetchers to register wakers to.
+				e.insert(Default::default());
+				drop(data);
 
-		future::poll_fn(move |cx| match state {
-			State::Idle => {
-				if self.has_entry(id, depth, offset) {
-					return Poll::Ready(Ok(entry.take().expect("poll after finish")));
-				}
+				// Fetch record
+				// This will be polled in the if branch below
+				// FIXME if we return here other fetchers may end up waiting indefinitely.
+				let d = self.store.read(record).await?;
+				let data = { &mut *self.data.borrow_mut() };
+				let prev = data.data.get_mut(&id).expect("object does not exist").data
+					[usize::from(depth)]
+				.insert(
+					offset,
+					Entry {
+						data: d,
+						global_index: data.global_lru.insert((id, depth, offset)),
+						write_index: None,
+					},
+				);
+				debug_assert!(prev.is_none(), "entry was already present");
 
-				let mut cache = self.data.borrow_mut();
-				match cache.fetching.entry((id, depth, offset)) {
-					hash_map::Entry::Vacant(e) => {
-						e.insert(Default::default());
-						drop(cache);
-						todo!();
-						state = State::Fetching;
+				// Wake other tasks waiting for this entry.
+				data.fetching
+					.remove(&(id, depth, offset))
+					.expect("no wakers list")
+					.into_iter()
+					.for_each(|w| w.wake());
+
+				// Done
+				Ok(entry)
+			}
+			hash_map::Entry::Occupied(_) => {
+				// Wait until the fetcher for this record finishes.
+				drop(data);
+
+				let mut entry = Some(entry);
+
+				// TODO how should we deal with errors that may occur in the fetcher?
+				// TODO kinda ugly IMO.
+				// Is there a cleaner way to write this, without poll_fn perhaps?
+				future::poll_fn(move |cx| {
+					if self.clone().has_entry(id, depth, offset) {
+						Poll::Ready(Ok(entry.take().expect("poll after finish")))
+					} else {
+						let mut data = self.data.borrow_mut();
+						let wakers = data
+							.fetching
+							.get_mut(&(id, depth, offset))
+							.expect("no wakers list");
+						if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
+							wakers.push(cx.waker().clone());
+						}
+						Poll::Pending
 					}
-					hash_map::Entry::Occupied(mut e) => {
-						e.get_mut().push(cx.waker().clone());
-						state = State::WaitFetcher;
-					}
-				}
-				Poll::Pending
+				})
+				.await
 			}
-			State::Fetching => {
-				todo!();
-			}
-			State::WaitFetcher => {
-				if self.has_entry(id, depth, offset) {
-					Poll::Ready(Ok(entry.take().expect("poll after finish")))
-				} else {
-					Poll::Pending
-				}
-			}
-		})
+		}
 	}
 
 	/// Check if a cache entry is present.
@@ -348,7 +377,7 @@ impl<D: Dev> Cache<D> {
 			.borrow()
 			.data
 			.get(&id)
-			.and_then(|m| m[usize::from(depth)].get(&offset))
+			.and_then(|m| m.data[usize::from(depth)].get(&offset))
 			.is_some()
 	}
 
@@ -363,7 +392,8 @@ impl<D: Dev> Cache<D> {
 		Ref::map(self.data.borrow(), |data| {
 			data.data
 				.get(&id)
-				.expect("cache entry by id does not exist")[usize::from(depth)]
+				.expect("cache entry by id does not exist")
+				.data[usize::from(depth)]
 			.get(&offset)
 			.expect("cache entry by offset does not exist")
 		})
@@ -391,7 +421,8 @@ impl<D: Dev> Cache<D> {
 			let entry = data
 				.data
 				.get_mut(&id)
-				.expect("cache entry by id does not exist")[usize::from(depth)]
+				.expect("cache entry by id does not exist")
+				.data[usize::from(depth)]
 			.get_mut(&offset)
 			.expect("cache entry by offset does not exist");
 
@@ -421,6 +452,11 @@ impl<D: Dev> Cache<D> {
 
 		result.map(|()| entry)
 	}
+
+	/// Get the root record of the object list.
+	fn object_list(&self) -> Record {
+		self.store.object_list()
+	}
 }
 
 /// A cache entry.
@@ -448,7 +484,7 @@ impl<D: Dev> CacheRef<D> {
 		*cache
 			.data
 			.borrow_mut()
-			.locked
+			.locked_records
 			.entry((id, depth, offset))
 			.or_default() += 1;
 		Self { cache, id, depth, offset }
@@ -491,12 +527,12 @@ impl<D: Dev> Drop for CacheRef<D> {
 		let mut tree = self.cache.data.borrow_mut();
 		let key = (self.id, self.depth, self.offset);
 		let count = tree
-			.locked
+			.locked_records
 			.get_mut(&key)
-			.expect("cache entry is not locked");
+			.expect("record entry is not locked");
 		*count -= 1;
 		if *count == 0 {
-			tree.locked.remove(&key);
+			tree.locked_records.remove(&key);
 		}
 	}
 }

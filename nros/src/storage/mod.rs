@@ -40,14 +40,7 @@ where
 	D: Dev,
 {
 	pub async fn new(devices: DevSet<D>) -> Result<Self, Error<D>> {
-		Ok(Self {
-			allocator: Allocator::load(
-				&devices,
-			)
-			.await?
-			.into(),
-			devices,
-		})
+		Ok(Self { allocator: Allocator::load(&devices).await?.into(), devices })
 	}
 
 	/// Read a record.
@@ -142,6 +135,11 @@ where
 
 	pub fn compression(&self) -> Compression {
 		self.devices.compression()
+	}
+
+	/// Get the root record of the object list.
+	pub fn object_list(&self) -> Record {
+		self.devices.object_list
 	}
 }
 

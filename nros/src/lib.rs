@@ -3,6 +3,7 @@
 #![feature(int_roundings)]
 #![feature(nonzero_min_max)]
 #![feature(pin_macro)]
+#![feature(type_alias_impl_trait)]
 
 extern crate alloc;
 
@@ -132,13 +133,13 @@ impl<D: Dev> Nros<D> {
 		Ok(Self { store })
 	}
 
-	/// Create an objects.
-	pub async fn create(&mut self) -> Result<u64, Error<D>> {
+	/// Create an object.
+	pub async fn create(&mut self) -> Result<Tree<D>, Error<D>> {
 		self.store.clone().create().await
 	}
 
 	/// Create two objects, one at ID and one at ID + 1.
-	pub async fn create_pair(&mut self) -> Result<u64, Error<D>> {
+	pub async fn create_pair(&mut self) -> Result<(Tree<D>, Tree<D>), Error<D>> {
 		self.store.clone().create_pair().await
 	}
 
@@ -164,12 +165,8 @@ impl<D: Dev> Nros<D> {
 	}
 
 	/// Return an owned reference to an object.
-	///
-	/// # Note
-	///
-	/// This does not check if the object is valid.
-	pub fn get(&self, id: u64) -> Tree<D> {
-		self.store.clone().get(id)
+	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
+		self.store.clone().get(id).await
 	}
 }
 

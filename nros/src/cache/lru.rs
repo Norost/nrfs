@@ -89,8 +89,9 @@ impl<V> LruList<V> {
 		} else {
 			// Make previous head point to new head.
 			debug_assert!(self.tail != IDX_NONE);
-			debug_assert!(self.nodes[self.head].next != IDX_NONE);
+			debug_assert!(self.nodes[self.head].next == IDX_NONE);
 			self.nodes[self.head].next = index;
+			self.nodes[index].prev = self.head;
 		}
 		self.head = index;
 	}
@@ -118,9 +119,15 @@ impl<V> LruList<V> {
 		// Remove from head and tail
 		if index == self.tail {
 			self.tail = next;
+			if next != IDX_NONE {
+				self.nodes[next].prev = IDX_NONE;
+			}
 		}
 		if index == self.head {
 			self.head = prev;
+			if prev != IDX_NONE {
+				self.nodes[prev].next = IDX_NONE;
+			}
 		}
 	}
 }

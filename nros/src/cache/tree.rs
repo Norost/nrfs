@@ -1,21 +1,24 @@
+use std::borrow::Borrow;
+
 use {
-	super::{Cache, CacheData, CacheRef, OBJECT_LIST_ID},
+	super::{Cache, CacheData, CacheRef, TreeData, OBJECT_LIST_ID},
 	crate::{Dev, DevSet, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{RefCell, RefMut},
 		mem,
 		ops::RangeInclusive,
 	},
-	std::{
-		collections::btree_map::{BTreeMap, Entry},
-		rc::Rc,
-	},
+	std::{collections::hash_map, rc::Rc},
 };
 
 const RECORD_SIZE: u64 = mem::size_of::<Record>() as _;
 const RECORD_SIZE_P2: u8 = mem::size_of::<Record>().ilog2() as _;
 
 /// Implementation of a record tree.
+///
+/// As long as a `Tree` object for a specific ID is alive its [`TreeData`] entry will not be
+/// evicted.
+// FIXME guarantee TreeData will not be evicted (with locks?).
 #[derive(Clone, Debug)]
 pub struct Tree<D: Dev> {
 	/// Underlying cache.
@@ -25,8 +28,70 @@ pub struct Tree<D: Dev> {
 }
 
 impl<D: Dev> Tree<D> {
-	pub(super) fn new(cache: Rc<Cache<D>>, id: u64) -> Self {
-		Self { cache, id }
+	/// Access a tree.
+	pub(super) async fn new(cache: Rc<Cache<D>>, id: u64) -> Result<Self, Error<D>> {
+		// Alas, async recursion is hard
+		if id == OBJECT_LIST_ID {
+			Self::new_object_list(cache).await
+		} else {
+			Self::new_object(cache, id).await
+		}
+	}
+
+	/// Access an object.
+	///
+	/// # Panics
+	///
+	/// If `id == OBJECT_LIST_ID`.
+	pub(super) async fn new_object(cache: Rc<Cache<D>>, id: u64) -> Result<Self, Error<D>> {
+		assert!(id != OBJECT_LIST_ID);
+
+		// Lock object now so it doesn't get evicted.
+		let mut data = cache.data.borrow_mut();
+		*data.locked_objects.entry(id).or_default() += 1;
+
+		if !{ data }.data.contains_key(&id) {
+			// Get length
+			let mut rec = Record::default();
+			cache.clone().read_object_table(id, rec.as_mut()).await?;
+			let length = rec.total_length.into();
+			cache.data.borrow_mut().data.insert(
+				id,
+				TreeData {
+					length,
+					data: (0..depth(cache.max_record_size(), length))
+						.map(|_| Default::default())
+						.collect(),
+				},
+			);
+		}
+
+		Ok(Self { cache, id })
+	}
+
+	/// Access the object list.
+	pub(super) async fn new_object_list(cache: Rc<Cache<D>>) -> Result<Self, Error<D>> {
+		let id = OBJECT_LIST_ID;
+
+		// Lock object now so it doesn't get evicted.
+		let mut data = cache.data.borrow_mut();
+		*data.locked_objects.entry(id).or_default() += 1;
+
+		match data.data.entry(id) {
+			hash_map::Entry::Occupied(_) => {}
+			hash_map::Entry::Vacant(e) => {
+				let length = u64::from(cache.store.object_list().total_length);
+				e.insert(TreeData {
+					length,
+					data: (0..depth(cache.max_record_size(), length))
+						.map(|_| Default::default())
+						.collect(),
+				});
+			}
+		}
+
+		drop(data);
+		Ok(Self { cache, id })
 	}
 
 	/// Write data to a range.
@@ -194,12 +259,54 @@ impl<D: Dev> Tree<D> {
 			root.total_length < new_len,
 			"new_len is equal or smaller than cur len"
 		);
-		todo!()
+
+		// Increase depth.
+		let cur_depth = depth(self.max_record_size(), root.total_length.into());
+		let new_depth = depth(self.max_record_size(), new_len);
+
+		let root = self.root().await?;
+
+		if cur_depth < new_depth {
+			// Resize to account for new depth
+			{
+				let mut data = self.cache.data.borrow_mut();
+				let data = data.data.get_mut(&self.id).expect("no entry for object");
+				let mut v = mem::take(&mut data.data).into_vec();
+				v.resize_with(new_depth.into(), Default::default);
+				data.data = v.into();
+			}
+
+			// Add a single new, empty record and add the current root as a child to it.
+			// The changes will propagate up.
+			let entry = self
+				.cache
+				.clone()
+				.fetch_entry(self.id, cur_depth, 0, &Record::default())
+				.await?;
+			let mut entry = entry.get_mut().await?;
+			entry.data.extend_from_slice(root.as_ref());
+		}
+
+		self.cache
+			.data
+			.borrow_mut()
+			.data
+			.get_mut(&self.id)
+			.expect("object is not cached")
+			.length = new_len;
+		Ok(())
 	}
 
 	/// The length of the record tree in bytes.
 	pub async fn len(&self) -> Result<u64, Error<D>> {
-		self.root().await.map(|rec| rec.total_length.into())
+		Ok(self
+			.cache
+			.data
+			.borrow()
+			.data
+			.get(&self.id)
+			.expect("object not in cache")
+			.length)
 	}
 
 	/// Get the root record of this tree.
@@ -209,9 +316,9 @@ impl<D: Dev> Tree<D> {
 	#[async_recursion::async_recursion(?Send)]
 	pub async fn root(&self) -> Result<Record, Error<D>> {
 		if self.id == OBJECT_LIST_ID {
-			todo!("root of object list")
+			Ok(self.cache.object_list())
 		} else {
-			let list = Self::new(self.cache.clone(), OBJECT_LIST_ID);
+			let list = Self::new(self.cache.clone(), OBJECT_LIST_ID).await?;
 			let mut record = Record::default();
 			list.read(self.id * RECORD_SIZE, record.as_mut()).await?;
 			Ok(record)
@@ -267,7 +374,17 @@ impl<D: Dev> Tree<D> {
 		let mut record = Default::default();
 
 		if cur_depth + 1 == depth {
-			record = root;
+			// Check if the record we're trying to fetch is within the newly added region from
+			// growing the tree or within the old region.
+			//
+			// If is in the new region, add a zero record and return immediately.
+			//
+			// If not, update cur_depth to match the old depth and fetch as normal.
+			if todo!("check if grown") {
+				record = root;
+			} else {
+				todo!("zero record")
+			}
 		} else {
 			let (offt, index) = divmod_p2(offset >> depth_offset_shift, rec_size - RECORD_SIZE_P2);
 			let data = self
@@ -310,6 +427,19 @@ impl<D: Dev> Tree<D> {
 	/// Get the maximum record size.
 	fn max_record_size(&self) -> MaxRecordSize {
 		self.cache.max_record_size()
+	}
+}
+
+impl<D: Dev> Drop for Tree<D> {
+	fn drop(&mut self) {
+		let data = { &mut *self.cache.data.borrow_mut() };
+		let hash_map::Entry::Occupied(mut o) = data.locked_objects.entry(self.id) else {
+			panic!("object not present")
+		};
+		*o.get_mut() += 1;
+		if *o.get() == 0 {
+			o.remove_entry();
+		}
 	}
 }
 

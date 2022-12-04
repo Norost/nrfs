@@ -32,6 +32,7 @@ pub struct DevSet<D: Dev> {
 
 	pub allocation_log_lba: u64,
 	pub allocation_log_length: u64,
+	pub object_list: Record,
 }
 
 impl<D: Dev> DevSet<D> {
@@ -111,6 +112,7 @@ impl<D: Dev> DevSet<D> {
 			block_count,
 			allocation_log_lba: 0,
 			allocation_log_length: 0,
+			object_list: Default::default(),
 		})
 	}
 

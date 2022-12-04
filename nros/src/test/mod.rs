@@ -41,8 +41,7 @@ fn create_fs() {
 fn resize_object() {
 	run(|| async {
 		let mut s = new(MaxRecordSize::K8).await;
-		let id = s.create().await.unwrap();
-		let obj = s.get(id);
+		let obj = s.create().await.unwrap();
 		obj.resize(1024 * 8).await.unwrap();
 		obj.resize(2040 * 8).await.unwrap();
 		obj.resize(1000 * 8).await.unwrap();
@@ -54,9 +53,9 @@ fn resize_object() {
 fn write() {
 	run(|| async {
 		let mut s = new(MaxRecordSize::K8).await;
-		let id = s.create().await.unwrap();
-		s.get(id).resize(2000 * 8).await.unwrap();
-		s.get(id).write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
+		let obj = s.create().await.unwrap();
+		obj.resize(2000 * 8).await.unwrap();
+		obj.write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
 	})
 }
 
@@ -64,9 +63,9 @@ fn write() {
 fn finish_transaction() {
 	run(|| async {
 		let mut s = new(MaxRecordSize::K8).await;
-		let id = s.create().await.unwrap();
-		s.get(id).resize(2000 * 8).await.unwrap();
-		s.get(id).write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
+		let obj = s.create().await.unwrap();
+		obj.resize(2000 * 8).await.unwrap();
+		obj.write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
 		s.finish_transaction().await.unwrap();
 	})
 }
@@ -75,13 +74,13 @@ fn finish_transaction() {
 fn read_before_tx() {
 	run(|| async {
 		let mut s = new(MaxRecordSize::K8).await;
-		let id = s.create().await.unwrap();
-		s.get(id).resize(2000 * 8).await.unwrap();
-		s.get(id).write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
+		let obj = s.create().await.unwrap();
+		obj.resize(2000 * 8).await.unwrap();
+		obj.write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
 		let mut buf = [0; 1000 * 8];
-		s.get(id).read(0 * 8, &mut buf).await.unwrap();
+		obj.read(0 * 8, &mut buf).await.unwrap();
 		assert_eq!(buf, [0; 1000 * 8]);
-		s.get(id).read(1000 * 8, &mut buf).await.unwrap();
+		obj.read(1000 * 8, &mut buf).await.unwrap();
 		assert_eq!(buf, [0xcc; 1000 * 8]);
 	})
 }
@@ -90,14 +89,14 @@ fn read_before_tx() {
 fn read_after_tx() {
 	run(|| async {
 		let mut s = new(MaxRecordSize::K8).await;
-		let id = s.create().await.unwrap();
-		s.get(id).resize(2000 * 8).await.unwrap();
-		s.get(id).write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
+		let obj = s.create().await.unwrap();
+		obj.resize(2000 * 8).await.unwrap();
+		obj.write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
 		s.finish_transaction().await.unwrap();
 		let mut buf = [0; 1000 * 8];
-		s.get(id).read(0 * 8, &mut buf).await.unwrap();
+		obj.read(0 * 8, &mut buf).await.unwrap();
 		assert_eq!(buf, [0; 1000 * 8]);
-		s.get(id).read(1000 * 8, &mut buf).await.unwrap();
+		obj.read(1000 * 8, &mut buf).await.unwrap();
 		assert_eq!(buf, [0xcc; 1000 * 8]);
 	})
 }
@@ -107,7 +106,7 @@ fn read_after_tx() {
 fn write_tx_read_many() {
 	let mut s = new(MaxRecordSize::K1);
 
-	let id = s.new_object().unwrap();
+	let obj = s.new_object().unwrap();
 	s.resize(id, 2000).unwrap();
 	s.write(id, 1000, &[0xcc; 1000]).unwrap();
 	s.finish_transaction().unwrap();
@@ -141,7 +140,7 @@ fn write_tx_read_many() {
 fn write_new_write() {
 	let mut s = new(MaxRecordSize::K1);
 
-	let id = s.new_object().unwrap();
+	let obj = s.new_object().unwrap();
 	let id2 = s.new_object().unwrap();
 
 	s.resize(id2, 64).unwrap();
