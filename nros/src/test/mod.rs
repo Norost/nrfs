@@ -6,10 +6,10 @@ use {
 };
 
 async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev> {
-	let s = MemDev::new(16, BlockSize::K8);
+	let s = MemDev::new(16, BlockSize::K1);
 	Nros::new(
 		[[s]],
-		BlockSize::K8,
+		BlockSize::K1,
 		max_record_size,
 		Compression::None,
 		2 * (1 << 13),
@@ -33,39 +33,39 @@ where
 #[test]
 fn create_fs() {
 	run(|| async {
-		new(MaxRecordSize::K8).await;
+		new(MaxRecordSize::K1).await;
 	})
 }
 
 #[test]
 fn resize_object() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K8).await;
+		let mut s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
-		obj.resize(1024 * 8).await.unwrap();
-		obj.resize(2040 * 8).await.unwrap();
-		obj.resize(1000 * 8).await.unwrap();
-		obj.resize(0 * 8).await.unwrap();
+		obj.resize(1024).await.unwrap();
+		obj.resize(2040).await.unwrap();
+		obj.resize(1000).await.unwrap();
+		obj.resize(0).await.unwrap();
 	})
 }
 
 #[test]
 fn write() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K8).await;
+		let mut s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
-		obj.resize(2000 * 8).await.unwrap();
-		obj.write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
+		obj.resize(2000).await.unwrap();
+		obj.write(1000, &[0xcc; 1000]).await.unwrap();
 	})
 }
 
 #[test]
 fn finish_transaction() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K8).await;
+		let mut s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
-		obj.resize(2000 * 8).await.unwrap();
-		obj.write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
+		obj.resize(2000).await.unwrap();
+		obj.write(1000, &[0xcc; 1000]).await.unwrap();
 		s.finish_transaction().await.unwrap();
 	})
 }
@@ -73,31 +73,31 @@ fn finish_transaction() {
 #[test]
 fn read_before_tx() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K8).await;
+		let mut s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
-		obj.resize(2000 * 8).await.unwrap();
-		obj.write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
-		let mut buf = [0; 1000 * 8];
-		obj.read(0 * 8, &mut buf).await.unwrap();
-		assert_eq!(buf, [0; 1000 * 8]);
-		obj.read(1000 * 8, &mut buf).await.unwrap();
-		assert_eq!(buf, [0xcc; 1000 * 8]);
+		obj.resize(2000).await.unwrap();
+		obj.write(1000, &[0xcc; 1000]).await.unwrap();
+		let mut buf = [0; 1000];
+		obj.read(0, &mut buf).await.unwrap();
+		assert_eq!(buf, [0; 1000]);
+		obj.read(1000, &mut buf).await.unwrap();
+		assert_eq!(buf, [0xcc; 1000]);
 	})
 }
 
 #[test]
 fn read_after_tx() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K8).await;
+		let mut s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
-		obj.resize(2000 * 8).await.unwrap();
-		obj.write(1000 * 8, &[0xcc; 1000 * 8]).await.unwrap();
+		obj.resize(2000).await.unwrap();
+		obj.write(1000, &[0xcc; 1000]).await.unwrap();
 		s.finish_transaction().await.unwrap();
-		let mut buf = [0; 1000 * 8];
-		obj.read(0 * 8, &mut buf).await.unwrap();
-		assert_eq!(buf, [0; 1000 * 8]);
-		obj.read(1000 * 8, &mut buf).await.unwrap();
-		assert_eq!(buf, [0xcc; 1000 * 8]);
+		let mut buf = [0; 1000];
+		obj.read(0, &mut buf).await.unwrap();
+		assert_eq!(buf, [0; 1000]);
+		obj.read(1000, &mut buf).await.unwrap();
+		assert_eq!(buf, [0xcc; 1000]);
 	})
 }
 
