@@ -176,7 +176,7 @@ impl<D: Dev> Tree<D> {
 		let len = u64::from(root.total_length);
 
 		// Ensure all data fits in buffer.
-		if len >= offset {
+		if len <= offset {
 			return Ok(0);
 		} else if offset + u64::try_from(buf.len()).unwrap() >= len {
 			buf = &mut buf[..usize::try_from(len - offset).unwrap()];
