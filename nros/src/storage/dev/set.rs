@@ -2,6 +2,7 @@ use {
 	super::{Allocator, Buf, Dev},
 	crate::{header::Header, BlockSize, Compression, Error, MaxRecordSize, Record},
 	core::future,
+	core::cell::Cell,
 	futures_util::stream::{FuturesUnordered, StreamExt, TryStreamExt},
 };
 
@@ -30,8 +31,8 @@ pub struct DevSet<D: Dev> {
 	/// The total amount of blocks covered in each chain.
 	block_count: u64,
 
-	pub allocation_log_lba: u64,
-	pub allocation_log_length: u64,
+	pub allocation_log_lba: Cell<u64>,
+	pub allocation_log_length: Cell<u64>,
 	pub object_list: Record,
 }
 
@@ -110,8 +111,8 @@ impl<D: Dev> DevSet<D> {
 			max_record_size,
 			compression,
 			block_count,
-			allocation_log_lba: 0,
-			allocation_log_length: 0,
+			allocation_log_lba: 0.into(),
+			allocation_log_length: 0.into(),
 			object_list: Default::default(),
 		})
 	}
@@ -163,8 +164,50 @@ impl<D: Dev> DevSet<D> {
 	}
 
 	/// Write a range of blocks.
+	///
+	/// # Panics
+	///
+	/// If the write is be out of bounds.
 	pub async fn write(&self, lba: u64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
-		todo!()
+		let lba_end = lba.saturating_add(u64::try_from(data.get().len()).unwrap());
+		assert!(lba_end >= self.block_count, "write is out of bounds");
+
+		// Write to all mirrors
+		self.devices
+			.iter()
+			.flat_map(|chain| {
+				// Do a binary search for the start device.
+				let start = chain
+					.binary_search_by_key(&lba, |node| node.block_offset)
+					// if offset == lba, then we need that dev
+					// if offset < lba, then we still want that dev as for the next node offset > lba
+					.unwrap_or_else(|i| i);
+				let mut lba_start = lba;
+				let mut data_start = 0;
+				let data = &data; // Avoid error due to move in closure below
+				chain.iter().skip(start).map_while(move |node| {
+					(lba_start < lba_end).then(|| {
+						let bc = node.dev.block_count();
+
+						// Determine range of data to write.
+						let data_len = usize::try_from(node.block_offset - lba_start + bc)
+							.unwrap_or(usize::MAX)
+							.min(data.get().len());
+						let data_end = data_start + data_len;
+
+						let fut = node
+							.dev
+							.write(lba_start, data.0.clone(), data_start..data_end);
+						lba_start = node.block_offset + bc;
+						data_start = data_end;
+						fut
+					})
+				})
+			})
+			.collect::<FuturesUnordered<_>>()
+			.try_for_each(|_| async { Ok(()) })
+			.await
+			.map_err(Error::Dev)
 	}
 
 	/// Flush & ensure all writes have completed.
@@ -271,7 +314,8 @@ async fn save_header<D: Dev>(
 ) -> Result<(), D::Error> {
 	let lba = if tail { 0 } else { len };
 
-	dev.write(lba, header);
+	let header_len = 0..header.get().len();
+	dev.write(lba, header, header_len);
 	dev.fence().await
 }
 
@@ -283,7 +327,7 @@ async fn create_and_save_header_tail<D: Dev>(
 	len: u64,
 ) -> Result<(&D, <D::Allocator as Allocator>::Buf<'_>, u64), D::Error> {
 	let buf = create_header(block_size, dev, 0, 0).await?;
-	let b = buf.deep_clone().await.map_err(|_| todo!())?; // FIXME
+	let b = buf.clone();
 	save_header(true, dev, len, b).await?;
 	Ok((dev, buf, len))
 }

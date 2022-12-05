@@ -15,7 +15,10 @@ pub use {
 	set::DevSet,
 };
 
-use {crate::BlockSize, core::future::Future};
+use {
+	crate::BlockSize,
+	core::{future::Future, ops::Range},
+};
 
 pub trait Dev {
 	/// Error that may be returned by the device.
@@ -53,12 +56,20 @@ pub trait Dev {
 
 	/// Write data.
 	///
+	/// The range can be used to write chunks of a buffer to multiple devices without redundant
+	/// copying.
+	///
 	/// # Panics
 	///
 	/// If `len > buf.len()`.
 	///
 	/// If a fence is in progress.
-	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_>;
+	fn write(
+		&self,
+		lba: u64,
+		buf: <Self::Allocator as Allocator>::Buf<'_>,
+		range: Range<usize>,
+	) -> Self::WriteTask<'_>;
 
 	/// Execute a fence.
 	///
@@ -95,11 +106,9 @@ pub trait Allocator {
 }
 
 /// A memory buffer for use with [`Dev`].
-pub trait Buf: Sized {
+pub trait Buf: Clone {
 	/// Error that may occur when implicitly cloning.
 	type Error;
-	/// Task that may create a copy of this buffer.
-	type CloneTask: Future<Output = Result<Self, Self::Error>>;
 
 	/// Get an immutable reference to the buffer.
 	fn get(&self) -> &[u8];
@@ -112,6 +121,4 @@ pub trait Buf: Sized {
 	///
 	/// If [`Self::deep_clone`] was called on this buffer.
 	fn get_mut(&mut self) -> &mut [u8];
-
-	fn deep_clone(&self) -> Self::CloneTask;
 }

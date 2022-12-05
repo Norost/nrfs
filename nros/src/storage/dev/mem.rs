@@ -4,6 +4,7 @@ use {
 	core::{
 		cell::{RefCell, RefMut},
 		future,
+		ops::Range,
 	},
 	std::rc::Rc,
 };
@@ -70,10 +71,15 @@ impl Dev for MemDev {
 		)
 	}
 
-	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_> {
+	fn write(
+		&self,
+		lba: u64,
+		buf: <Self::Allocator as Allocator>::Buf<'_>,
+		range: Range<usize>,
+	) -> Self::WriteTask<'_> {
 		let res = self
 			.get_mut(lba, buf.0.len())
-			.map(|mut b| b.copy_from_slice(buf.get()));
+			.map(|mut b| b.copy_from_slice(&buf.get()[range]));
 		future::ready(res)
 	}
 
@@ -104,11 +110,11 @@ impl Allocator for MemAllocator {
 	}
 }
 
+#[derive(Clone)]
 pub struct MemBuf(Rc<[u8]>);
 
 impl Buf for MemBuf {
 	type Error = MemDevError;
-	type CloneTask = future::Ready<Result<Self, Self::Error>>;
 
 	fn get(&self) -> &[u8] {
 		&self.0
@@ -116,10 +122,6 @@ impl Buf for MemBuf {
 
 	fn get_mut(&mut self) -> &mut [u8] {
 		Rc::get_mut(&mut self.0).expect("buffer was cloned")
-	}
-
-	fn deep_clone(&self) -> Self::CloneTask {
-		future::ready(Ok(Self(self.0.iter().copied().collect())))
 	}
 }
 

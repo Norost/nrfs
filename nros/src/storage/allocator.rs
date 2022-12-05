@@ -35,7 +35,7 @@ impl Allocator {
 	where
 		D: Dev,
 	{
-		let (lba, len) = (devices.allocation_log_lba, devices.allocation_log_length);
+		let (lba, len) = (devices.allocation_log_lba.get(), devices.allocation_log_length.get());
 
 		let mut alloc_map = RangeSet::new();
 
@@ -136,7 +136,8 @@ impl Allocator {
 		self.free_map = Default::default();
 		self.dirty_map = Default::default();
 
-		todo!("actually save the damn log");
+		devs.allocation_log_lba.set(lba);
+		devs.allocation_log_length.set(len);
 
 		Ok(())
 	}
