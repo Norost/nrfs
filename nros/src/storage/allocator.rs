@@ -35,14 +35,19 @@ impl Allocator {
 	where
 		D: Dev,
 	{
-		let (lba, len) = (devices.allocation_log_lba.get(), devices.allocation_log_length.get());
+		let (lba, len) = (
+			devices.allocation_log_lba.get(),
+			devices.allocation_log_length.get(),
+		);
 
 		let mut alloc_map = RangeSet::new();
 
 		if len > 0 {
 			let block_size = 1 << devices.block_size().to_raw();
 			let blocks = (len + block_size - 1) / block_size;
-			let rd = devices.read(lba, blocks.try_into().unwrap()).await?;
+			let rd = devices
+				.read(lba.try_into().unwrap(), blocks.try_into().unwrap(), Default::default())
+				.await?;
 			for r in rd.get()[..len as _].chunks_exact(16) {
 				let start = u64::from_le_bytes(r[..8].try_into().unwrap());
 				let len = u64::from_le_bytes(r[8..].try_into().unwrap());
@@ -130,7 +135,7 @@ impl Allocator {
 			w[..8].copy_from_slice(&r.start.to_le_bytes());
 			w[8..].copy_from_slice(&len.to_le_bytes());
 		}
-		devs.write(lba, buf).await?;
+		devs.write(lba.try_into().unwrap(), buf).await?;
 
 		self.alloc_map = alloc_map;
 		self.free_map = Default::default();

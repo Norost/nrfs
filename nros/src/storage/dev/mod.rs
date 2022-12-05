@@ -15,10 +15,7 @@ pub use {
 	set::DevSet,
 };
 
-use {
-	crate::BlockSize,
-	core::{future::Future, ops::Range},
-};
+use {crate::BlockSize, core::future::Future};
 
 pub trait Dev {
 	/// Error that may be returned by the device.
@@ -64,12 +61,7 @@ pub trait Dev {
 	/// If `len > buf.len()`.
 	///
 	/// If a fence is in progress.
-	fn write(
-		&self,
-		lba: u64,
-		buf: <Self::Allocator as Allocator>::Buf<'_>,
-		range: Range<usize>,
-	) -> Self::WriteTask<'_>;
+	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_>;
 
 	/// Execute a fence.
 	///
@@ -121,4 +113,7 @@ pub trait Buf: Clone {
 	///
 	/// If [`Self::deep_clone`] was called on this buffer.
 	fn get_mut(&mut self) -> &mut [u8];
+
+	/// Shrink the buffer.
+	fn shrink(&mut self, len: usize);
 }

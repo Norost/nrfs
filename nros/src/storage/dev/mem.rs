@@ -71,15 +71,10 @@ impl Dev for MemDev {
 		)
 	}
 
-	fn write(
-		&self,
-		lba: u64,
-		buf: <Self::Allocator as Allocator>::Buf<'_>,
-		range: Range<usize>,
-	) -> Self::WriteTask<'_> {
+	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_> {
 		let res = self
 			.get_mut(lba, buf.0.len())
-			.map(|mut b| b.copy_from_slice(&buf.get()[range]));
+			.map(|mut b| b.copy_from_slice(buf.get()));
 		future::ready(res)
 	}
 
@@ -122,6 +117,11 @@ impl Buf for MemBuf {
 
 	fn get_mut(&mut self) -> &mut [u8] {
 		Rc::get_mut(&mut self.0).expect("buffer was cloned")
+	}
+
+	fn shrink(&mut self, len: usize) {
+		assert!(len <= self.0.len(), "new len is larger than old len");
+		self.0 = self.0.iter().copied().take(len).collect()
 	}
 }
 

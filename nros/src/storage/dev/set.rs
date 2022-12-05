@@ -1,8 +1,7 @@
 use {
 	super::{Allocator, Buf, Dev},
 	crate::{header::Header, BlockSize, Compression, Error, MaxRecordSize, Record},
-	core::future,
-	core::cell::Cell,
+	core::{cell::Cell, future, num::NonZeroU64},
 	futures_util::stream::{FuturesUnordered, StreamExt, TryStreamExt},
 };
 
@@ -72,12 +71,14 @@ impl<D: Dev> DevSet<D> {
 			.collect::<Box<_>>();
 
 		assert!(devices.iter().all(|c| !c.is_empty()), "empty chain");
+		// Require that devices can contain a full-sized record to simplify
+		// read & write operations as well as ensure some sanity in general.
 		assert!(
 			devices
 				.iter()
 				.flat_map(|c| c.iter())
-				.all(|d| d.dev.block_count() > 0),
-			"device with no blocks"
+				.all(|d| d.dev.block_count() >= 2 + (1 << (max_record_size.to_raw() - block_size.to_raw()))),
+			"device cannot contain maximum size record & headers"
 		);
 
 		// FIXME support mismatched block sizes.
@@ -90,18 +91,20 @@ impl<D: Dev> DevSet<D> {
 		);
 
 		// Determine length of smallest chain.
+		// FIXME block_count is misleading since we start counting from 1 and block_count accounts
+		// for that to simplify comparisons. A better term would be something like last_lba
 		let block_count = devices
 			.iter()
-			.map(|c| c.iter().map(|d| d.dev.block_count()).sum())
+			.map(|c| c.iter().map(|d| d.dev.block_count() - 2).sum::<u64>()) // -2 to account for headers
 			.min()
-			.expect("no chains");
+			.expect("no chains") + 1;
 
 		// Assign block offsets to devices in chains and write headers.
 		for chain in devices.iter_mut() {
-			let mut block_offset = 0;
+			let mut block_offset = 1;
 			for node in chain.iter_mut() {
 				node.block_offset = block_offset;
-				block_offset += node.dev.block_count();
+				block_offset += node.dev.block_count() - 2; // -2 to account for headers
 			}
 		}
 
@@ -159,50 +162,100 @@ impl<D: Dev> DevSet<D> {
 	/// Read a range of blocks.
 	///
 	/// A chain blacklist can be used in case corrupt data was returned.
-	pub async fn read(&self, lba: u64, count: usize) -> Result<SetBuf<D>, Error<D>> {
-		todo!()
+	///
+	/// # Note
+	///
+	/// If `size` isn't a multiple of the block size.
+	pub async fn read(
+		&self,
+		lba: NonZeroU64,
+		size: usize,
+		blacklist: Set256,
+	) -> Result<SetBuf<D>, Error<D>> {
+		assert!(size % (1usize << self.block_size()) == 0, "data len isn't a multiple of block size");
+
+		let lba = lba.get();
+		let lba_end = lba.saturating_add(u64::try_from(size >> self.block_size()).unwrap());
+		assert!(lba_end <= self.block_count, "read is out of bounds");
+
+		// TODO balance loads
+		for (i, chain) in self.devices.iter().enumerate() {
+			if blacklist.get(i.try_into().unwrap()) {
+				continue;
+			}
+
+			let mut buf = chain[0]
+				.dev
+				.allocator()
+				.alloc(size)
+				.await
+				.map_err(Error::Dev)?;
+
+			// Do a binary search for the start device.
+			let node = chain
+				.binary_search_by_key(&lba, |node| node.block_offset)
+				// if offset == lba, then we need that dev
+				// if offset < lba, then we want the previous dev.
+				.map_or_else(|i| i - 1, |i| i);
+			let node = &chain[node];
+
+			let block_count = node.dev.block_count() - 2; // -2 to account for headers
+
+			// Check if the buffer range falls entirely within the device's range.
+			// If not, split the buffer in two and perform two operations.
+			return if lba_end <= node.block_offset + block_count {
+				// No splitting necessary - yay
+				node.dev.read(lba - node.block_offset + 1, size).await // +1 because header
+					.map(SetBuf)
+					.map_err(Error::Dev)
+			} else {
+				// We need to split - aw
+				todo!()
+			}
+		}
+		todo!("all chains failed. RIP")
 	}
 
 	/// Write a range of blocks.
 	///
 	/// # Panics
 	///
+	/// If the buffer size isn't a multiple of the block size.
+	///
 	/// If the write is be out of bounds.
-	pub async fn write(&self, lba: u64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
-		let lba_end = lba.saturating_add(u64::try_from(data.get().len()).unwrap());
-		assert!(lba_end >= self.block_count, "write is out of bounds");
+	pub async fn write(&self, lba: NonZeroU64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
+		assert!(data.get().len() % (1usize << self.block_size()) == 0, "data len isn't a multiple of block size");
+
+		let lba = lba.get();
+		let lba_end = lba.saturating_add(u64::try_from(data.get().len() >> self.block_size()).unwrap());
+		assert!(lba_end <= self.block_count, "write is out of bounds");
 
 		// Write to all mirrors
 		self.devices
 			.iter()
-			.flat_map(|chain| {
+			.map(|chain| {
 				// Do a binary search for the start device.
-				let start = chain
+				let node = chain
 					.binary_search_by_key(&lba, |node| node.block_offset)
 					// if offset == lba, then we need that dev
-					// if offset < lba, then we still want that dev as for the next node offset > lba
-					.unwrap_or_else(|i| i);
-				let mut lba_start = lba;
-				let mut data_start = 0;
-				let data = &data; // Avoid error due to move in closure below
-				chain.iter().skip(start).map_while(move |node| {
-					(lba_start < lba_end).then(|| {
-						let bc = node.dev.block_count();
+					// if offset < lba, then we want the previous dev.
+					.map_or_else(|i| i - 1, |i| i);
+				let node = &chain[node];
 
-						// Determine range of data to write.
-						let data_len = usize::try_from(node.block_offset - lba_start + bc)
-							.unwrap_or(usize::MAX)
-							.min(data.get().len());
-						let data_end = data_start + data_len;
+				let block_count = node.dev.block_count() - 2; // -2 to account for headers
 
-						let fut = node
-							.dev
-							.write(lba_start, data.0.clone(), data_start..data_end);
-						lba_start = node.block_offset + bc;
-						data_start = data_end;
-						fut
-					})
-				})
+				// Check if the buffer range falls entirely within the device's range.
+				// If not, split the buffer in two and perform two operations.
+				let data = &data;
+				async move {
+					if lba_end <= node.block_offset + block_count {
+						// No splitting necessary - yay
+						node.dev.write(lba - node.block_offset + 1, data.0.clone()).await // +1 because headers
+					} else {
+						// We need to split - aw
+						todo!()
+					}
+				}
 			})
 			.collect::<FuturesUnordered<_>>()
 			.try_for_each(|_| async { Ok(()) })
@@ -314,8 +367,7 @@ async fn save_header<D: Dev>(
 ) -> Result<(), D::Error> {
 	let lba = if tail { 0 } else { len };
 
-	let header_len = 0..header.get().len();
-	dev.write(lba, header, header_len);
+	dev.write(lba, header);
 	dev.fence().await
 }
 
@@ -330,4 +382,29 @@ async fn create_and_save_header_tail<D: Dev>(
 	let b = buf.clone();
 	save_header(true, dev, len, b).await?;
 	Ok((dev, buf, len))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Set256(u128, u128);
+
+impl Set256 {
+	pub fn get(&self, bit: u8) -> bool {
+		if bit < 0x80 {
+			self.0 & 1 << bit > 0
+		} else {
+			let bit = bit & 0x7f;
+			self.1 & 1 << bit > 0
+		}
+	}
+
+	pub fn set(&mut self, bit: u8, value: bool) {
+		if bit < 0x80 {
+			self.0 &= !(1 << bit);
+			self.0 |= u128::from(value) << bit;
+		} else {
+			let bit = bit & 0x7f;
+			self.1 &= !(1 << bit);
+			self.1 |= u128::from(value) << bit;
+		}
+	}
 }
