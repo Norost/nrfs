@@ -77,7 +77,8 @@ impl<D: Dev> DevSet<D> {
 			devices
 				.iter()
 				.flat_map(|c| c.iter())
-				.all(|d| d.dev.block_count() >= 2 + (1 << (max_record_size.to_raw() - block_size.to_raw()))),
+				.all(|d| d.dev.block_count()
+					>= 2 + (1 << (max_record_size.to_raw() - block_size.to_raw()))),
 			"device cannot contain maximum size record & headers"
 		);
 
@@ -97,7 +98,8 @@ impl<D: Dev> DevSet<D> {
 			.iter()
 			.map(|c| c.iter().map(|d| d.dev.block_count() - 2).sum::<u64>()) // -2 to account for headers
 			.min()
-			.expect("no chains") + 1;
+			.expect("no chains")
+			+ 1;
 
 		// Assign block offsets to devices in chains and write headers.
 		for chain in devices.iter_mut() {
@@ -172,7 +174,10 @@ impl<D: Dev> DevSet<D> {
 		size: usize,
 		blacklist: Set256,
 	) -> Result<SetBuf<D>, Error<D>> {
-		assert!(size % (1usize << self.block_size()) == 0, "data len isn't a multiple of block size");
+		assert!(
+			size % (1usize << self.block_size()) == 0,
+			"data len isn't a multiple of block size"
+		);
 
 		let lba = lba.get();
 		let lba_end = lba.saturating_add(u64::try_from(size >> self.block_size()).unwrap());
@@ -205,13 +210,15 @@ impl<D: Dev> DevSet<D> {
 			// If not, split the buffer in two and perform two operations.
 			return if lba_end <= node.block_offset + block_count {
 				// No splitting necessary - yay
-				node.dev.read(lba - node.block_offset + 1, size).await // +1 because header
+				node.dev
+					.read(lba - node.block_offset + 1, size)
+					.await // +1 because header
 					.map(SetBuf)
 					.map_err(Error::Dev)
 			} else {
 				// We need to split - aw
 				todo!()
-			}
+			};
 		}
 		todo!("all chains failed. RIP")
 	}
@@ -224,10 +231,14 @@ impl<D: Dev> DevSet<D> {
 	///
 	/// If the write is be out of bounds.
 	pub async fn write(&self, lba: NonZeroU64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
-		assert!(data.get().len() % (1usize << self.block_size()) == 0, "data len isn't a multiple of block size");
+		assert!(
+			data.get().len() % (1usize << self.block_size()) == 0,
+			"data len isn't a multiple of block size"
+		);
 
 		let lba = lba.get();
-		let lba_end = lba.saturating_add(u64::try_from(data.get().len() >> self.block_size()).unwrap());
+		let lba_end =
+			lba.saturating_add(u64::try_from(data.get().len() >> self.block_size()).unwrap());
 		assert!(lba_end <= self.block_count, "write is out of bounds");
 
 		// Write to all mirrors
@@ -250,7 +261,9 @@ impl<D: Dev> DevSet<D> {
 				async move {
 					if lba_end <= node.block_offset + block_count {
 						// No splitting necessary - yay
-						node.dev.write(lba - node.block_offset + 1, data.0.clone()).await // +1 because headers
+						node.dev
+							.write(lba - node.block_offset + 1, data.0.clone())
+							.await // +1 because headers
 					} else {
 						// We need to split - aw
 						todo!()

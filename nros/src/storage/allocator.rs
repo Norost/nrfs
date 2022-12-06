@@ -46,7 +46,11 @@ impl Allocator {
 			let block_size = 1 << devices.block_size().to_raw();
 			let blocks = (len + block_size - 1) / block_size;
 			let rd = devices
-				.read(lba.try_into().unwrap(), blocks.try_into().unwrap(), Default::default())
+				.read(
+					lba.try_into().unwrap(),
+					blocks.try_into().unwrap(),
+					Default::default(),
+				)
 				.await?;
 			for r in rd.get()[..len as _].chunks_exact(16) {
 				let start = u64::from_le_bytes(r[..8].try_into().unwrap());

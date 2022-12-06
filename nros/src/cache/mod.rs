@@ -1,7 +1,7 @@
 mod lru;
 mod tree;
 
-use std::hash;
+use std::string;
 
 pub use tree::Tree;
 
@@ -11,6 +11,7 @@ use {
 	core::{
 		cell::{Ref, RefCell, RefMut},
 		cmp::Ordering,
+		fmt,
 		future::{self, Future},
 		mem,
 		pin::Pin,
@@ -302,7 +303,7 @@ impl<D: Dev> Cache<D> {
 		record: &Record,
 	) -> Result<CacheRef<D>, Error<D>> {
 		// Lock now so the entry doesn't get fetched and evicted midway.
-		let mut entry = self.clone().lock_entry(id, depth, offset);
+		let entry = self.clone().lock_entry(id, depth, offset);
 
 		if self.has_entry(id, depth, offset) {
 			return Ok(entry);
@@ -537,8 +538,18 @@ impl<D: Dev> Drop for CacheRef<D> {
 	}
 }
 
+impl<D: Dev> fmt::Debug for CacheRef<D> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(CacheRef))
+			.field("cache", &format_args!("{{ ... }}"))
+			.field("id", &self.id)
+			.field("depth", &self.depth)
+			.field("offset", &self.offset)
+			.finish()
+	}
+}
+
 /// A single cache entry.
-#[derive(Debug)]
 struct Entry {
 	/// The data itself.
 	data: Vec<u8>,
@@ -546,4 +557,14 @@ struct Entry {
 	global_index: lru::Idx,
 	/// Dirty LRU index, if the data is actually dirty.
 	write_index: Option<lru::Idx>,
+}
+
+impl fmt::Debug for Entry {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(Entry))
+			.field("data", &format_args!("{:?}", &self.data))
+			.field("global_index", &self.global_index)
+			.field("write_index", &self.write_index)
+			.finish()
+	}
 }

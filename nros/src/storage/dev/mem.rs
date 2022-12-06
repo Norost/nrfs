@@ -3,14 +3,13 @@ use {
 	crate::BlockSize,
 	core::{
 		cell::{RefCell, RefMut},
-		future,
+		fmt, future,
 		ops::Range,
 	},
 	std::rc::Rc,
 };
 
 /// A pseudo-device entirely in memory. Useful for testing.
-#[derive(Debug)]
 pub struct MemDev {
 	buf: RefCell<Box<[u8]>>,
 	block_size: BlockSize,
@@ -84,6 +83,15 @@ impl Dev for MemDev {
 
 	fn allocator(&self) -> &Self::Allocator {
 		&MemAllocator
+	}
+}
+
+impl fmt::Debug for MemDev {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(MemDev))
+			.field("buf", &format_args!("[...]"))
+			.field("block_size", &self.block_size)
+			.finish()
 	}
 }
 

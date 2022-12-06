@@ -98,25 +98,31 @@ impl<D: Dev> Tree<D> {
 	///
 	/// Returns the actual amount of bytes written.
 	/// It may exit early if the necessary data is not cached (e.g. partial record write)
-	pub async fn write(&self, offset: u64, mut data: &[u8]) -> Result<usize, Error<D>> {
-		let root = self.root().await?;
-		let len = u64::from(root.total_length);
+	pub async fn write(&self, offset: u64, data: &[u8]) -> Result<usize, Error<D>> {
+		dbg!("write");
+		let len = self.len().await?;
 
 		// Ensure all data fits.
-		if offset >= len {
+		let data = if offset >= len {
 			return Ok(0);
 		} else if offset + u64::try_from(data.len()).unwrap() >= len {
-			data = &data[..usize::try_from(len - offset).unwrap()];
-		}
+			&data[..usize::try_from(len - offset).unwrap()]
+		} else {
+			data
+		};
 
 		let Some(range) = calc_range(self.max_record_size(), offset, data.len()) else { return Ok(0) };
 		let (first_offset, last_offset) =
 			calc_record_offsets(self.max_record_size(), offset, data.len());
 
+		dbg!(&range, first_offset, last_offset);
+
 		if range.start() == range.end() {
 			// We need to slice one record twice
 			let b = self.get(0, *range.start()).await?;
+
 			let mut b = b.get_mut().await?;
+
 			let b = &mut b.data;
 			let min_len = data.len().max(b.len());
 			b.resize(min_len, 0);
@@ -124,7 +130,7 @@ impl<D: Dev> Tree<D> {
 			trim_zeros_end(b);
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
-			let og_len = data.len();
+			let mut data = data;
 			let mut range = range.into_iter();
 
 			let first_key = range.next().unwrap();
@@ -134,7 +140,9 @@ impl<D: Dev> Tree<D> {
 			{
 				let d;
 				(d, data) = data.split_at((1usize << self.max_record_size()) - first_offset);
+				dbg!(d.len(), first_key);
 				let b = self.get(0, first_key).await?;
+				dbg!(&b);
 				let mut b = b.get_mut().await?;
 				let b = &mut b.data;
 				b.resize(first_offset, 0);
@@ -146,19 +154,35 @@ impl<D: Dev> Tree<D> {
 			for key in range {
 				let d;
 				(d, data) = data.split_at(1usize << self.max_record_size());
-				let b = self.get(0, key).await?;
+				dbg!(d.len(), key);
+
+				// "Fetch" directly since we're overwriting the entire record anyways.
+				let b = self
+					.cache
+					.clone()
+					.fetch_entry(0, 0, key, &Record::default())
+					.await?;
+
 				let mut b = b.get_mut().await?;
 				let b = &mut b.data;
+				// If the record was already fetched, it'll have ignored the &Record::default().
+				// Hence we need to clear it manually.
 				b.clear();
+
 				b.extend_from_slice(d);
 				trim_zeros_end(b);
 			}
 
 			// Copy end record |xxxx----|
 			{
+				dbg!(data.len(), last_key);
+				debug_assert_eq!(data.len(), last_offset);
 				let b = self.get(0, last_key).await?;
+				dbg!(&b);
 				let mut b = b.get_mut().await?;
 				let b = &mut b.data;
+				let min_len = b.len().max(data.len());
+				b.resize(min_len, 0);
 				b[..last_offset].copy_from_slice(data);
 				trim_zeros_end(b);
 			}
@@ -171,27 +195,86 @@ impl<D: Dev> Tree<D> {
 	///
 	/// Returns the actual amount of bytes read.
 	/// It may exit early if not all data is cached.
-	pub async fn read(&self, offset: u64, mut buf: &mut [u8]) -> Result<usize, Error<D>> {
-		let root = self.root().await?;
-		let len = u64::from(root.total_length);
+	pub async fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
+		(self.id != OBJECT_LIST_ID).then(|| dbg!("read"));
+		let len = self.len().await?;
 
 		// Ensure all data fits in buffer.
-		if len <= offset {
+		let buf = if len <= offset {
 			return Ok(0);
 		} else if offset + u64::try_from(buf.len()).unwrap() >= len {
-			buf = &mut buf[..usize::try_from(len - offset).unwrap()];
-		}
+			&mut buf[..usize::try_from(len - offset).unwrap()]
+		} else {
+			buf
+		};
 
 		let Some(range) = calc_range(self.max_record_size(), offset, buf.len()) else { return Ok(0) };
+		let (first_offset, last_offset) =
+			calc_record_offsets(self.max_record_size(), offset, buf.len());
+
+		(self.id != OBJECT_LIST_ID).then(|| dbg!(&range, first_offset, last_offset));
+
+		/// Copy from record to first half of `buf` and fill remainder with zeroes.
+		#[track_caller]
+		fn copy(buf: &mut [u8], data: &[u8]) {
+			buf[..data.len()].copy_from_slice(data);
+			buf[data.len()..].fill(0);
+		}
+
+		let buf_len = buf.len();
 
 		if range.start() == range.end() {
 			// We need to slice one record twice
-			todo!()
+			let b = self.get(0, *range.start()).await?;
+
+			let b = b.get();
+			dbg!(self.id, &b);
+
+			let b = b.data.get(first_offset..).unwrap_or(&[]);
+			copy(buf, &b[..buf.len().min(b.len())]);
 		} else {
-			let og_len = buf.len();
 			// We need to slice the first & last record once and operate on the others in full.
-			todo!()
+			let mut buf = buf;
+			let mut range = range.into_iter();
+
+			let first_key = range.next().unwrap();
+			let last_key = range.next_back().unwrap();
+
+			// Copy to first record |----xxxx|
+			{
+				let b;
+				(b, buf) = buf.split_at_mut((1usize << self.max_record_size()) - first_offset);
+				let d = self.get(0, first_key).await?;
+				let d = &d.get().data;
+				copy(b, d.get(first_offset..).unwrap_or(&[]));
+			}
+
+			// Copy middle records |xxxxxxxx|
+			for key in range {
+				let b;
+				(b, buf) = buf.split_at_mut(1usize << self.max_record_size());
+
+				// "Fetch" directly since we're overwriting the entire record anyways.
+				let d = self
+					.cache
+					.clone()
+					.fetch_entry(0, 0, key, &Record::default())
+					.await?;
+
+				copy(b, &d.get().data);
+			}
+
+			// Copy end record |xxxx----|
+			{
+				debug_assert_eq!(buf.len(), last_offset);
+				let d = self.get(0, last_key).await?;
+				let d = &d.get().data;
+				let max_len = d.len().min(buf.len());
+				copy(buf, &d[..max_len]);
+			}
 		}
+
+		Ok(buf_len)
 	}
 
 	/// Resize record tree.
@@ -284,7 +367,12 @@ impl<D: Dev> Tree<D> {
 				.fetch_entry(self.id, cur_depth, 0, &Record::default())
 				.await?;
 			let mut entry = entry.get_mut().await?;
-			entry.data.extend_from_slice(root.as_ref());
+
+			// Zero out unused fields
+			entry.data.extend_from_slice(
+				Record { total_length: 0.into(), references: 0.into(), ..root }.as_ref(),
+			);
+			trim_zeros_end(&mut entry.data);
 		}
 
 		self.cache
@@ -328,6 +416,8 @@ impl<D: Dev> Tree<D> {
 	/// Get a leaf cache entry.
 	///
 	/// It may fetch up to [`MAX_DEPTH`] of parent entries.
+	///
+	/// Note that `offset` must already include appropriate shifting.
 	// FIXME concurrent resizes will almost certainly screw something internally.
 	// Maybe add a per object lock to the cache or something?
 	async fn get(&self, target_depth: u8, offset: u64) -> Result<CacheRef<D>, Error<D>> {
@@ -337,15 +427,15 @@ impl<D: Dev> Tree<D> {
 		let rec_size = self.max_record_size().to_raw();
 
 		let mut cur_depth = target_depth;
-		let mut depth_offset_shift = rec_size;
+		let mut depth_offset_shift = 0;
 
 		let root = self.root().await?;
 
 		// Find the first parent or leaf entry that is present starting from a leaf
 		// and work back downwards.
 
+		// Use the *on-disk* depth as anything above it can only be zeroes anyways.
 		let depth = depth(self.max_record_size(), root.total_length.into());
-		assert!(target_depth <= depth);
 
 		// FIXME we need to be careful with resizes while this task is running.
 		// Perhaps lock object IDs somehow?
@@ -361,13 +451,17 @@ impl<D: Dev> Tree<D> {
 			depth_offset_shift += rec_size - RECORD_SIZE_P2;
 		}
 
+		dbg!(cur_depth, target_depth);
 		if cur_depth == target_depth {
-			// The entry we need is already present.
-			return Ok(self.cache.clone().lock_entry(
-				self.id,
-				cur_depth,
-				offset >> depth_offset_shift,
-			));
+			dbg!(self.id);
+			// The entry we need is already present
+			// *or* the entry is newly created from a grow and zeroed.
+			// TODO verify the latter statement.
+			return self
+				.cache
+				.clone()
+				.fetch_entry(self.id, cur_depth, offset, &Record::default())
+				.await;
 		}
 
 		// Get first record to fetch.
@@ -387,9 +481,8 @@ impl<D: Dev> Tree<D> {
 			}
 		} else {
 			let (offt, index) = divmod_p2(offset >> depth_offset_shift, rec_size - RECORD_SIZE_P2);
-			let data = self
-				.cache
-				.get_entry(self.id, cur_depth, offset >> depth_offset_shift);
+			let data = self.cache.get_entry(self.id, cur_depth, offt);
+
 			let offt = index * mem::size_of::<Record>();
 			record
 				.as_mut()
@@ -412,9 +505,7 @@ impl<D: Dev> Tree<D> {
 			}
 
 			let (offt, index) = divmod_p2(offset >> depth_offset_shift, rec_size - RECORD_SIZE_P2);
-			let data = self
-				.cache
-				.get_entry(self.id, cur_depth, offset >> depth_offset_shift);
+			let data = self.cache.get_entry(self.id, cur_depth, offt);
 			let offt = index * mem::size_of::<Record>();
 			record
 				.as_mut()

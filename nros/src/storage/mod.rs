@@ -55,7 +55,10 @@ where
 		let len = record.length.into();
 
 		let count = self.calc_block_count(len);
-		let data = self.devices.read(lba.try_into().unwrap(), count, Default::default()).await?;
+		let data = self
+			.devices
+			.read(lba.try_into().unwrap(), count, Default::default())
+			.await?;
 		let mut v = Vec::new();
 		record
 			.unpack(&data.get()[..len as _], &mut v, self.max_record_size())

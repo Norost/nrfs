@@ -13,8 +13,9 @@ async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev> {
 		BlockSize::K1,
 		max_record_size,
 		Compression::None,
-		2 * (1 << 13),
-		2 * (1 << 13),
+		// Don't evict cache for tests with small amounts of data, effectively.
+		4 * 1024,
+		4 * 1024,
 	)
 	.await
 	.unwrap()
@@ -72,17 +73,41 @@ fn finish_transaction() {
 }
 
 #[test]
-fn read_before_tx() {
+fn read_before_tx_offset_0() {
 	run(|| async {
 		let mut s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
-		obj.resize(2000).await.unwrap();
-		obj.write(1000, &[0xcc; 1000]).await.unwrap();
+
+		obj.resize(1000).await.unwrap();
+
+		let l = obj.write(0, &[1; 1000]).await.unwrap();
+		assert_eq!(l, 1000);
+
 		let mut buf = [0; 1000];
+
+		obj.read(0, &mut buf).await.unwrap();
+		assert_eq!(buf, [1; 1000]);
+	})
+}
+
+#[test]
+fn read_before_tx_offset_1000() {
+	run(|| async {
+		let mut s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+
+		obj.resize(2000).await.unwrap();
+
+		let l = obj.write(1000, &[1; 1000]).await.unwrap();
+		assert_eq!(l, 1000);
+
+		let mut buf = [0; 1000];
+
 		obj.read(0, &mut buf).await.unwrap();
 		assert_eq!(buf, [0; 1000]);
+
 		obj.read(1000, &mut buf).await.unwrap();
-		assert_eq!(buf, [0xcc; 1000]);
+		assert_eq!(buf, [1; 1000]);
 	})
 }
 
@@ -92,13 +117,13 @@ fn read_after_tx() {
 		let mut s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
-		obj.write(1000, &[0xcc; 1000]).await.unwrap();
+		obj.write(1000, &[1; 1000]).await.unwrap();
 		s.finish_transaction().await.unwrap();
 		let mut buf = [0; 1000];
 		obj.read(0, &mut buf).await.unwrap();
 		assert_eq!(buf, [0; 1000]);
 		obj.read(1000, &mut buf).await.unwrap();
-		assert_eq!(buf, [0xcc; 1000]);
+		assert_eq!(buf, [1; 1000]);
 	})
 }
 
