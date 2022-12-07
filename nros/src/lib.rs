@@ -74,7 +74,7 @@ mod test;
 mod util;
 
 pub use {
-	cache::Tree,
+	cache::{CacheStatus, Tree},
 	record::{Compression, MaxRecordSize},
 	storage::{
 		dev::{Allocator, Buf, MemDev, MemDevError},
@@ -178,6 +178,11 @@ impl<D: Dev> Nros<D> {
 	/// If `global_max < write_max`.
 	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
 		self.store.clone().resize_cache(global_max, write_max).await
+	}
+
+	/// Get cache status.
+	pub fn cache_status(&self) -> CacheStatus {
+		self.store.cache_status()
 	}
 }
 

@@ -113,6 +113,21 @@ fn read_before_tx_offset_1000() {
 }
 
 #[test]
+fn read_before_tx_offset_1023_short() {
+	run(|| async {
+		let mut s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+		obj.resize(2000).await.unwrap();
+		obj.write(1023, b"Hello, world!").await.unwrap();
+
+		let mut buf = [0; b"Hello, world!".len()];
+		obj.read(1023, &mut buf).await.unwrap();
+		assert_eq!(&buf, b"Hello, world!");
+	})
+}
+
+#[test]
 fn read_before_tx_offset_10p6() {
 	run(|| async {
 		let mut s = new(MaxRecordSize::K1).await;

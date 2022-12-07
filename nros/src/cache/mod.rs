@@ -1,7 +1,7 @@
 mod lru;
 mod tree;
 
-use std::{string, borrow::BorrowMut};
+use std::{borrow::BorrowMut, string};
 
 pub use tree::Tree;
 
@@ -500,8 +500,15 @@ impl<D: Dev> Cache<D> {
 	/// # Panics
 	///
 	/// If `global_max < write_max`.
-	pub async fn resize_cache(self: Rc<Self>, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
-		assert!(global_max >= write_max, "global cache is smaller than write cache");
+	pub async fn resize_cache(
+		self: Rc<Self>,
+		global_max: usize,
+		write_max: usize,
+	) -> Result<(), Error<D>> {
+		assert!(
+			global_max >= write_max,
+			"global cache is smaller than write cache"
+		);
 		{
 			let mut data = { &mut *self.data.borrow_mut() };
 			data.global_cache_max = global_max;
@@ -513,7 +520,11 @@ impl<D: Dev> Cache<D> {
 	/// Recalculate total cache usage from resizing a record and flush if necessary.
 	///
 	/// This adjusts both read and write cache.
-	async fn adjust_cache_use_both(self: Rc<Self>, old_len: usize, new_len: usize) -> Result<(), Error<D>> {
+	async fn adjust_cache_use_both(
+		self: Rc<Self>,
+		old_len: usize,
+		new_len: usize,
+	) -> Result<(), Error<D>> {
 		{
 			let data = { &mut *self.data.borrow_mut() };
 			data.global_cache_size += new_len;
@@ -530,13 +541,16 @@ impl<D: Dev> Cache<D> {
 
 		if data.is_flushing {
 			// Don't bother.
-			return Ok(())
+			return Ok(());
 		}
 		data.is_flushing = true;
 
 		while data.write_cache_size > data.write_cache_max {
 			// Remove last written to entry.
-			let (id, depth, offset) = data.write_lru.remove_last().expect("no nodes despite non-zero write cache size");
+			let (id, depth, offset) = data
+				.write_lru
+				.remove_last()
+				.expect("no nodes despite non-zero write cache size");
 			drop(data);
 			let mut entry = self.get_entry_mut_no_mark(id, depth, offset);
 
@@ -557,11 +571,16 @@ impl<D: Dev> Cache<D> {
 			data = self.data.borrow_mut();
 		}
 
-		if data.global_cache_size > data.global_cache_max {
+		while data.global_cache_size > data.global_cache_max {
 			// Remove last written to entry.
-			let &(id, depth, offset) = data.global_lru.last().expect("no nodes despite non-zero write cache size");
+			let &(id, depth, offset) = data
+				.global_lru
+				.last()
+				.expect("no nodes despite non-zero write cache size");
 			drop(data);
-			let entry = self.remove_entry(id, depth, offset).expect("entry not present");
+			let entry = self
+				.remove_entry(id, depth, offset)
+				.expect("entry not present");
 
 			if entry.write_index.is_some() {
 				// Store record.
@@ -578,6 +597,33 @@ impl<D: Dev> Cache<D> {
 
 		data.is_flushing = false;
 		Ok(())
+	}
+
+	/// Get cache status
+	pub fn cache_status(&self) -> CacheStatus {
+		#[cfg(test)]
+		self.verify_cache_usage();
+
+		let data = self.data.borrow();
+		CacheStatus { global_usage: data.global_cache_size, dirty_usage: data.write_cache_size }
+	}
+
+	/// Check if cache size matches real usage
+	#[cfg(test)]
+	#[track_caller]
+	pub fn verify_cache_usage(&self) {
+		let data = self.data.borrow();
+		let real_global_usage = data
+			.data
+			.values()
+			.flat_map(|o| o.data.iter())
+			.flat_map(|m| m.values())
+			.map(|v| v.data.len())
+			.sum::<usize>();
+		assert_eq!(
+			real_global_usage, data.global_cache_size,
+			"global cache size mismatch"
+		);
 	}
 }
 
@@ -688,4 +734,15 @@ impl fmt::Debug for Entry {
 			.field("write_index", &self.write_index)
 			.finish()
 	}
+}
+
+/// Summary of [`Cache`] status.
+///
+/// Returned by [`Cache::cache_status`].
+#[derive(Debug)]
+pub struct CacheStatus {
+	/// Total amount of memory used by record data, including dirty data.
+	pub global_usage: usize,
+	/// Total amount of memory used by dirty record data.
+	pub dirty_usage: usize,
 }
