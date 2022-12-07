@@ -107,7 +107,7 @@ impl<D: Dev> Tree<D> {
 			data
 		};
 
-		let Some(range) = calc_range(self.max_record_size(), offset, data.len()) else { return Ok(0) };
+		let range = calc_range(self.max_record_size(), offset, data.len());
 		let (first_offset, last_offset) =
 			calc_record_offsets(self.max_record_size(), offset, data.len());
 
@@ -233,7 +233,7 @@ impl<D: Dev> Tree<D> {
 			buf
 		};
 
-		let Some(range) = calc_range(self.max_record_size(), offset, buf.len()) else { return Ok(0) };
+		let range = calc_range(self.max_record_size(), offset, buf.len());
 		let (first_offset, last_offset) =
 			calc_record_offsets(self.max_record_size(), offset, buf.len());
 
@@ -639,15 +639,10 @@ fn calc_range(
 	record_size: MaxRecordSize,
 	offset: u64,
 	length: usize,
-) -> Option<RangeInclusive<u64>> {
-	// Avoid breaking stuff if offset == 0 (offset - 1 -> u64::MAX -> whoops)
-	(length > 0).then(|| {
-		// Determine range so we can iterate efficiently.
-		// start & end are inclusive.
-		let start_key = offset >> record_size;
-		let end_key = (offset + u64::try_from(length).unwrap() - 1) >> record_size;
-		start_key..=end_key
-	})
+) -> RangeInclusive<u64> {
+	let start_key = offset >> record_size;
+	let end_key = (offset + u64::try_from(length).unwrap()) >> record_size;
+	start_key..=end_key
 }
 
 /// Determine start & end offsets inside records.

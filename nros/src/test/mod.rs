@@ -177,6 +177,19 @@ fn read_after_tx() {
 	})
 }
 
+#[test]
+fn read_before_tx_1024() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+		obj.resize(1024).await.unwrap();
+		obj.write(0, &[1; 1024]).await.unwrap();
+		let mut buf = [0; 1000];
+		obj.read(0, &mut buf).await.unwrap();
+		assert_eq!(buf, [1; 1000]);
+	})
+}
+
 /*
 #[test]
 fn write_tx_read_many() {
