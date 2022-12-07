@@ -65,7 +65,6 @@ macro_rules! n2e {
 }
 
 mod cache;
-mod directory;
 pub mod header;
 mod record;
 pub mod storage;
