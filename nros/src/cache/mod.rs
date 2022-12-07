@@ -1,33 +1,21 @@
 mod lru;
 mod tree;
 
-use std::{borrow::BorrowMut, string};
-
 pub use tree::Tree;
 
 use {
 	crate::{BlockSize, Dev, Error, MaxRecordSize, Record, Store},
-	alloc::collections::BTreeMap,
 	core::{
 		cell::{Ref, RefCell, RefMut},
-		cmp::Ordering,
 		fmt,
-		future::{self, Future},
+		future,
 		mem,
-		pin::Pin,
-		ptr::NonNull,
-		task::{Context, Poll, Waker},
+		task::{Poll, Waker},
 	},
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
 	std::{collections::hash_map, rc::Rc},
 };
-
-/// Key to a cache entry.
-struct Key {
-	object_id: u64,
-	offset: u64,
-}
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
 const OBJECT_LIST_ID: u64 = u64::MAX;
@@ -451,8 +439,6 @@ impl<D: Dev> Cache<D> {
 		depth: u8,
 		offset: u64,
 	) -> Result<RefMut<Entry>, Error<D>> {
-		let mut result = Ok(());
-
 		let entry = RefMut::map(self.data.borrow_mut(), |data| {
 			let entry = data
 				.data
@@ -485,7 +471,7 @@ impl<D: Dev> Cache<D> {
 		// TODO figure out how to flush and still make the borrow stuff work.
 		//self.clone().flush().await?;
 
-		result.map(|()| entry)
+		Ok(entry)
 	}
 
 	/// Get the root record of the object list.

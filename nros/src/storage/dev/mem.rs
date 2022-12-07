@@ -4,7 +4,6 @@ use {
 	core::{
 		cell::{RefCell, RefMut},
 		fmt, future,
-		ops::Range,
 	},
 	std::rc::Rc,
 };
@@ -131,8 +130,4 @@ impl Buf for MemBuf {
 		assert!(len <= self.0.len(), "new len is larger than old len");
 		self.0 = self.0.iter().copied().take(len).collect()
 	}
-}
-
-pub struct MemRead {
-	buf: Box<[u8]>,
 }

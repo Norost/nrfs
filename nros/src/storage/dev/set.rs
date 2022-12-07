@@ -2,7 +2,7 @@ use {
 	super::{Allocator, Buf, Dev},
 	crate::{header::Header, BlockSize, Compression, Error, MaxRecordSize, Record},
 	core::{cell::Cell, future, num::NonZeroU64},
-	futures_util::stream::{FuturesUnordered, StreamExt, TryStreamExt},
+	futures_util::stream::{FuturesUnordered, TryStreamExt},
 };
 
 /// A single device with some extra information.
@@ -142,7 +142,7 @@ impl<D: Dev> DevSet<D> {
 					let len = offset - node.block_offset;
 					offset = node.block_offset;
 					// TODO this is ugly as hell.
-					create_and_save_header_tail(block_size, &node.dev, 0, len)
+					create_and_save_header_tail(block_size, &node.dev, len)
 				})
 			})
 			.flatten()
@@ -188,13 +188,6 @@ impl<D: Dev> DevSet<D> {
 			if blacklist.get(i.try_into().unwrap()) {
 				continue;
 			}
-
-			let mut buf = chain[0]
-				.dev
-				.allocator()
-				.alloc(size)
-				.await
-				.map_err(Error::Dev)?;
 
 			// Do a binary search for the start device.
 			let node = chain
@@ -388,7 +381,6 @@ async fn save_header<D: Dev>(
 async fn create_and_save_header_tail<D: Dev>(
 	block_size: BlockSize,
 	dev: &D,
-	start: u64,
 	len: u64,
 ) -> Result<(&D, <D::Allocator as Allocator>::Buf<'_>, u64), D::Error> {
 	let buf = create_header(block_size, dev, 0, 0).await?;

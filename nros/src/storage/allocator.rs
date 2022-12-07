@@ -1,6 +1,6 @@
 use {
 	super::{Dev, DevSet},
-	crate::{BlockSize, Buf, Error, LoadError, MaxRecordSize},
+	crate::{Error, MaxRecordSize},
 	endian::u64le,
 	rangemap::RangeSet,
 };

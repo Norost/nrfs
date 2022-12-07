@@ -71,7 +71,6 @@ mod record;
 pub mod storage;
 #[cfg(test)]
 mod test;
-mod util;
 
 pub use {
 	cache::{CacheStatus, Tree},

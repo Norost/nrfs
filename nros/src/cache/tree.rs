@@ -1,10 +1,7 @@
-use std::borrow::Borrow;
-
 use {
-	super::{Cache, CacheData, CacheRef, TreeData, OBJECT_LIST_ID},
-	crate::{Dev, DevSet, Error, MaxRecordSize, Record, Store},
+	super::{Cache, CacheRef, TreeData, OBJECT_LIST_ID},
+	crate::{Dev, Error, MaxRecordSize, Record},
 	core::{
-		cell::{RefCell, RefMut},
 		mem,
 		ops::RangeInclusive,
 	},
@@ -551,7 +548,7 @@ impl<D: Dev> Tree<D> {
 		}
 
 		// Get first record to fetch.
-		let mut record = Default::default();
+		let mut record;
 		if cur_depth == depth {
 			// Check if the record we're trying to fetch is within the newly added region from
 			// growing the tree or within the old region.
@@ -690,27 +687,12 @@ fn depth(max_record_size: MaxRecordSize, mut len: u64) -> u8 {
 		0
 	} else {
 		let mut depth = 0;
-		// TODO do it cleanly with ilog2_ceil
 		while len > 1u64 << max_record_size {
 			len >>= max_record_size.to_raw() - RECORD_SIZE_P2;
 			depth += 1;
 		}
 		depth + 1
 	}
-}
-
-/// Calculate `ceil(log2())`.
-///
-/// If `x` is 0, 0 is returned.
-fn ilog2_ceil(x: u64) -> u8 {
-	let Some(mut x) = x.checked_sub(1) else { return 0 };
-	x |= x >> 1;
-	x |= x >> 2;
-	x |= x >> 4;
-	x |= x >> 8;
-	x |= x >> 16;
-	x |= x >> 32;
-	u8::try_from(x.trailing_ones()).unwrap()
 }
 
 /// Get a record from a slice of raw data.

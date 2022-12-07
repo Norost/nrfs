@@ -3,17 +3,13 @@ pub mod dev;
 
 use {
 	crate::{
-		header::Header, BlockSize, Compression, Error, LoadError, MaxRecordSize, NewError, Record,
+		BlockSize, Compression, Error, MaxRecordSize, Record,
 	},
 	alloc::vec::Vec,
 	allocator::Allocator,
 	core::{
 		cell::RefCell,
-		fmt,
-		marker::PhantomData,
-		ops::{Deref, DerefMut, Range},
 	},
-	dev::Allocator as _,
 };
 
 pub use dev::{Dev, DevSet};
