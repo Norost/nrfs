@@ -133,12 +133,12 @@ impl<D: Dev> Nros<D> {
 	}
 
 	/// Create an object.
-	pub async fn create(&mut self) -> Result<Tree<D>, Error<D>> {
+	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
 		self.store.clone().create().await
 	}
 
 	/// Create two objects, one at ID and one at ID + 1.
-	pub async fn create_pair(&mut self) -> Result<(Tree<D>, Tree<D>), Error<D>> {
+	pub async fn create_pair(&self) -> Result<(Tree<D>, Tree<D>), Error<D>> {
 		self.store.clone().create_pair().await
 	}
 
@@ -147,11 +147,11 @@ impl<D: Dev> Nros<D> {
 	/// If this count reaches zero the object is automatically freed.
 	///
 	/// This function *must not* be used on invalid objects!
-	pub async fn decr_ref(&mut self, id: u64) -> Result<(), Error<D>> {
+	pub async fn decr_ref(&self, id: u64) -> Result<(), Error<D>> {
 		self.store.clone().decrease_refcount(id).await
 	}
 
-	pub async fn move_object(&mut self, to_id: u64, from_id: u64) -> Result<(), Error<D>> {
+	pub async fn move_object(&self, to_id: u64, from_id: u64) -> Result<(), Error<D>> {
 		self.store.clone().move_object(from_id, to_id).await
 	}
 

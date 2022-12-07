@@ -43,7 +43,7 @@ fn create_fs() {
 #[test]
 fn resize_object() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K1).await;
+		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1024).await.unwrap();
 		obj.resize(2040).await.unwrap();
@@ -55,7 +55,7 @@ fn resize_object() {
 #[test]
 fn write() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K1).await;
+		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
 		obj.write(1000, &[0xcc; 1000]).await.unwrap();
@@ -65,7 +65,7 @@ fn write() {
 #[test]
 fn finish_transaction() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K1).await;
+		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
 		obj.write(1000, &[0xcc; 1000]).await.unwrap();
@@ -76,7 +76,7 @@ fn finish_transaction() {
 #[test]
 fn read_before_tx_offset_0() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K1).await;
+		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 
 		obj.resize(1000).await.unwrap();
@@ -94,7 +94,7 @@ fn read_before_tx_offset_0() {
 #[test]
 fn read_before_tx_offset_1000() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K1).await;
+		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 
 		obj.resize(2000).await.unwrap();
@@ -115,7 +115,7 @@ fn read_before_tx_offset_1000() {
 #[test]
 fn read_before_tx_offset_1023_short() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K1).await;
+		let s = new(MaxRecordSize::K1).await;
 
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
@@ -130,7 +130,7 @@ fn read_before_tx_offset_1023_short() {
 #[test]
 fn read_before_tx_offset_10p6() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K1).await;
+		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 
 		obj.resize(2_000_000).await.unwrap();
@@ -151,7 +151,7 @@ fn read_before_tx_offset_10p6() {
 #[test]
 fn read_before_tx_offset_1000_short() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K1).await;
+		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
 		obj.write(1000, b"Hello, world!").await.unwrap();
@@ -164,7 +164,7 @@ fn read_before_tx_offset_1000_short() {
 #[test]
 fn read_after_tx() {
 	run(|| async {
-		let mut s = new(MaxRecordSize::K1).await;
+		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
 		obj.write(1000, &[1; 1000]).await.unwrap();
@@ -180,7 +180,7 @@ fn read_after_tx() {
 /*
 #[test]
 fn write_tx_read_many() {
-	let mut s = new(MaxRecordSize::K1);
+	let s = new(MaxRecordSize::K1);
 
 	let obj = s.new_object().unwrap();
 	s.resize(id, 2000).unwrap();
@@ -214,7 +214,7 @@ fn write_tx_read_many() {
 
 #[test]
 fn write_new_write() {
-	let mut s = new(MaxRecordSize::K1);
+	let s = new(MaxRecordSize::K1);
 
 	let obj = s.new_object().unwrap();
 	let id2 = s.new_object().unwrap();
