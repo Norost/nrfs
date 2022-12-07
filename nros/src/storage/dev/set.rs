@@ -32,7 +32,7 @@ pub struct DevSet<D: Dev> {
 
 	pub allocation_log_lba: Cell<u64>,
 	pub allocation_log_length: Cell<u64>,
-	pub object_list: Record,
+	pub object_list: Cell<Record>,
 }
 
 impl<D: Dev> DevSet<D> {
@@ -336,7 +336,7 @@ impl<D: Dev> SetBuf<'_, D> {
 	///
 	/// If the new size is larger than the current size.
 	pub fn shrink(&mut self, size: usize) {
-		todo!()
+		self.0.shrink(size);
 	}
 }
 

@@ -1,7 +1,7 @@
 mod lru;
 mod tree;
 
-use std::string;
+use std::{string, borrow::BorrowMut};
 
 pub use tree::Tree;
 
@@ -79,6 +79,10 @@ pub(crate) struct CacheData {
 	fetching: FxHashMap<(u64, u8, u64), Vec<Waker>>,
 	/// Used object IDs.
 	used_objects_ids: RangeSet<u64>,
+	/// Whether we're already flushing.
+	///
+	/// If yes, avoid flushing again since that breaks stuff.
+	is_flushing: bool,
 }
 
 /// Cache algorithm.
@@ -121,6 +125,7 @@ impl<D: Dev> Cache<D> {
 				locked_records: Default::default(),
 				fetching: Default::default(),
 				used_objects_ids: Default::default(),
+				is_flushing: false,
 			}),
 		}
 	}
@@ -196,29 +201,33 @@ impl<D: Dev> Cache<D> {
 
 	/// Destroy a record and it's associated cache entry, if any.
 	fn destroy(&self, id: u64, depth: u8, offset: u64, record: &Record) {
-		let mut data = self.data.borrow_mut();
-		let data = &mut *data; // ok, mr. borrow checker
-		if let Some(obj) = data.data.get_mut(&id) {
-			if let Some(entry) = obj.data[usize::from(depth)].remove(&id) {
-				// Remove entry from LRUs
-				let len = entry.data.len(); // TODO len() or capacity()?;
-				data.global_lru.remove(entry.global_index);
-				data.global_cache_size -= len;
-				if let Some(idx) = entry.write_index {
-					// We don't need to flush as the record is gone anyways.
-					data.write_lru.remove(idx);
-					data.write_cache_size -= len;
-				}
-
-				// Remove object if there is no cached data for it.
-				if obj.data.iter().all(|m| m.is_empty()) {
-					data.data.remove(&id);
-				}
-			}
-		}
+		let _ = self.remove_entry(id, depth, offset);
 
 		// Free blocks referenced by record.
 		self.store.destroy(record)
+	}
+
+	/// Remove an entry from the cache.
+	///
+	/// This does *not* flush the entry!
+	fn remove_entry(&self, id: u64, depth: u8, offset: u64) -> Option<Entry> {
+		let data = { &mut *self.data.borrow_mut() };
+		let obj = data.data.get_mut(&id)?;
+		let entry = obj.data[usize::from(depth)].remove(&offset)?;
+
+		// Remove entry from LRUs
+		let len = entry.data.len(); // TODO len() or capacity()?;
+		data.global_lru.remove(entry.global_index);
+		data.global_cache_size -= len;
+		if let Some(idx) = entry.write_index {
+			data.write_lru.remove(idx);
+			data.write_cache_size -= len;
+		}
+
+		// TODO remove the object at an appropriate time.
+		// i.e. right after the root has been saved and there are no remaining cached records.
+
+		Some(entry)
 	}
 
 	/// Move an object to a specific ID.
@@ -320,6 +329,9 @@ impl<D: Dev> Cache<D> {
 				// This will be polled in the if branch below
 				// FIXME if we return here other fetchers may end up waiting indefinitely.
 				let d = self.store.read(record).await?;
+
+				let len = d.len();
+
 				let data = { &mut *self.data.borrow_mut() };
 				let prev = data.data.get_mut(&id).expect("object does not exist").data
 					[usize::from(depth)]
@@ -332,6 +344,7 @@ impl<D: Dev> Cache<D> {
 					},
 				);
 				debug_assert!(prev.is_none(), "entry was already present");
+				data.global_cache_size += len;
 
 				// Wake other tasks waiting for this entry.
 				data.fetching
@@ -402,6 +415,27 @@ impl<D: Dev> Cache<D> {
 
 	/// Get a cached entry.
 	///
+	/// Unlike [`Self::get_entry_mut`], this does *not* mark the entry as dirty and hence won't
+	/// trigger a flush.
+	///
+	/// # Panics
+	///
+	/// If another borrow is alive.
+	///
+	/// If the entry is not present.
+	fn get_entry_mut_no_mark(&self, id: u64, depth: u8, offset: u64) -> RefMut<Entry> {
+		RefMut::map(self.data.borrow_mut(), |data| {
+			data.data
+				.get_mut(&id)
+				.expect("cache entry by id does not exist")
+				.data[usize::from(depth)]
+			.get_mut(&offset)
+			.expect("cache entry by offset does not exist")
+		})
+	}
+
+	/// Get a cached entry.
+	///
 	/// This will mark the entry as dirty, which in turn may trigger a flush of other dirty
 	/// entries.
 	///
@@ -411,6 +445,7 @@ impl<D: Dev> Cache<D> {
 	///
 	/// If the entry is not present.
 	async fn get_entry_mut(
+		//self: Rc<Self>,
 		&self,
 		id: u64,
 		depth: u8,
@@ -441,15 +476,14 @@ impl<D: Dev> Cache<D> {
 				// TODO should we use len() or capacity()?
 				// Maybe shrink data too from time to time?
 				data.write_cache_size += entry.data.len();
-
-				if data.write_cache_size > data.write_cache_max {
-					// TODO consider shrinking data too.
-					result = todo!("flush")
-				}
 			}
 
 			entry
 		});
+
+		// Flush since we may be exceeding write cache limits.
+		// TODO figure out how to flush and still make the borrow stuff work.
+		//self.clone().flush().await?;
 
 		result.map(|()| entry)
 	}
@@ -457,6 +491,93 @@ impl<D: Dev> Cache<D> {
 	/// Get the root record of the object list.
 	fn object_list(&self) -> Record {
 		self.store.object_list()
+	}
+
+	/// Readjust cache size.
+	///
+	/// This may be useful to increase or decrease depending on total system memory usage.
+	///
+	/// # Panics
+	///
+	/// If `global_max < write_max`.
+	pub async fn resize_cache(self: Rc<Self>, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
+		assert!(global_max >= write_max, "global cache is smaller than write cache");
+		{
+			let mut data = { &mut *self.data.borrow_mut() };
+			data.global_cache_max = global_max;
+			data.write_cache_max = write_max;
+		}
+		self.flush().await
+	}
+
+	/// Recalculate total cache usage from resizing a record and flush if necessary.
+	///
+	/// This adjusts both read and write cache.
+	async fn adjust_cache_use_both(self: Rc<Self>, old_len: usize, new_len: usize) -> Result<(), Error<D>> {
+		{
+			let data = { &mut *self.data.borrow_mut() };
+			data.global_cache_size += new_len;
+			data.global_cache_size -= old_len;
+			data.write_cache_size += new_len;
+			data.write_cache_size -= old_len;
+		}
+		self.flush().await
+	}
+
+	/// Flush if total memory use exceeds limits.
+	async fn flush(self: Rc<Self>) -> Result<(), Error<D>> {
+		let mut data = self.data.borrow_mut();
+
+		if data.is_flushing {
+			// Don't bother.
+			return Ok(())
+		}
+		data.is_flushing = true;
+
+		while data.write_cache_size > data.write_cache_max {
+			// Remove last written to entry.
+			let (id, depth, offset) = data.write_lru.remove_last().expect("no nodes despite non-zero write cache size");
+			drop(data);
+			let mut entry = self.get_entry_mut_no_mark(id, depth, offset);
+
+			// Store record.
+			// TODO try to do concurrent writes.
+			let rec = self.store.write(&entry.data).await?;
+
+			// Remove from write LRU
+			entry.write_index = None;
+			let len = entry.data.len();
+			drop(entry);
+			self.data.borrow_mut().write_cache_size -= len;
+
+			// Store the record in the appropriate place.
+			let obj = Tree::new(self.clone(), id).await?;
+			obj.update_record(depth, offset, rec).await?;
+			drop(obj);
+			data = self.data.borrow_mut();
+		}
+
+		if data.global_cache_size > data.global_cache_max {
+			// Remove last written to entry.
+			let &(id, depth, offset) = data.global_lru.last().expect("no nodes despite non-zero write cache size");
+			drop(data);
+			let entry = self.remove_entry(id, depth, offset).expect("entry not present");
+
+			if entry.write_index.is_some() {
+				// Store record.
+				// TODO try to do concurrent writes.
+				let rec = self.store.write(&entry.data).await?;
+
+				// Store the record in the appropriate place.
+				let obj = Tree::new(self.clone(), id).await?;
+				obj.update_record(depth, offset, rec).await?;
+			}
+
+			data = self.data.borrow_mut();
+		}
+
+		data.is_flushing = false;
+		Ok(())
 	}
 }
 

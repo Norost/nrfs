@@ -9,3 +9,7 @@ members = [
 [profile.release]
 lto = "fat"
 opt-level = 3
+
+[profile.grcov]
+inherits = "dev"
+opt-level = 0

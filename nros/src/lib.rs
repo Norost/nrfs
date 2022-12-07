@@ -168,6 +168,17 @@ impl<D: Dev> Nros<D> {
 	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
 		self.store.clone().get(id).await
 	}
+
+	/// Readjust cache size.
+	///
+	/// This may be useful to increase or decrease depending on total system memory usage.
+	///
+	/// # Panics
+	///
+	/// If `global_max < write_max`.
+	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
+		self.store.clone().resize_cache(global_max, write_max).await
+	}
 }
 
 pub enum NewError<D: Dev> {

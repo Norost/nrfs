@@ -54,7 +54,7 @@ where
 		let lba = u64::from(record.lba);
 		let len = record.length.into();
 
-		let count = self.calc_block_count(len);
+		let count = self.calc_block_count(len) << self.block_size();
 		let data = self
 			.devices
 			.read(lba.try_into().unwrap(), count, Default::default())
@@ -142,7 +142,12 @@ where
 
 	/// Get the root record of the object list.
 	pub fn object_list(&self) -> Record {
-		self.devices.object_list
+		self.devices.object_list.get()
+	}
+
+	/// Set the root record of the object list.
+	pub fn set_object_list(&self, root: Record) {
+		self.devices.object_list.set(root)
 	}
 }
 

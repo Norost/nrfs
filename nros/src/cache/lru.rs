@@ -71,6 +71,13 @@ impl<V> LruList<V> {
 		})
 	}
 
+	/// Get the last node from the list.
+	pub fn last(&self) -> Option<&V> {
+		(!self.nodes.is_empty()).then(|| {
+			&self.nodes.get(self.tail).unwrap().value
+		})
+	}
+
 	/// Get a value by node index.
 	pub fn get(&self, index: Idx) -> Option<&V> {
 		self.nodes.get(index).map(|node| &node.value)

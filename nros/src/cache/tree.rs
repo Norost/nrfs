@@ -118,16 +118,24 @@ impl<D: Dev> Tree<D> {
 		dbg!(&range, first_offset, last_offset);
 
 		if range.start() == range.end() {
-			// We need to slice one record twice
-			let b = self.get(0, *range.start()).await?;
+			let (old_len, new_len);
+			{
+				// We need to slice one record twice
+				let b = self.get(0, *range.start()).await?;
 
-			let mut b = b.get_mut().await?;
+				let mut b = b.get_mut().await?;
 
-			let b = &mut b.data;
-			let min_len = data.len().max(b.len());
-			b.resize(min_len, 0);
-			b[first_offset..last_offset].copy_from_slice(data);
-			trim_zeros_end(b);
+				let b = &mut b.data;
+				old_len = b.len();
+
+				let min_len = last_offset.max(b.len());
+				b.resize(min_len, 0);
+				b[first_offset..last_offset].copy_from_slice(data);
+				trim_zeros_end(b);
+
+				new_len = b.len();
+			}
+			self.cache.clone().adjust_cache_use_both(old_len, new_len).await?;
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
 			let mut data = data;
@@ -275,6 +283,54 @@ impl<D: Dev> Tree<D> {
 		}
 
 		Ok(buf_len)
+	}
+
+	/// Update a record.
+	/// This will write the record to the parent record or the root of this object.
+	// TODO avoid Box
+	#[async_recursion::async_recursion(?Send)]
+	pub(super) async fn update_record(&self, record_depth: u8, offset: u64, record: Record) -> Result<(), Error<D>> {
+		let len = self.len().await?;
+		let cur_depth = depth(self.max_record_size(), len);
+		let parent_depth = record_depth + 1;
+		dbg!(self.id, len, cur_depth, parent_depth);
+		assert!(parent_depth <= cur_depth);
+		if cur_depth == parent_depth {
+			assert_eq!(offset, 0, "root can only be at offset 0");
+
+			// Copy total length and references to new root.
+			let root = self.root().await?;
+			let record = Record {
+				total_length: len.into(),
+				references: root.references,
+				..record
+			};
+
+			// Update the root.
+			if self.id == OBJECT_LIST_ID { 
+				// Object list root is in header.
+				self.cache.store.set_object_list(record);
+				Ok(())
+			} else {
+				// Object root is in object list.
+				let l = self.cache.clone().write_object_table(self.id, record.as_ref()).await?;
+				assert_eq!(l, 32, "root was not fully written");
+				Ok(())
+			}
+		} else {
+			// Update a parent record.
+			let shift = self.max_record_size().to_raw() - RECORD_SIZE_P2;
+			let (offt, index) = divmod_p2(offset, shift);
+			let entry = self.get(parent_depth, offt).await?;
+			let mut entry = entry.get_mut().await?;
+			let old_len = entry.data.len();
+			let index = index * mem::size_of::<Record>();
+			let min_len = old_len.max(index + mem::size_of::<Record>());
+			entry.data.resize(min_len, 0);
+			entry.data[index..index + mem::size_of::<Record>()].copy_from_slice(record.as_ref());
+			trim_zeros_end(&mut entry.data);
+			Ok(())
+		}
 	}
 
 	/// Resize record tree.
@@ -467,14 +523,17 @@ impl<D: Dev> Tree<D> {
 		// Get first record to fetch.
 		let mut record = Default::default();
 
-		if cur_depth + 1 == depth {
+		dbg!(depth, cur_depth);
+		if cur_depth == depth {
 			// Check if the record we're trying to fetch is within the newly added region from
 			// growing the tree or within the old region.
 			//
 			// If is in the new region, add a zero record and return immediately.
 			//
 			// If not, update cur_depth to match the old depth and fetch as normal.
-			if todo!("check if grown") {
+			let offset_byte = offset << rec_size + (rec_size - RECORD_SIZE_P2) * depth;
+
+			if offset_byte < root.total_length {
 				record = root;
 			} else {
 				todo!("zero record")
@@ -518,6 +577,11 @@ impl<D: Dev> Tree<D> {
 	/// Get the maximum record size.
 	fn max_record_size(&self) -> MaxRecordSize {
 		self.cache.max_record_size()
+	}
+
+	/// Get the ID of this object.
+	pub fn id(&self) -> u64 {
+		self.id
 	}
 }
 
