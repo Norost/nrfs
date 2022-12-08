@@ -1,3 +1,4 @@
+mod allocator;
 mod cache;
 mod dev;
 mod record;

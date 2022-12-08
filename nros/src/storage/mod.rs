@@ -110,7 +110,16 @@ where
 		self.allocator
 			.borrow_mut()
 			.save(&self.devices, self.max_record_size())
-			.await
+			.await?;
+		self.devices.save_headers().await
+	}
+
+	/// Unmount the object store.
+	///
+	/// The current transaction is finished before returning the [`DevSet`].
+	pub async fn unmount(self) -> Result<DevSet<D>, Error<D>> {
+		self.finish_transaction().await?;
+		Ok(self.devices)
 	}
 
 	fn calc_block_count(&self, len: u32) -> usize {

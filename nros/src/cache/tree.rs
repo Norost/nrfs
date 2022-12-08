@@ -126,9 +126,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 				new_len = b.len();
 			}
-			self.cache
-				.adjust_cache_use_both(old_len, new_len)
-				.await?;
+			self.cache.adjust_cache_use_both(old_len, new_len).await?;
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
 			let mut data = data;
@@ -153,9 +151,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				trim_zeros_end(b);
 				new_len = b.len();
 			}
-			self.cache
-				.adjust_cache_use_both(old_len, new_len)
-				.await?;
+			self.cache.adjust_cache_use_both(old_len, new_len).await?;
 
 			// Copy middle records |xxxxxxxx|
 			for key in range {
@@ -181,9 +177,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 					trim_zeros_end(b);
 					new_len = b.len();
 				}
-				self.cache
-					.adjust_cache_use_both(old_len, new_len)
-					.await?;
+				self.cache.adjust_cache_use_both(old_len, new_len).await?;
 			}
 
 			// Copy end record |xxxx----|
@@ -203,9 +197,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 					trim_zeros_end(b);
 					new_len = b.len();
 				}
-				self.cache
-					.adjust_cache_use_both(old_len, new_len)
-					.await?;
+				self.cache.adjust_cache_use_both(old_len, new_len).await?;
 			}
 		}
 
@@ -360,9 +352,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				trim_zeros_end(&mut entry.data);
 				new_len = entry.data.len();
 			}
-			self.cache
-				.adjust_cache_use_both(old_len, new_len)
-				.await
+			self.cache.adjust_cache_use_both(old_len, new_len).await
 		}
 	}
 

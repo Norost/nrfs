@@ -8,28 +8,28 @@ use {
 pub(crate) struct Header {
 	pub magic: [u8; 16],
 
-	pub version: u32le,
+	pub version: [u8; 3],
+	pub compression: u8,
 	pub block_length_p2: u8,
 	pub max_record_length_p2: u8,
-	pub compression: u8,
 	pub mirror_count: u8,
-	pub uid: u64le,
+	pub mirror_index: u8,
+
+	pub uid: [u8; 16],
 
 	pub total_block_count: u64le,
 	pub lba_offset: u64le,
 
 	pub block_count: u64le,
-	pub _reserved_0: u64,
 
 	pub object_list: Record,
 
-	pub allocation_log_lba: u64le,
-	pub allocation_log_length: u64le,
+	pub allocation_log: Record,
 
 	pub xxh3: u64le,
-	pub generation: u32le,
-	pub _reserved_1: u16,
-	pub header_length: u16le,
+	pub generation: u64le,
+
+	pub extra: [u8; 512 - 136],
 }
 
 raw!(Header);
@@ -39,39 +39,39 @@ impl Default for Header {
 		Self {
 			magic: Self::MAGIC,
 
-			version: 0x00_00_0003.into(),
+			version: Self::VERSION,
+			compression: Compression::Lz4.to_raw(),
 			block_length_p2: Default::default(),
 			max_record_length_p2: MaxRecordSize::K128.to_raw(),
-			compression: Compression::Lz4.to_raw(),
 			mirror_count: Default::default(),
+			mirror_index: Default::default(),
+
 			uid: Default::default(),
 
 			total_block_count: Default::default(),
 			lba_offset: Default::default(),
-
 			block_count: Default::default(),
-			_reserved_0: Default::default(),
 
 			object_list: Default::default(),
-
-			allocation_log_lba: Default::default(),
-			allocation_log_length: Default::default(),
+			allocation_log: Default::default(),
 
 			xxh3: Default::default(),
 			generation: Default::default(),
-			_reserved_1: Default::default(),
-			header_length: 4096.into(), // Should be sufficient for at least a while
+
+			extra: [0; 512 - 136],
 		}
 	}
 }
 
 impl Header {
-	/// The magic every header begins with;
+	/// The magic every header begins with.
 	pub const MAGIC: [u8; 16] = *b"Nora Reliable FS";
+	/// The version of the on-disk format.
+	pub const VERSION: [u8; 3] = [0, 2, 0];
 
-	/// Check if the magic is proper
-	pub fn verify_magic(&mut self) -> bool {
-		self.magic == Self::MAGIC
+	/// Check if the magic is proper & the version is compatible.
+	pub fn verify_compatible(&mut self) -> bool {
+		self.magic == Self::MAGIC && self.version == Self::VERSION
 	}
 
 	/// Check if the header data is intact.
@@ -91,29 +91,27 @@ impl Header {
 
 	/// Check whether two headers are part of the same filesystem.
 	pub fn compatible(&self, other: &Self) -> bool {
-		self.block_length_p2 == other.block_length_p2
-			&& self.max_record_length_p2 == other.max_record_length_p2
-			&& self.mirror_count == other.mirror_count
-			&& self.uid == other.uid
-			&& self.total_block_count == other.total_block_count
-			&& self.object_list == other.object_list
-			&& self.allocation_log_lba == other.allocation_log_lba
-			&& self.allocation_log_length == other.allocation_log_length
-			&& self.generation == other.generation
-			&& self.header_length == other.header_length
+		// Comparing other headers *shouldn't* be necessary unless
+		// we're deliberately being screwed with - in which case all
+		// bets are off anyways.
+		self.uid == other.uid && self.generation == other.generation
 	}
 }
 
 impl fmt::Debug for Header {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		let v = u32::from(self.version);
-		let (a, b, c) = (v >> 24, v >> 16 & 0xff, v & 0xffff);
 		let mut f = f.debug_struct(stringify!(Header));
 
 		// TODO use Utf8Lossy when it is stabilized.
 		f.field("magic", &String::from_utf8_lossy(&self.magic));
 
+		let [a, b, c] = self.version;
 		f.field("version", &format_args!("v{}.{}.{}", a, b, c));
+		if let Some(c) = Compression::from_raw(self.compression) {
+			f.field("compression", &c);
+		} else {
+			f.field("compression", &self.compression);
+		}
 		f.field(
 			"block_length_p2",
 			&format_args!("2**{}", self.block_length_p2),
@@ -122,27 +120,24 @@ impl fmt::Debug for Header {
 			"max_record_length_p2",
 			&format_args!("2**{}", self.max_record_length_p2),
 		);
-		if let Some(c) = Compression::from_raw(self.compression) {
-			f.field("compression", &c);
-		} else {
-			f.field("compression", &self.compression);
-		}
 		f.field("mirror_count", &self.mirror_count);
-		f.field("uid", &format_args!("{:08x}", self.uid));
+		f.field("mirror_index", &self.mirror_count);
+
+		f.field(
+			"uid",
+			&format_args!("{:016x}", u128::from_le_bytes(self.uid)),
+		);
 
 		f.field("total_block_count", &self.total_block_count);
 		f.field("lba_offset", &self.lba_offset);
-
 		f.field("block_count", &self.block_count);
 
 		f.field("object_list", &self.object_list);
 
-		f.field("allocation_log_lba", &self.allocation_log_lba);
-		f.field("allocation_log_length", &self.allocation_log_length);
+		f.field("allocation_log", &self.allocation_log);
 
 		f.field("xxh3", &self.xxh3);
 		f.field("generation", &self.generation);
-		f.field("header_length", &self.header_length);
 
 		f.finish_non_exhaustive()
 	}

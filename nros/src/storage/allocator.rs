@@ -1,6 +1,6 @@
 use {
 	super::{Dev, DevSet},
-	crate::{Error, MaxRecordSize},
+	crate::{Error, MaxRecordSize, Record},
 	endian::u64le,
 	rangemap::RangeSet,
 };
@@ -36,8 +36,8 @@ impl Allocator {
 		D: Dev,
 	{
 		let (lba, len) = (
-			devices.allocation_log_lba.get(),
-			devices.allocation_log_length.get(),
+			u64::from(devices.allocation_log.get().lba),
+			u64::from(devices.allocation_log.get().total_length),
 		);
 
 		let mut alloc_map = RangeSet::new();
@@ -48,7 +48,7 @@ impl Allocator {
 			let rd = devices
 				.read(
 					lba.try_into().unwrap(),
-					blocks.try_into().unwrap(),
+					(blocks << devices.block_size()).try_into().unwrap(),
 					Default::default(),
 				)
 				.await?;
@@ -145,8 +145,11 @@ impl Allocator {
 		self.free_map = Default::default();
 		self.dirty_map = Default::default();
 
-		devs.allocation_log_lba.set(lba);
-		devs.allocation_log_length.set(len);
+		devs.allocation_log.set(Record {
+			lba: lba.into(),
+			total_length: len.into(),
+			..Default::default()
+		});
 
 		Ok(())
 	}

@@ -136,7 +136,6 @@ pub(crate) struct CacheData {
 
 impl fmt::Debug for CacheData {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-
 		struct FmtData<'a>(&'a FxHashMap<u64, TreeData>);
 
 		impl fmt::Debug for FmtData<'_> {
@@ -252,10 +251,10 @@ impl<D: Dev> Cache<D> {
 	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
 		let id = self.alloc_ids(1);
 		self.write_object_table(
-				id,
-				Record { references: 1.into(), ..Default::default() }.as_ref(),
-			)
-			.await?;
+			id,
+			Record { references: 1.into(), ..Default::default() }.as_ref(),
+		)
+		.await?;
 		Tree::new(self, id).await
 	}
 
@@ -585,11 +584,7 @@ impl<D: Dev> Cache<D> {
 	/// # Panics
 	///
 	/// If `global_max < write_max`.
-	pub async fn resize_cache(
-		&self,
-		global_max: usize,
-		write_max: usize,
-	) -> Result<(), Error<D>> {
+	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
 		assert!(
 			global_max >= write_max,
 			"global cache is smaller than write cache"
@@ -605,11 +600,7 @@ impl<D: Dev> Cache<D> {
 	/// Recalculate total cache usage from resizing a record and flush if necessary.
 	///
 	/// This adjusts both read and write cache.
-	async fn adjust_cache_use_both(
-		&self,
-		old_len: usize,
-		new_len: usize,
-	) -> Result<(), Error<D>> {
+	async fn adjust_cache_use_both(&self, old_len: usize, new_len: usize) -> Result<(), Error<D>> {
 		{
 			let data = { &mut *self.data.borrow_mut() };
 			data.global_cache_size += new_len;
@@ -682,6 +673,20 @@ impl<D: Dev> Cache<D> {
 
 		data.is_flushing = false;
 		Ok(())
+	}
+
+	/// Unmount the cache.
+	///
+	/// The cache is flushed before returning the underlying [`Store`].
+	pub async fn unmount(self) -> Result<Store<D>, Error<D>> {
+		let global_max = self.data.borrow().global_cache_max;
+		self.resize_cache(global_max, 0).await?;
+		debug_assert_eq!(
+			self.cache_status().dirty_usage,
+			0,
+			"not all data has been flushed"
+		);
+		Ok(self.store)
 	}
 
 	/// Get cache status

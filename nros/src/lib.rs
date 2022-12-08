@@ -107,14 +107,11 @@ impl<D: Dev> Nros<D> {
 	}
 
 	/// Load an existing object store.
-	pub async fn load<I>(
-		devices: I,
+	pub async fn load(
+		devices: Vec<D>,
 		read_cache_size: usize,
 		write_cache_size: usize,
-	) -> Result<Self, Error<D>>
-	where
-		I: IntoIterator<Item = D>,
-	{
+	) -> Result<Self, Error<D>> {
 		let devs = DevSet::load(devices).await?;
 		Self::load_inner(devs, read_cache_size, write_cache_size).await
 	}
@@ -170,12 +167,21 @@ impl<D: Dev> Nros<D> {
 	///
 	/// If `global_max < write_max`.
 	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
-		self.store.clone().resize_cache(global_max, write_max).await
+		self.store.resize_cache(global_max, write_max).await
 	}
 
 	/// Get cache status.
 	pub fn cache_status(&self) -> CacheStatus {
 		self.store.cache_status()
+	}
+
+	/// Unmount the object store.
+	///
+	/// This performs one last transaction.
+	pub async fn unmount(self) -> Result<Vec<D>, Error<D>> {
+		let store = self.store.unmount().await?;
+		let devset = store.unmount().await?;
+		Ok(devset.into_devices())
 	}
 }
 
