@@ -128,3 +128,17 @@ fn allocator_save_space_leak() {
 		Remount,
 	]).run()
 }
+
+#[test]
+fn large_object_shift_overflow() {
+	Test::new([
+		Create {
+			size: 18446567461959458655,
+		},
+		Write {
+			idx: 4294967295,
+			offset: 6917529024946200575,
+			amount: 24415,
+		},
+	]).run()
+}

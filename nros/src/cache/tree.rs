@@ -552,7 +552,14 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// If is in the new region, add a zero record and return immediately.
 			//
 			// If not, update cur_depth to match the old depth and fetch as normal.
-			let offset_byte = offset << rec_size + (rec_size - RECORD_SIZE_P2) * target_depth;
+
+			let shift = rec_size + (rec_size - RECORD_SIZE_P2) * target_depth;
+			// The shift may be 64 or larger if we're at the very root.
+			// In that case offset should be 0 however.
+			// offset << shift with a number smaller than 64 shouldn't ever overflow either.
+			// TODO add debug asserts as a sanity check.
+			// Can't find any nice methods to use though :(
+			let offset_byte = offset.wrapping_shl(shift.into());
 
 			if offset_byte < root.total_length {
 				// Start iterating on on-dev records.
@@ -682,5 +689,60 @@ fn depth(max_record_size: MaxRecordSize, mut len: u64) -> u8 {
 			depth += 1;
 		}
 		depth + 1
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn depth_rec1k_len0() {
+		assert_eq!(depth(MaxRecordSize::K1, 0), 0);
+	}
+
+	#[test]
+	fn depth_rec1k_len1() {
+		assert_eq!(depth(MaxRecordSize::K1, 1), 1);
+	}
+
+	#[test]
+	fn depth_rec1k_len1023() {
+		assert_eq!(depth(MaxRecordSize::K1, 1023), 1);
+	}
+
+	#[test]
+	fn depth_rec1k_len1024() {
+		assert_eq!(depth(MaxRecordSize::K1, 1024), 1);
+	}
+
+	#[test]
+	fn depth_rec1k_len1025() {
+		assert_eq!(depth(MaxRecordSize::K1, 1025), 2);
+	}
+
+	#[test]
+	fn depth_rec1k_2p10() {
+		assert_eq!(depth(MaxRecordSize::K1, 1 << 10 + 5 * 0), 1);
+	}
+
+	#[test]
+	fn depth_rec1k_2p15() {
+		assert_eq!(depth(MaxRecordSize::K1, 1 << 10 + 5 * 1), 2);
+	}
+
+	#[test]
+	fn depth_rec1k_2p20() {
+		assert_eq!(depth(MaxRecordSize::K1, 1 << 10 + 5 * 2), 3);
+	}
+
+	#[test]
+	fn depth_rec1k_2p40() {
+		assert_eq!(depth(MaxRecordSize::K1, 1 << 10 + 5 * 6), 7);
+	}
+
+	#[test]
+	fn depth_rec1k_lenmax() {
+		assert_eq!(depth(MaxRecordSize::K1, u64::MAX), 12);
 	}
 }
