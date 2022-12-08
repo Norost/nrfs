@@ -40,6 +40,8 @@ impl<V> LruList<V> {
 			.nodes
 			.insert(Node { next: IDX_NONE, prev: IDX_NONE, value });
 		self.push_front(idx);
+		#[cfg(test)]
+		self.assert_valid();
 		idx
 	}
 
@@ -50,7 +52,9 @@ impl<V> LruList<V> {
 	/// If the node at the index does not exist.
 	pub fn promote(&mut self, index: Idx) {
 		self.remove_list(index);
-		self.push_front(index)
+		self.push_front(index);
+		#[cfg(test)]
+		self.assert_valid();
 	}
 
 	/// Remove a node from the list.
@@ -60,14 +64,20 @@ impl<V> LruList<V> {
 	/// If the node at the index does not exist.
 	pub fn remove(&mut self, index: Idx) -> V {
 		self.remove_list(index);
-		self.nodes.remove(index).unwrap().value
+		let val = self.nodes.remove(index).unwrap().value;
+		#[cfg(test)]
+		self.assert_valid();
+		val
 	}
 
 	/// Remove the last node from the list.
 	pub fn remove_last(&mut self) -> Option<V> {
 		(!self.nodes.is_empty()).then(|| {
 			let idx = self.pop_last();
-			self.nodes.remove(idx).unwrap().value
+			let val = self.nodes.remove(idx).unwrap().value;
+			#[cfg(test)]
+			self.assert_valid();
+			val
 		})
 	}
 
@@ -95,8 +105,11 @@ impl<V> LruList<V> {
 			// Make previous head point to new head.
 			debug_assert!(self.tail != IDX_NONE);
 			debug_assert!(self.nodes[self.head].next == IDX_NONE);
+			debug_assert!(self.nodes[self.tail].prev == IDX_NONE);
+
 			self.nodes[self.head].next = index;
 			self.nodes[index].prev = self.head;
+			self.nodes[index].next = IDX_NONE;
 		}
 		self.head = index;
 	}
@@ -118,21 +131,35 @@ impl<V> LruList<V> {
 	///
 	/// If the node at the index does not exist.
 	fn remove_list(&mut self, index: Idx) {
-		let prev = self.nodes[index].prev;
-		let next = self.nodes[index].next;
+		let node = &self.nodes[index];
+		let (prev, next) = (node.prev, node.next);
 
-		// Remove from head and tail
-		if index == self.tail {
+		// Link neighbours together.
+		// Also remove from tail and head, if necessary.
+		if prev != IDX_NONE {
+			self.nodes[prev].next = next;
+		} else {
 			self.tail = next;
-			if next != IDX_NONE {
-				self.nodes[next].prev = IDX_NONE;
-			}
 		}
-		if index == self.head {
+
+		if next != IDX_NONE {
+			self.nodes[next].prev = prev;
+		} else {
 			self.head = prev;
-			if prev != IDX_NONE {
-				self.nodes[prev].next = IDX_NONE;
-			}
 		}
+	}
+
+	/// Check if all nodes in the linked list are still connected.
+	#[cfg(test)]
+	#[track_caller]
+	fn assert_valid(&self) {
+		let mut index = self.tail;
+		let mut prev = IDX_NONE;
+		for _ in 0..self.nodes.len() {
+			assert_ne!(index, IDX_NONE, "index is none before end");
+			assert_eq!(self.nodes[index].prev, prev, "prev doesn't match");
+			(prev, index) = (index, self.nodes[index].next);
+		}
+		assert_eq!(index, IDX_NONE, "cycle in list");
 	}
 }
