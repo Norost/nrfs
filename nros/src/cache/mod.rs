@@ -197,7 +197,11 @@ impl<D: Dev> Cache<D> {
 		let len = u64::from(store.object_list().total_length);
 		if len > 0 {
 			let rec_size = u64::try_from(mem::size_of::<Record>()).unwrap();
-			assert_eq!(len % rec_size, 0, "todo: total length not a multiple of record size");
+			assert_eq!(
+				len % rec_size,
+				0,
+				"todo: total length not a multiple of record size"
+			);
 			used_objects_ids.insert(0..len / rec_size);
 		}
 

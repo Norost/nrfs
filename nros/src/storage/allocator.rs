@@ -1,9 +1,9 @@
 use {
 	super::{Dev, Store},
 	crate::{util, Error, Record},
-	futures_util::stream::{FuturesUnordered, TryStreamExt},
 	core::mem,
 	endian::u64le,
+	futures_util::stream::{FuturesUnordered, TryStreamExt},
 	rangemap::RangeSet,
 };
 
@@ -56,7 +56,10 @@ impl Allocator {
 
 			// Add entries
 			let entry_mask = mem::size_of::<Entry>() - 1;
-			for i in (mem::size_of::<Record>()..(end + entry_mask) & !entry_mask).step_by(16).rev() {
+			for i in (mem::size_of::<Record>()..(end + entry_mask) & !entry_mask)
+				.step_by(16)
+				.rev()
+			{
 				// Get entry
 				let max_len = (end - i).min(mem::size_of::<Entry>());
 				let mut entry = Entry::default();
@@ -148,17 +151,21 @@ impl Allocator {
 
 			// Store entries
 			for entry in (&mut iter).take(entries_per_record) {
-				let entry = Entry {
-					lba: entry.start.into(),
-					size: (entry.end - entry.start).into(),
-				};
-				assert!(entry.size < 1 << 63, "size overflow, disks are too massive? :P");
+				let entry =
+					Entry { lba: entry.start.into(), size: (entry.end - entry.start).into() };
+				assert!(
+					entry.size < 1 << 63,
+					"size overflow, disks are too massive? :P"
+				);
 				buf.extend_from_slice(entry.as_ref());
 			}
 
 			// Pack record
 			util::trim_zeros_end(&mut buf);
-			debug_assert!(!buf.is_empty(), "buffer should have at least one log entry with non-zero size");
+			debug_assert!(
+				!buf.is_empty(),
+				"buffer should have at least one log entry with non-zero size"
+			);
 			let len = store.round_block_size(buf.len().try_into().unwrap());
 
 			// FIXME we should poll writes while waiting for an alloc,
@@ -170,8 +177,14 @@ impl Allocator {
 			b.shrink(len);
 
 			// Store record
-			let blocks = store.calc_block_count(len.try_into().unwrap()).try_into().unwrap();
-			let lba = self.alloc(blocks, store.devices.block_count()).ok_or(Error::NotEnoughSpace)?;
+			let blocks = store
+				.calc_block_count(len.try_into().unwrap())
+				.try_into()
+				.unwrap();
+			let lba = self
+				.alloc(blocks, store.devices.block_count())
+				.ok_or(Error::NotEnoughSpace)?;
+			prev.lba = lba.into();
 			writes.push(store.devices.write(lba, b));
 			stack_allocs.push(lba..lba + blocks);
 		}

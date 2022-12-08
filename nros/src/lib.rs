@@ -124,7 +124,7 @@ impl<D: Dev> Nros<D> {
 		read_cache_size: usize,
 		write_cache_size: usize,
 	) -> Result<Self, Error<D>> {
-		let store = Store::new(devices).await.map_err(|_| todo!())?;
+		let store = Store::new(devices).await?;
 		let store = Cache::new(store, read_cache_size, write_cache_size);
 		Ok(Self { store })
 	}
