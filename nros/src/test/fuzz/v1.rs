@@ -102,6 +102,29 @@ impl Test {
 use Op::*;
 
 #[test]
-fn fuzz_cm() {
+fn unset_allocator_lba() {
 	Test::new([Create { size: 18446744073709486123 }, Remount]).run()
+}
+
+#[test]
+fn allocator_save_space_leak() {
+	Test::new([
+		Create {
+			size: 18446744073709546299,
+		},
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+		Remount,
+	]).run()
 }

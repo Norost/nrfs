@@ -31,6 +31,10 @@ pub struct Allocator {
 	/// This is used to determine whether a block can safely be recycled in the current
 	/// transaction.
 	dirty_map: RangeSet<u64>,
+	/// Previously allocated stack records.
+	///
+	/// Should be freed on log rewrite.
+	stack: Vec<Record>,
 }
 
 impl Allocator {
@@ -39,11 +43,15 @@ impl Allocator {
 		D: Dev,
 	{
 		let mut alloc_map = RangeSet::new();
+		let mut stack = Vec::new();
 
 		// Iterate stack from top to bottom
 		let mut record = store.devices.allocation_log.get();
 		let mut ignore = RangeSet::new(); // ranges that are already covered by a recent entry.
 		while record.length > 0 {
+			// Append to stack for later ops
+			stack.push(record);
+
 			// Get record data
 			let data = store.read(&record).await?;
 			let lba = u64::from(record.lba);
@@ -86,7 +94,7 @@ impl Allocator {
 			record = util::get_record(&data, 0);
 		}
 
-		Ok(Self { alloc_map, free_map: Default::default(), dirty_map: Default::default() })
+		Ok(Self { alloc_map, free_map: Default::default(), dirty_map: Default::default(), stack })
 	}
 
 	pub fn alloc(&mut self, blocks: u64, block_count: u64) -> Option<u64> {
@@ -134,6 +142,14 @@ impl Allocator {
 
 		// Save map
 		// TODO avoid writing the entire log every time.
+
+		// Deallocate all stack records of current log.
+		for record in self.stack.drain(..) {
+			let lba = u64::from(record.lba);
+			let blocks = store.calc_block_count(record.length.into());
+			alloc_map.remove(lba..lba + u64::try_from(blocks).unwrap());
+		}
+
 		let mut iter = alloc_map.iter().peekable();
 		let rec_size = 1usize << store.max_record_size();
 		let entries_per_record = (rec_size - mem::size_of::<Record>()) / mem::size_of::<Entry>();
@@ -142,7 +158,6 @@ impl Allocator {
 		let writes = FuturesUnordered::new();
 
 		let mut prev = Record::default();
-		let mut stack_allocs = Vec::with_capacity(0 /* TODO */);
 		let mut buf = Vec::with_capacity(rec_size);
 		while iter.peek().is_some() {
 			// Reference previous record
@@ -186,7 +201,7 @@ impl Allocator {
 				.ok_or(Error::NotEnoughSpace)?;
 			prev.lba = lba.into();
 			writes.push(store.devices.write(lba, b));
-			stack_allocs.push(lba..lba + blocks);
+			self.stack.push(prev);
 		}
 
 		// Finish writes
@@ -194,8 +209,10 @@ impl Allocator {
 		store.devices.allocation_log.set(prev);
 
 		// Update alloc_map with *implicitly* recorded allocations for stack records.
-		for range in stack_allocs {
-			alloc_map.insert(range);
+		for record in self.stack.iter() {
+			let lba = u64::from(record.lba);
+			let blocks = store.calc_block_count(record.length.into());
+			alloc_map.insert(lba..lba + u64::try_from(blocks).unwrap());
 		}
 
 		// Clear free & dirty ranges.
