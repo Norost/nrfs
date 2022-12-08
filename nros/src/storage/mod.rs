@@ -32,7 +32,9 @@ where
 	D: Dev,
 {
 	pub async fn new(devices: DevSet<D>) -> Result<Self, Error<D>> {
-		Ok(Self { allocator: Allocator::load(&devices).await?.into(), devices })
+		let mut slf = Self { allocator: Default::default(), devices };
+		slf.allocator = Allocator::load(&slf).await?.into();
+		Ok(slf)
 	}
 
 	/// Read a record.
@@ -107,15 +109,26 @@ where
 	/// This saves the allocation log, ensures all writes are committed and makes blocks
 	/// freed in this transaction available for the next transaction.
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
-		self.allocator
-			.borrow_mut()
-			.save(&self.devices, self.max_record_size())
-			.await
+		self.allocator.borrow_mut().save(self).await?;
+		self.devices.save_headers().await
+	}
+
+	/// Unmount the object store.
+	///
+	/// The current transaction is finished before returning the [`DevSet`].
+	pub async fn unmount(self) -> Result<DevSet<D>, Error<D>> {
+		self.finish_transaction().await?;
+		Ok(self.devices)
 	}
 
 	fn calc_block_count(&self, len: u32) -> usize {
 		let bs = 1 << self.block_size().to_raw();
-		((len + bs - 1) / bs) as _
+		((len + bs - 1) / bs).try_into().unwrap()
+	}
+
+	fn round_block_size(&self, len: u32) -> usize {
+		let bs = 1 << self.block_size().to_raw();
+		((len + bs - 1) & !(bs - 1)).try_into().unwrap()
 	}
 
 	pub fn block_size(&self) -> BlockSize {

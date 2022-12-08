@@ -7,6 +7,9 @@ name = "arbitrary"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29d47fbf90d5149a107494b15a7dc8d69b351be2db3bb9691740e88ec17fd880"
+dependencies = [
+ "derive_arbitrary",
+]
 
 [[package]]
 name = "arena"
@@ -43,6 +46,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9f73505338f7d905b19d18738976aae232eb46b8efc15554ffc56deb5d9ebe4"
 dependencies = [
  "jobserver",
+]
+
+[[package]]
+name = "derive_arbitrary"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8a16495aeb28047bb1185fca837baf755e7d71ed3aeed7f8504654ffa927208"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -123,6 +137,7 @@ source = "git+https://github.com/Demindiro/nora_endian#07bd2d0463c74a597dde43379
 name = "nros"
 version = "0.1.0"
 dependencies = [
+ "arbitrary",
  "arena",
  "arrayvec",
  "async-recursion",

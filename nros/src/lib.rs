@@ -1,6 +1,7 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
 #![feature(int_roundings)]
+#![feature(iterator_try_collect)]
 #![feature(nonzero_min_max)]
 #![feature(pin_macro)]
 #![feature(type_alias_impl_trait)]
@@ -68,8 +69,9 @@ mod cache;
 pub mod header;
 mod record;
 pub mod storage;
-#[cfg(test)]
-mod test;
+#[cfg(any(test, fuzzing))]
+pub mod test;
+mod util;
 
 pub use {
 	cache::{CacheStatus, Tree},
@@ -80,12 +82,12 @@ pub use {
 	},
 };
 
-use {cache::Cache, core::fmt, record::Record, std::rc::Rc, storage::DevSet};
+use {cache::Cache, core::fmt, record::Record, storage::DevSet};
 
 #[derive(Debug)]
 pub struct Nros<D: Dev> {
 	/// Backing store with cache and allocator.
-	store: Rc<Cache<D>>,
+	store: Cache<D>,
 }
 
 impl<D: Dev> Nros<D> {
@@ -107,14 +109,11 @@ impl<D: Dev> Nros<D> {
 	}
 
 	/// Load an existing object store.
-	pub async fn load<I>(
-		devices: I,
+	pub async fn load(
+		devices: Vec<D>,
 		read_cache_size: usize,
 		write_cache_size: usize,
-	) -> Result<Self, Error<D>>
-	where
-		I: IntoIterator<Item = D>,
-	{
+	) -> Result<Self, Error<D>> {
 		let devs = DevSet::load(devices).await?;
 		Self::load_inner(devs, read_cache_size, write_cache_size).await
 	}
@@ -125,20 +124,19 @@ impl<D: Dev> Nros<D> {
 		read_cache_size: usize,
 		write_cache_size: usize,
 	) -> Result<Self, Error<D>> {
-		let store = Store::new(devices).await.map_err(|_| todo!())?;
+		let store = Store::new(devices).await?;
 		let store = Cache::new(store, read_cache_size, write_cache_size);
-		let store = Rc::new(store);
 		Ok(Self { store })
 	}
 
 	/// Create an object.
 	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
-		self.store.clone().create().await
+		self.store.create().await
 	}
 
 	/// Create two objects, one at ID and one at ID + 1.
 	pub async fn create_pair(&self) -> Result<(Tree<D>, Tree<D>), Error<D>> {
-		self.store.clone().create_pair().await
+		self.store.create_pair().await
 	}
 
 	/// Decrement the reference count to an object.
@@ -147,7 +145,7 @@ impl<D: Dev> Nros<D> {
 	///
 	/// This function *must not* be used on invalid objects!
 	pub async fn decr_ref(&self, id: u64) -> Result<(), Error<D>> {
-		self.store.clone().decrease_refcount(id).await
+		self.store.decrease_refcount(id).await
 	}
 
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
@@ -160,7 +158,7 @@ impl<D: Dev> Nros<D> {
 
 	/// Return an owned reference to an object.
 	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
-		self.store.clone().get(id).await
+		self.store.get(id).await
 	}
 
 	/// Readjust cache size.
@@ -171,12 +169,21 @@ impl<D: Dev> Nros<D> {
 	///
 	/// If `global_max < write_max`.
 	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
-		self.store.clone().resize_cache(global_max, write_max).await
+		self.store.resize_cache(global_max, write_max).await
 	}
 
 	/// Get cache status.
 	pub fn cache_status(&self) -> CacheStatus {
 		self.store.cache_status()
+	}
+
+	/// Unmount the object store.
+	///
+	/// This performs one last transaction.
+	pub async fn unmount(self) -> Result<Vec<D>, Error<D>> {
+		let store = self.store.unmount().await?;
+		let devset = store.unmount().await?;
+		Ok(devset.into_devices())
 	}
 }
 

@@ -12,7 +12,7 @@ use {
 	},
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
-	std::{collections::hash_map, rc::Rc},
+	std::collections::hash_map,
 };
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
@@ -136,7 +136,6 @@ pub(crate) struct CacheData {
 
 impl fmt::Debug for CacheData {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-
 		struct FmtData<'a>(&'a FxHashMap<u64, TreeData>);
 
 		impl fmt::Debug for FmtData<'_> {
@@ -192,6 +191,20 @@ impl<D: Dev> Cache<D> {
 			write_cache_max >= 1 << store.max_record_size().to_raw(),
 			"write cache size is smaller than the maximum record size"
 		);
+
+		// TODO iterate over object list to find free slots.
+		let mut used_objects_ids = RangeSet::new();
+		let len = u64::from(store.object_list().total_length);
+		if len > 0 {
+			let rec_size = u64::try_from(mem::size_of::<Record>()).unwrap();
+			assert_eq!(
+				len % rec_size,
+				0,
+				"todo: total length not a multiple of record size"
+			);
+			used_objects_ids.insert(0..len / rec_size);
+		}
+
 		Self {
 			store,
 			data: RefCell::new(CacheData {
@@ -205,7 +218,7 @@ impl<D: Dev> Cache<D> {
 				locked_objects: Default::default(),
 				locked_records: Default::default(),
 				fetching: Default::default(),
-				used_objects_ids: Default::default(),
+				used_objects_ids,
 				is_flushing: false,
 			}),
 		}
@@ -230,7 +243,7 @@ impl<D: Dev> Cache<D> {
 		slf.used_objects_ids.remove(id..id + 1);
 	}
 
-	async fn write_object_table(self: Rc<Self>, id: u64, data: &[u8]) -> Result<usize, Error<D>> {
+	async fn write_object_table(&self, id: u64, data: &[u8]) -> Result<usize, Error<D>> {
 		let offset = id * (mem::size_of::<Record>() as u64);
 		let min_len = offset + u64::try_from(data.len()).unwrap();
 
@@ -243,40 +256,39 @@ impl<D: Dev> Cache<D> {
 		list.write(offset, data).await
 	}
 
-	async fn read_object_table(self: Rc<Self>, id: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
+	async fn read_object_table(&self, id: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
 		let offset = id * (mem::size_of::<Record>() as u64);
 		Tree::new_object_list(self).await?.read(offset, buf).await
 	}
 
 	/// Create an object.
-	pub async fn create(self: Rc<Self>) -> Result<Tree<D>, Error<D>> {
+	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
 		let id = self.alloc_ids(1);
-		self.clone()
-			.write_object_table(
-				id,
-				Record { references: 1.into(), ..Default::default() }.as_ref(),
-			)
-			.await?;
+		self.write_object_table(
+			id,
+			Record { references: 1.into(), ..Default::default() }.as_ref(),
+		)
+		.await?;
 		Tree::new(self, id).await
 	}
 
 	/// Create a pair of objects.
 	/// The second object has ID + 1.
-	pub async fn create_pair(self: Rc<Self>) -> Result<(Tree<D>, Tree<D>), Error<D>> {
+	pub async fn create_pair(&self) -> Result<(Tree<D>, Tree<D>), Error<D>> {
 		let id = self.alloc_ids(2);
 		let rec = Record { references: 1.into(), ..Default::default() };
 		let mut b = [0; 2 * mem::size_of::<Record>()];
 		b[..mem::size_of::<Record>()].copy_from_slice(rec.as_ref());
 		b[mem::size_of::<Record>()..].copy_from_slice(rec.as_ref());
-		self.clone().write_object_table(id, &b).await?;
+		self.write_object_table(id, &b).await?;
 
-		let a = Tree::new(self.clone(), id).await?;
+		let a = Tree::new(self, id).await?;
 		let b = Tree::new(self, id).await?;
 		Ok((a, b))
 	}
 
 	/// Get an object.
-	pub async fn get(self: Rc<Self>, id: u64) -> Result<Tree<D>, Error<D>> {
+	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
 		Tree::new(self, id).await
 	}
 
@@ -314,14 +326,14 @@ impl<D: Dev> Cache<D> {
 	/// Move an object to a specific ID.
 	///
 	/// The old object is destroyed.
-	pub async fn move_object(self: Rc<Self>, from: u64, to: u64) -> Result<(), Error<D>> {
+	pub async fn move_object(&self, from: u64, to: u64) -> Result<(), Error<D>> {
 		let mut rec = Record::default();
 		// Free allocations
-		self.clone().get(to).await?.resize(0).await?;
+		self.get(to).await?.resize(0).await?;
 		// Copy
-		let l = self.clone().read_object_table(from, rec.as_mut()).await?;
+		let l = self.read_object_table(from, rec.as_mut()).await?;
 		assert!(l > 0, "ID out of range");
-		let l = self.clone().write_object_table(to, rec.as_ref()).await?;
+		let l = self.write_object_table(to, rec.as_ref()).await?;
 		assert!(l > 0, "ID out of range");
 
 		// Move object data.
@@ -332,8 +344,7 @@ impl<D: Dev> Cache<D> {
 		}
 
 		// Destroy original object.
-		self.clone()
-			.write_object_table(from, Record::default().as_ref())
+		self.write_object_table(from, Record::default().as_ref())
 			.await?;
 
 		self.dealloc_id(from);
@@ -343,9 +354,9 @@ impl<D: Dev> Cache<D> {
 	/// Increase the reference count of an object.
 	///
 	/// This may fail if the reference count is already [`u16::MAX`].
-	pub async fn increase_refcount(self: Rc<Self>, id: u64) -> Result<(), Error<D>> {
+	pub async fn increase_refcount(&self, id: u64) -> Result<(), Error<D>> {
 		let mut rec = Record::default();
-		self.clone().read_object_table(id, rec.as_mut()).await?;
+		self.read_object_table(id, rec.as_mut()).await?;
 		if rec.references == u16::MAX {
 			todo!("too many refs");
 		}
@@ -357,9 +368,9 @@ impl<D: Dev> Cache<D> {
 	/// Decrease the reference count of an object.
 	///
 	/// If the reference count reaches 0 the object is destroyed.
-	pub async fn decrease_refcount(self: Rc<Self>, id: u64) -> Result<(), Error<D>> {
+	pub async fn decrease_refcount(&self, id: u64) -> Result<(), Error<D>> {
 		let mut rec = Record::default();
-		self.clone().read_object_table(id, rec.as_mut()).await?;
+		self.read_object_table(id, rec.as_mut()).await?;
 		if rec.references == 0 {
 			todo!("invalid object");
 		}
@@ -386,7 +397,7 @@ impl<D: Dev> Cache<D> {
 	/// Lock a cache entry, preventing it from being evicted.
 	///
 	/// Returns `true` if the cache entry was already locked, `false` otherwise.
-	fn lock_entry(self: Rc<Self>, id: u64, depth: u8, offset: u64) -> CacheRef<D> {
+	fn lock_entry(&self, id: u64, depth: u8, offset: u64) -> CacheRef<D> {
 		CacheRef::new(self, id, depth, offset)
 	}
 
@@ -395,14 +406,14 @@ impl<D: Dev> Cache<D> {
 	/// If the entry is already being fetched,
 	/// the caller is instead added to a list to be waken up when the fetcher has finished.
 	async fn fetch_entry(
-		self: Rc<Self>,
+		&self,
 		id: u64,
 		depth: u8,
 		offset: u64,
 		record: &Record,
 	) -> Result<CacheRef<D>, Error<D>> {
 		// Lock now so the entry doesn't get fetched and evicted midway.
-		let entry = self.clone().lock_entry(id, depth, offset);
+		let entry = self.lock_entry(id, depth, offset);
 
 		if self.has_entry(id, depth, offset) {
 			return Ok(entry);
@@ -456,7 +467,7 @@ impl<D: Dev> Cache<D> {
 				// TODO kinda ugly IMO.
 				// Is there a cleaner way to write this, without poll_fn perhaps?
 				future::poll_fn(move |cx| {
-					if self.clone().has_entry(id, depth, offset) {
+					if self.has_entry(id, depth, offset) {
 						Poll::Ready(Ok(entry.take().expect("poll after finish")))
 					} else {
 						let mut data = self.data.borrow_mut();
@@ -535,7 +546,6 @@ impl<D: Dev> Cache<D> {
 	///
 	/// If the entry is not present.
 	async fn get_entry_mut(
-		//self: Rc<Self>,
 		&self,
 		id: u64,
 		depth: u8,
@@ -588,11 +598,7 @@ impl<D: Dev> Cache<D> {
 	/// # Panics
 	///
 	/// If `global_max < write_max`.
-	pub async fn resize_cache(
-		self: Rc<Self>,
-		global_max: usize,
-		write_max: usize,
-	) -> Result<(), Error<D>> {
+	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
 		assert!(
 			global_max >= write_max,
 			"global cache is smaller than write cache"
@@ -608,11 +614,7 @@ impl<D: Dev> Cache<D> {
 	/// Recalculate total cache usage from resizing a record and flush if necessary.
 	///
 	/// This adjusts both read and write cache.
-	async fn adjust_cache_use_both(
-		self: Rc<Self>,
-		old_len: usize,
-		new_len: usize,
-	) -> Result<(), Error<D>> {
+	async fn adjust_cache_use_both(&self, old_len: usize, new_len: usize) -> Result<(), Error<D>> {
 		{
 			let data = { &mut *self.data.borrow_mut() };
 			data.global_cache_size += new_len;
@@ -624,7 +626,7 @@ impl<D: Dev> Cache<D> {
 	}
 
 	/// Flush if total memory use exceeds limits.
-	async fn flush(self: Rc<Self>) -> Result<(), Error<D>> {
+	async fn flush(&self) -> Result<(), Error<D>> {
 		let mut data = self.data.borrow_mut();
 
 		if data.is_flushing {
@@ -687,6 +689,20 @@ impl<D: Dev> Cache<D> {
 		Ok(())
 	}
 
+	/// Unmount the cache.
+	///
+	/// The cache is flushed before returning the underlying [`Store`].
+	pub async fn unmount(self) -> Result<Store<D>, Error<D>> {
+		let global_max = self.data.borrow().global_cache_max;
+		self.resize_cache(global_max, 0).await?;
+		debug_assert_eq!(
+			self.cache_status().dirty_usage,
+			0,
+			"not all data has been flushed"
+		);
+		Ok(self.store)
+	}
+
 	/// Get cache status
 	pub fn cache_status(&self) -> CacheStatus {
 		#[cfg(test)]
@@ -725,18 +741,18 @@ impl<D: Dev> Cache<D> {
 /// # Note
 ///
 /// `CacheRef` is safe to hold across `await` points.
-struct CacheRef<D: Dev> {
-	cache: Rc<Cache<D>>,
+struct CacheRef<'a, D: Dev> {
+	cache: &'a Cache<D>,
 	id: u64,
 	depth: u8,
 	offset: u64,
 }
 
-impl<D: Dev> CacheRef<D> {
+impl<'a, D: Dev> CacheRef<'a, D> {
 	/// Create a new reference to a cache entry.
 	///
 	/// Returns `true` if the cache entry was already locked, `false` otherwise.
-	fn new(cache: Rc<Cache<D>>, id: u64, depth: u8, offset: u64) -> Self {
+	fn new(cache: &'a Cache<D>, id: u64, depth: u8, offset: u64) -> Self {
 		*cache
 			.data
 			.borrow_mut()
@@ -778,7 +794,7 @@ impl<D: Dev> CacheRef<D> {
 	}
 }
 
-impl<D: Dev> Drop for CacheRef<D> {
+impl<D: Dev> Drop for CacheRef<'_, D> {
 	fn drop(&mut self) {
 		let mut tree = self.cache.data.borrow_mut();
 		let key = (self.id, self.depth, self.offset);
@@ -793,7 +809,7 @@ impl<D: Dev> Drop for CacheRef<D> {
 	}
 }
 
-impl<D: Dev> fmt::Debug for CacheRef<D> {
+impl<D: Dev> fmt::Debug for CacheRef<'_, D> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(CacheRef))
 			.field("cache", &format_args!("{{ ... }}"))

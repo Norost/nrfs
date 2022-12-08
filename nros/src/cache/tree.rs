@@ -1,8 +1,11 @@
 use {
 	super::{Cache, CacheRef, TreeData, OBJECT_LIST_ID},
-	crate::{Dev, Error, MaxRecordSize, Record},
+	crate::{
+		util::{get_record, trim_zeros_end},
+		Dev, Error, MaxRecordSize, Record,
+	},
 	core::{mem, ops::RangeInclusive},
-	std::{collections::hash_map, rc::Rc},
+	std::collections::hash_map,
 };
 
 const RECORD_SIZE: u64 = mem::size_of::<Record>() as _;
@@ -14,16 +17,16 @@ const RECORD_SIZE_P2: u8 = mem::size_of::<Record>().ilog2() as _;
 /// evicted.
 // FIXME guarantee TreeData will not be evicted (with locks?).
 #[derive(Clone, Debug)]
-pub struct Tree<D: Dev> {
+pub struct Tree<'a, D: Dev> {
 	/// Underlying cache.
-	cache: Rc<Cache<D>>,
+	cache: &'a Cache<D>,
 	/// ID of the object.
 	id: u64,
 }
 
-impl<D: Dev> Tree<D> {
+impl<'a, D: Dev> Tree<'a, D> {
 	/// Access a tree.
-	pub(super) async fn new(cache: Rc<Cache<D>>, id: u64) -> Result<Self, Error<D>> {
+	pub(super) async fn new(cache: &'a Cache<D>, id: u64) -> Result<Tree<'a, D>, Error<D>> {
 		// Alas, async recursion is hard
 		if id == OBJECT_LIST_ID {
 			Self::new_object_list(cache).await
@@ -37,7 +40,7 @@ impl<D: Dev> Tree<D> {
 	/// # Panics
 	///
 	/// If `id == OBJECT_LIST_ID`.
-	pub(super) async fn new_object(cache: Rc<Cache<D>>, id: u64) -> Result<Self, Error<D>> {
+	pub(super) async fn new_object(cache: &'a Cache<D>, id: u64) -> Result<Tree<'a, D>, Error<D>> {
 		assert!(id != OBJECT_LIST_ID);
 
 		// Lock object now so it doesn't get evicted.
@@ -47,7 +50,7 @@ impl<D: Dev> Tree<D> {
 		if !{ data }.data.contains_key(&id) {
 			// Get length
 			let mut rec = Record::default();
-			cache.clone().read_object_table(id, rec.as_mut()).await?;
+			cache.read_object_table(id, rec.as_mut()).await?;
 			let length = rec.total_length.into();
 			cache.data.borrow_mut().data.insert(
 				id,
@@ -64,7 +67,7 @@ impl<D: Dev> Tree<D> {
 	}
 
 	/// Access the object list.
-	pub(super) async fn new_object_list(cache: Rc<Cache<D>>) -> Result<Self, Error<D>> {
+	pub(super) async fn new_object_list(cache: &'a Cache<D>) -> Result<Tree<'a, D>, Error<D>> {
 		let id = OBJECT_LIST_ID;
 
 		// Lock object now so it doesn't get evicted.
@@ -126,10 +129,7 @@ impl<D: Dev> Tree<D> {
 
 				new_len = b.len();
 			}
-			self.cache
-				.clone()
-				.adjust_cache_use_both(old_len, new_len)
-				.await?;
+			self.cache.adjust_cache_use_both(old_len, new_len).await?;
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
 			let mut data = data;
@@ -154,10 +154,7 @@ impl<D: Dev> Tree<D> {
 				trim_zeros_end(b);
 				new_len = b.len();
 			}
-			self.cache
-				.clone()
-				.adjust_cache_use_both(old_len, new_len)
-				.await?;
+			self.cache.adjust_cache_use_both(old_len, new_len).await?;
 
 			// Copy middle records |xxxxxxxx|
 			for key in range {
@@ -169,7 +166,6 @@ impl<D: Dev> Tree<D> {
 					// "Fetch" directly since we're overwriting the entire record anyways.
 					let b = self
 						.cache
-						.clone()
 						.fetch_entry(0, 0, key, &Record::default())
 						.await?;
 
@@ -184,10 +180,7 @@ impl<D: Dev> Tree<D> {
 					trim_zeros_end(b);
 					new_len = b.len();
 				}
-				self.cache
-					.clone()
-					.adjust_cache_use_both(old_len, new_len)
-					.await?;
+				self.cache.adjust_cache_use_both(old_len, new_len).await?;
 			}
 
 			// Copy end record |xxxx----|
@@ -207,10 +200,7 @@ impl<D: Dev> Tree<D> {
 					trim_zeros_end(b);
 					new_len = b.len();
 				}
-				self.cache
-					.clone()
-					.adjust_cache_use_both(old_len, new_len)
-					.await?;
+				self.cache.adjust_cache_use_both(old_len, new_len).await?;
 			}
 		}
 
@@ -326,7 +316,6 @@ impl<D: Dev> Tree<D> {
 				let mut old_rec = Record::default();
 				let l = self
 					.cache
-					.clone()
 					.read_object_table(self.id, old_rec.as_mut())
 					.await?;
 				assert_eq!(l, 32, "old root was not fully read");
@@ -335,7 +324,6 @@ impl<D: Dev> Tree<D> {
 				// Store new root
 				let l = self
 					.cache
-					.clone()
 					.write_object_table(self.id, record.as_ref())
 					.await?;
 				assert_eq!(l, 32, "new root was not fully written");
@@ -367,10 +355,7 @@ impl<D: Dev> Tree<D> {
 				trim_zeros_end(&mut entry.data);
 				new_len = entry.data.len();
 			}
-			self.cache
-				.clone()
-				.adjust_cache_use_both(old_len, new_len)
-				.await
+			self.cache.adjust_cache_use_both(old_len, new_len).await
 		}
 	}
 
@@ -460,7 +445,6 @@ impl<D: Dev> Tree<D> {
 			// The changes will propagate up.
 			let entry = self
 				.cache
-				.clone()
 				.fetch_entry(self.id, cur_depth, 0, &Record::default())
 				.await?;
 			let mut entry = entry.get_mut().await?;
@@ -503,7 +487,7 @@ impl<D: Dev> Tree<D> {
 		if self.id == OBJECT_LIST_ID {
 			Ok(self.cache.object_list())
 		} else {
-			let list = Self::new(self.cache.clone(), OBJECT_LIST_ID).await?;
+			let list = Self::new(self.cache, OBJECT_LIST_ID).await?;
 			let mut record = Record::default();
 			list.read(self.id * RECORD_SIZE, record.as_mut()).await?;
 			Ok(record)
@@ -554,7 +538,6 @@ impl<D: Dev> Tree<D> {
 			// TODO verify the latter statement.
 			return self
 				.cache
-				.clone()
 				.fetch_entry(self.id, cur_depth, offset, &Record::default())
 				.await;
 		}
@@ -569,7 +552,14 @@ impl<D: Dev> Tree<D> {
 			// If is in the new region, add a zero record and return immediately.
 			//
 			// If not, update cur_depth to match the old depth and fetch as normal.
-			let offset_byte = offset << rec_size + (rec_size - RECORD_SIZE_P2) * target_depth;
+
+			let shift = rec_size + (rec_size - RECORD_SIZE_P2) * target_depth;
+			// The shift may be 64 or larger if we're at the very root.
+			// In that case offset should be 0 however.
+			// offset << shift with a number smaller than 64 shouldn't ever overflow either.
+			// TODO add debug asserts as a sanity check.
+			// Can't find any nice methods to use though :(
+			let offset_byte = offset.wrapping_shl(shift.into());
 
 			if offset_byte < root.total_length {
 				// Start iterating on on-dev records.
@@ -579,7 +569,6 @@ impl<D: Dev> Tree<D> {
 				// Just insert a zeroed record and return that.
 				return self
 					.cache
-					.clone()
 					.fetch_entry(self.id, target_depth, offset, &Record::default())
 					.await;
 			}
@@ -603,7 +592,6 @@ impl<D: Dev> Tree<D> {
 			let offt = offset >> depth_offset_shift(cur_depth);
 			let entry = self
 				.cache
-				.clone()
 				.fetch_entry(self.id, cur_depth, offt, &record)
 				.await?;
 
@@ -634,9 +622,9 @@ impl<D: Dev> Tree<D> {
 	/// There is more than one active lock on the other object,
 	/// i.e. there are multiple [`Tree`] instances referring to the same object.
 	/// Hence the object cannot safely be destroyed.
-	pub async fn replace_with(&self, other: Tree<D>) -> Result<(), Error<D>> {
+	pub async fn replace_with(&self, other: Tree<'a, D>) -> Result<(), Error<D>> {
 		// FIXME check locks
-		self.cache.clone().move_object(other.id, self.id).await
+		self.cache.move_object(other.id, self.id).await
 	}
 
 	/// Get the maximum record size.
@@ -650,7 +638,7 @@ impl<D: Dev> Tree<D> {
 	}
 }
 
-impl<D: Dev> Drop for Tree<D> {
+impl<D: Dev> Drop for Tree<'_, D> {
 	fn drop(&mut self) {
 		let data = { &mut *self.cache.data.borrow_mut() };
 		let hash_map::Entry::Occupied(mut o) = data.locked_objects.entry(self.id) else {
@@ -680,19 +668,6 @@ fn calc_record_offsets(record_size: MaxRecordSize, offset: u64, length: usize) -
 	(start.try_into().unwrap(), end.try_into().unwrap())
 }
 
-/// Cut off trailing zeroes from [`Vec`].
-fn trim_zeros_end(vec: &mut Vec<u8>) {
-	if let Some(i) = vec.iter().rev().position(|&x| x != 0) {
-		vec.resize(vec.len() - i, 0);
-	} else {
-		vec.clear();
-	}
-	// TODO find a proper heuristic for freeing memory.
-	if vec.capacity() / 2 <= vec.len() {
-		vec.shrink_to_fit()
-	}
-}
-
 /// Calculate divmod with a power of two.
 fn divmod_p2(offset: u64, pow2: u8) -> (u64, usize) {
 	let mask = (1u64 << pow2) - 1;
@@ -717,14 +692,57 @@ fn depth(max_record_size: MaxRecordSize, mut len: u64) -> u8 {
 	}
 }
 
-/// Get a record from a slice of raw data.
-fn get_record(data: &[u8], index: usize) -> Record {
-	let offt = index * mem::size_of::<Record>();
+#[cfg(test)]
+mod test {
+	use super::*;
 
-	let (start, end) = (offt, offt + mem::size_of::<Record>());
-	let (start, end) = (start.min(data.len()), end.min(data.len()));
+	#[test]
+	fn depth_rec1k_len0() {
+		assert_eq!(depth(MaxRecordSize::K1, 0), 0);
+	}
 
-	let mut record = Record::default();
-	record.as_mut()[..end - start].copy_from_slice(&data[start..end]);
-	record
+	#[test]
+	fn depth_rec1k_len1() {
+		assert_eq!(depth(MaxRecordSize::K1, 1), 1);
+	}
+
+	#[test]
+	fn depth_rec1k_len1023() {
+		assert_eq!(depth(MaxRecordSize::K1, 1023), 1);
+	}
+
+	#[test]
+	fn depth_rec1k_len1024() {
+		assert_eq!(depth(MaxRecordSize::K1, 1024), 1);
+	}
+
+	#[test]
+	fn depth_rec1k_len1025() {
+		assert_eq!(depth(MaxRecordSize::K1, 1025), 2);
+	}
+
+	#[test]
+	fn depth_rec1k_2p10() {
+		assert_eq!(depth(MaxRecordSize::K1, 1 << 10 + 5 * 0), 1);
+	}
+
+	#[test]
+	fn depth_rec1k_2p15() {
+		assert_eq!(depth(MaxRecordSize::K1, 1 << 10 + 5 * 1), 2);
+	}
+
+	#[test]
+	fn depth_rec1k_2p20() {
+		assert_eq!(depth(MaxRecordSize::K1, 1 << 10 + 5 * 2), 3);
+	}
+
+	#[test]
+	fn depth_rec1k_2p40() {
+		assert_eq!(depth(MaxRecordSize::K1, 1 << 10 + 5 * 6), 7);
+	}
+
+	#[test]
+	fn depth_rec1k_lenmax() {
+		assert_eq!(depth(MaxRecordSize::K1, u64::MAX), 12);
+	}
 }
