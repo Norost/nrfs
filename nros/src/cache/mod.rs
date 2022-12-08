@@ -191,6 +191,16 @@ impl<D: Dev> Cache<D> {
 			write_cache_max >= 1 << store.max_record_size().to_raw(),
 			"write cache size is smaller than the maximum record size"
 		);
+
+		// TODO iterate over object list to find free slots.
+		let mut used_objects_ids = RangeSet::new();
+		let len = u64::from(store.object_list().total_length);
+		if len > 0 {
+			let rec_size = u64::try_from(mem::size_of::<Record>()).unwrap();
+			assert_eq!(len % rec_size, 0, "todo: total length not a multiple of record size");
+			used_objects_ids.insert(0..len / rec_size);
+		}
+
 		Self {
 			store,
 			data: RefCell::new(CacheData {
@@ -204,7 +214,7 @@ impl<D: Dev> Cache<D> {
 				locked_objects: Default::default(),
 				locked_records: Default::default(),
 				fetching: Default::default(),
-				used_objects_ids: Default::default(),
+				used_objects_ids,
 				is_flushing: false,
 			}),
 		}

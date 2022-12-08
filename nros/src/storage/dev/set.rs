@@ -156,8 +156,6 @@ impl<D: Dev> DevSet<D> {
 			})
 			.unwrap_or_else(|| todo!("no valid headers"));
 
-		dbg!(&header);
-
 		// Check if all head or all tail headers are valid.
 		//
 		// TODO check xxh3 *and* generation.
@@ -391,7 +389,11 @@ impl<D: Dev> DevSet<D> {
 		};
 		header.update_xxh3();
 
-		let mut buf = node.dev.allocator().alloc(1 << self.block_size.to_raw()).await?;
+		let mut buf = node
+			.dev
+			.allocator()
+			.alloc(1 << self.block_size.to_raw())
+			.await?;
 		buf.get_mut()[..header.as_ref().len()].copy_from_slice(header.as_ref());
 		Ok(buf)
 	}

@@ -1,6 +1,9 @@
 use {
 	super::{Cache, CacheRef, TreeData, OBJECT_LIST_ID},
-	crate::{Dev, Error, MaxRecordSize, Record},
+	crate::{
+		util::{get_record, trim_zeros_end},
+		Dev, Error, MaxRecordSize, Record,
+	},
 	core::{mem, ops::RangeInclusive},
 	std::collections::hash_map,
 };
@@ -658,19 +661,6 @@ fn calc_record_offsets(record_size: MaxRecordSize, offset: u64, length: usize) -
 	(start.try_into().unwrap(), end.try_into().unwrap())
 }
 
-/// Cut off trailing zeroes from [`Vec`].
-fn trim_zeros_end(vec: &mut Vec<u8>) {
-	if let Some(i) = vec.iter().rev().position(|&x| x != 0) {
-		vec.resize(vec.len() - i, 0);
-	} else {
-		vec.clear();
-	}
-	// TODO find a proper heuristic for freeing memory.
-	if vec.capacity() / 2 <= vec.len() {
-		vec.shrink_to_fit()
-	}
-}
-
 /// Calculate divmod with a power of two.
 fn divmod_p2(offset: u64, pow2: u8) -> (u64, usize) {
 	let mask = (1u64 << pow2) - 1;
@@ -693,16 +683,4 @@ fn depth(max_record_size: MaxRecordSize, mut len: u64) -> u8 {
 		}
 		depth + 1
 	}
-}
-
-/// Get a record from a slice of raw data.
-fn get_record(data: &[u8], index: usize) -> Record {
-	let offt = index * mem::size_of::<Record>();
-
-	let (start, end) = (offt, offt + mem::size_of::<Record>());
-	let (start, end) = (start.min(data.len()), end.min(data.len()));
-
-	let mut record = Record::default();
-	record.as_mut()[..end - start].copy_from_slice(&data[start..end]);
-	record
 }
