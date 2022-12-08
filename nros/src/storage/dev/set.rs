@@ -92,18 +92,15 @@ impl<D: Dev> DevSet<D> {
 		);
 
 		// Determine length of smallest chain.
-		// FIXME block_count is misleading since we start counting from 1 and block_count accounts
-		// for that to simplify comparisons. A better term would be something like last_lba
 		let block_count = devices
 			.iter()
 			.map(|c| c.iter().map(|d| d.dev.block_count() - 2).sum::<u64>()) // -2 to account for headers
 			.min()
-			.expect("no chains")
-			+ 1;
+			.expect("no chains");
 
 		// Assign block offsets to devices in chains and write headers.
 		for chain in devices.iter_mut() {
-			let mut block_offset = 1;
+			let mut block_offset = 0;
 			for node in chain.iter_mut() {
 				node.block_offset = block_offset;
 				block_offset += node.dev.block_count() - 2; // -2 to account for headers
@@ -170,7 +167,7 @@ impl<D: Dev> DevSet<D> {
 	/// If `size` isn't a multiple of the block size.
 	pub async fn read(
 		&self,
-		lba: NonZeroU64,
+		lba: u64,
 		size: usize,
 		blacklist: Set256,
 	) -> Result<SetBuf<D>, Error<D>> {
@@ -179,7 +176,6 @@ impl<D: Dev> DevSet<D> {
 			"data len isn't a multiple of block size"
 		);
 
-		let lba = lba.get();
 		let lba_end = lba.saturating_add(u64::try_from(size >> self.block_size()).unwrap());
 		assert!(lba_end <= self.block_count, "read is out of bounds");
 
@@ -223,13 +219,12 @@ impl<D: Dev> DevSet<D> {
 	/// If the buffer size isn't a multiple of the block size.
 	///
 	/// If the write is be out of bounds.
-	pub async fn write(&self, lba: NonZeroU64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
+	pub async fn write(&self, lba: u64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
 		assert!(
 			data.get().len() % (1usize << self.block_size()) == 0,
 			"data len isn't a multiple of block size"
 		);
 
-		let lba = lba.get();
 		let lba_end =
 			lba.saturating_add(u64::try_from(data.get().len() >> self.block_size()).unwrap());
 		assert!(lba_end <= self.block_count, "write is out of bounds");

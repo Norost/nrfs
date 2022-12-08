@@ -73,7 +73,7 @@ impl Allocator {
 		if blocks == 0 {
 			return Some(0);
 		}
-		for r in self.alloc_map.gaps(&(1..block_count)) {
+		for r in self.alloc_map.gaps(&(0..block_count)) {
 			if r.end - r.start >= blocks {
 				self.alloc_map.insert(r.start..r.start + blocks);
 				self.dirty_map.insert(r.start..r.start + blocks);

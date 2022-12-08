@@ -37,11 +37,9 @@ where
 
 	/// Read a record.
 	pub async fn read(&self, record: &Record) -> Result<Vec<u8>, Error<D>> {
-		if record.lba == 0 {
-			debug_assert!(record.length == 0);
+		if record.length == 0 {
 			return Ok(Vec::new());
 		}
-		debug_assert!(record.lba != 0);
 
 		let lba = u64::from(record.lba);
 		let len = record.length.into();
