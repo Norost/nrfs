@@ -109,9 +109,7 @@ fn unset_allocator_lba() {
 #[test]
 fn allocator_save_space_leak() {
 	Test::new([
-		Create {
-			size: 18446744073709546299,
-		},
+		Create { size: 18446744073709546299 },
 		Remount,
 		Remount,
 		Remount,
@@ -126,19 +124,26 @@ fn allocator_save_space_leak() {
 		Remount,
 		Remount,
 		Remount,
-	]).run()
+	])
+	.run()
 }
 
 #[test]
 fn large_object_shift_overflow() {
 	Test::new([
-		Create {
-			size: 18446567461959458655,
-		},
-		Write {
-			idx: 4294967295,
-			offset: 6917529024946200575,
-			amount: 24415,
-		},
-	]).run()
+		Create { size: 18446567461959458655 },
+		Write { idx: 4294967295, offset: 6917529024946200575, amount: 24415 },
+	])
+	.run()
+}
+
+#[test]
+fn tree_write_full_to_id_0() {
+	Test::new([
+		Create { size: 18446587943058402107 },
+		Remount,
+		Create { size: 5425430176097894400 },
+		Write { idx: 1263225675, offset: 21193410011155275, amount: 19275 },
+	])
+	.run()
 }

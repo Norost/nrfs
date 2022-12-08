@@ -166,7 +166,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 					// "Fetch" directly since we're overwriting the entire record anyways.
 					let b = self
 						.cache
-						.fetch_entry(0, 0, key, &Record::default())
+						.fetch_entry(self.id, 0, key, &Record::default())
 						.await?;
 
 					let mut b = b.get_mut().await?;

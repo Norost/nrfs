@@ -94,7 +94,12 @@ impl Allocator {
 			record = util::get_record(&data, 0);
 		}
 
-		Ok(Self { alloc_map, free_map: Default::default(), dirty_map: Default::default(), stack })
+		Ok(Self {
+			alloc_map,
+			free_map: Default::default(),
+			dirty_map: Default::default(),
+			stack,
+		})
 	}
 
 	pub fn alloc(&mut self, blocks: u64, block_count: u64) -> Option<u64> {
