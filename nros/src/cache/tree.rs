@@ -101,7 +101,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 		// Ensure all data fits.
 		let data = if offset >= len {
 			return Ok(0);
-		} else if offset + u64::try_from(data.len()).unwrap() >= len {
+		} else if offset.saturating_add(u64::try_from(data.len()).unwrap()) >= len {
 			&data[..usize::try_from(len - offset).unwrap()]
 		} else {
 			data
@@ -217,7 +217,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 		// Ensure all data fits in buffer.
 		let buf = if len <= offset {
 			return Ok(0);
-		} else if offset + u64::try_from(buf.len()).unwrap() >= len {
+		} else if offset.saturating_add(u64::try_from(buf.len()).unwrap()) >= len {
 			&mut buf[..usize::try_from(len - offset).unwrap()]
 		} else {
 			buf

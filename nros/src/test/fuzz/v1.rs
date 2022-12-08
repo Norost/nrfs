@@ -1,6 +1,8 @@
 use {
 	super::*,
 	arbitrary::{Arbitrary, Unstructured},
+	rangemap::RangeSet,
+	rustc_hash::FxHashMap,
 };
 
 #[derive(Debug)]
@@ -14,7 +16,7 @@ pub struct Test {
 	/// Expected contents of each object.
 	///
 	/// We only write `1`s, so it's pretty simple.
-	contents: (),
+	contents: FxHashMap<u64, RangeSet<u64>>,
 }
 
 #[derive(Debug, Arbitrary)]
@@ -42,6 +44,7 @@ impl<'a> Arbitrary<'a> for Test {
 		// Always start with a create.
 		let create_op = Op::Create { size: u.arbitrary()? };
 		Ok(Self::new(
+			1 << 16, // Increase or decrease as you see fit.
 			[Ok(create_op)]
 				.into_iter()
 				.chain(u.arbitrary_iter::<Op>()?)
@@ -51,12 +54,12 @@ impl<'a> Arbitrary<'a> for Test {
 }
 
 impl Test {
-	pub fn new(ops: impl Into<Box<[Op]>>) -> Self {
+	pub fn new(blocks: usize, ops: impl Into<Box<[Op]>>) -> Self {
 		Self {
-			store: run(|| new_cap(MaxRecordSize::K1, 512, 4096, 4096)),
+			store: run(|| new_cap(MaxRecordSize::K1, blocks, 4096, 4096)),
 			ops: ops.into(),
 			ids: Default::default(),
-			contents: (),
+			contents: Default::default(),
 		}
 	}
 
@@ -67,6 +70,7 @@ impl Test {
 					Op::Create { size } => {
 						let obj = self.store.create().await.unwrap();
 						obj.resize(size).await.unwrap();
+						self.contents.insert(obj.id(), Default::default());
 						self.ids.push(obj.id());
 					}
 					Op::Write { idx, offset, amount } => {
@@ -74,9 +78,14 @@ impl Test {
 						let obj = self.store.get(id).await.unwrap();
 						let len = obj.len().await.unwrap();
 						if len > 0 {
-							obj.write(offset % len, &vec![1; amount.into()])
-								.await
-								.unwrap();
+							let offt = offset % len;
+							let l = obj.write(offt, &vec![1; amount.into()]).await.unwrap();
+							if l > 0 {
+								self.contents
+									.get_mut(&id)
+									.unwrap()
+									.insert(offt..offt + u64::try_from(l).unwrap());
+							}
 						}
 					}
 					Op::Read { idx, offset, amount } => {
@@ -84,9 +93,15 @@ impl Test {
 						let obj = self.store.get(id).await.unwrap();
 						let len = obj.len().await.unwrap();
 						if len > 0 {
-							obj.read(offset % len, &mut vec![0; amount.into()])
-								.await
-								.unwrap();
+							let offt = offset % len;
+							let buf = &mut vec![0; amount.into()];
+							let l = obj.read(offt, buf).await.unwrap();
+							if l > 0 {
+								let map = self.contents.get(&id).unwrap();
+								for (i, c) in (offt..offt + u64::try_from(l).unwrap()).zip(&*buf) {
+									assert_eq!(map.contains(&i), *c == 1);
+								}
+							}
 						}
 					}
 					Op::Remount => {
@@ -103,47 +118,71 @@ use Op::*;
 
 #[test]
 fn unset_allocator_lba() {
-	Test::new([Create { size: 18446744073709486123 }, Remount]).run()
+	Test::new(512, [Create { size: 18446744073709486123 }, Remount]).run()
 }
 
 #[test]
 fn allocator_save_space_leak() {
-	Test::new([
-		Create { size: 18446744073709546299 },
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-		Remount,
-	])
+	Test::new(
+		512,
+		[
+			Create { size: 18446744073709546299 },
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+			Remount,
+		],
+	)
 	.run()
 }
 
 #[test]
 fn large_object_shift_overflow() {
-	Test::new([
-		Create { size: 18446567461959458655 },
-		Write { idx: 4294967295, offset: 6917529024946200575, amount: 24415 },
-	])
+	Test::new(
+		512,
+		[
+			Create { size: 18446567461959458655 },
+			Write { idx: 4294967295, offset: 6917529024946200575, amount: 24415 },
+		],
+	)
 	.run()
 }
 
 #[test]
 fn tree_write_full_to_id_0() {
-	Test::new([
-		Create { size: 18446587943058402107 },
-		Remount,
-		Create { size: 5425430176097894400 },
-		Write { idx: 1263225675, offset: 21193410011155275, amount: 19275 },
-	])
+	Test::new(
+		512,
+		[
+			Create { size: 18446587943058402107 },
+			Remount,
+			Create { size: 5425430176097894400 },
+			Write { idx: 1263225675, offset: 21193410011155275, amount: 19275 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_read_offset_len_check_overflow() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 18446744073709551595 },
+			Read { idx: 2509608341, offset: 18446744073709551509, amount: 38155 },
+			Remount,
+			Remount,
+			Read { idx: 4287993237, offset: 697696064, amount: 0 },
+		],
+	)
 	.run()
 }
