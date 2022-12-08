@@ -190,64 +190,30 @@ fn read_before_tx_1024() {
 	})
 }
 
-/*
 #[test]
-fn write_tx_read_many() {
-	let s = new(MaxRecordSize::K1);
+fn replace_object() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
 
-	let obj = s.new_object().unwrap();
-	s.resize(id, 2000).unwrap();
-	s.write(id, 1000, &[0xcc; 1000]).unwrap();
-	s.finish_transaction().unwrap();
+		let obj_1 = s.create().await.unwrap();
+		let obj_2 = s.create().await.unwrap();
 
-	let id2 = s.new_object().unwrap();
-	s.resize(id2, 64).unwrap();
-	s.write(id2, 42, &[0xde; 2]).unwrap();
-	s.finish_transaction().unwrap();
+		obj_2.resize(64).await.unwrap();
+		obj_2.write(42, &[2; 2]).await.unwrap();
 
-	let id3 = s.new_object().unwrap();
-	s.resize(id3, 1).unwrap();
-	s.write(id3, 0, &[1]).unwrap();
-	s.finish_transaction().unwrap();
+		obj_1.resize(2000).await.unwrap();
+		obj_1.write(1000, &[1; 1000]).await.unwrap();
 
-	let mut buf = [0; 1000];
-	s.read(id, 0, &mut buf).unwrap();
-	assert_eq!(buf, [0; 1000]);
-	s.read(id, 1000, &mut buf).unwrap();
-	assert_eq!(buf, [0xcc; 1000]);
+		let mut buf = [0; 1000];
+		obj_1.read(0, &mut buf).await.unwrap();
+		assert_eq!(buf, [0; 1000]);
+		obj_1.read(1000, &mut buf).await.unwrap();
+		assert_eq!(buf, [1; 1000]);
 
-	let mut buf = [0; 2];
-	s.read(id2, 42, &mut buf).unwrap();
-	assert_eq!(buf, [0xde; 2]);
+		obj_1.replace_with(obj_2).await.unwrap();
 
-	let mut buf = [0];
-	s.read(id3, 0, &mut buf).unwrap();
-	assert_eq!(buf, [1]);
+		let mut buf = [0; 2];
+		obj_1.read(42, &mut buf).await.unwrap();
+		assert_eq!(buf, [2; 2]);
+	})
 }
-
-#[test]
-fn write_new_write() {
-	let s = new(MaxRecordSize::K1);
-
-	let obj = s.new_object().unwrap();
-	let id2 = s.new_object().unwrap();
-
-	s.resize(id2, 64).unwrap();
-	s.write(id2, 42, &[0xde; 2]).unwrap();
-
-	s.resize(id, 2000).unwrap();
-	s.write(id, 1000, &[0xcc; 1000]).unwrap();
-
-	let mut buf = [0; 1000];
-	s.read(id, 0, &mut buf).unwrap();
-	assert_eq!(buf, [0; 1000]);
-	s.read(id, 1000, &mut buf).unwrap();
-	assert_eq!(buf, [0xcc; 1000]);
-
-	s.move_object(id, id2).unwrap();
-
-	let mut buf = [0; 2];
-	s.read(id, 42, &mut buf).unwrap();
-	assert_eq!(buf, [0xde; 2]);
-}
-*/

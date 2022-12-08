@@ -607,6 +607,20 @@ impl<D: Dev> Tree<D> {
 		Ok(entry)
 	}
 
+	/// Replace the data of this object with the data of another object.
+	///
+	/// The other object is destroyed.
+	///
+	/// # Panics
+	///
+	/// There is more than one active lock on the other object,
+	/// i.e. there are multiple [`Tree`] instances referring to the same object.
+	/// Hence the object cannot safely be destroyed.
+	pub async fn replace_with(&self, other: Tree<D>) -> Result<(), Error<D>> {
+		// FIXME check locks
+		self.cache.clone().move_object(other.id, self.id).await
+	}
+
 	/// Get the maximum record size.
 	fn max_record_size(&self) -> MaxRecordSize {
 		self.cache.max_record_size()

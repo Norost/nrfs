@@ -323,10 +323,19 @@ impl<D: Dev> Cache<D> {
 		assert!(l > 0, "ID out of range");
 		let l = self.clone().write_object_table(to, rec.as_ref()).await?;
 		assert!(l > 0, "ID out of range");
-		// Destroy original object
+
+		// Move object data.
+		{
+			let data = { &mut self.data.borrow_mut().data };
+			let obj = data.remove(&from).expect("object not present");
+			data.insert(to, obj);
+		}
+
+		// Destroy original object.
 		self.clone()
 			.write_object_table(from, Record::default().as_ref())
 			.await?;
+
 		self.dealloc_id(from);
 		Ok(())
 	}

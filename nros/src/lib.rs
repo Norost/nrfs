@@ -150,10 +150,6 @@ impl<D: Dev> Nros<D> {
 		self.store.clone().decrease_refcount(id).await
 	}
 
-	pub async fn move_object(&self, to_id: u64, from_id: u64) -> Result<(), Error<D>> {
-		self.store.clone().move_object(from_id, to_id).await
-	}
-
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
 		self.store.finish_transaction().await
 	}

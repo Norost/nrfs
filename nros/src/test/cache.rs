@@ -133,9 +133,44 @@ fn write_read_2p13() {
 		let obj = s.create().await.unwrap();
 		obj.resize(1 << 13).await.unwrap();
 		obj.write(0, &[1; 1 << 13]).await.unwrap();
-		dbg!(&obj);
 		let mut buf = [0; 1 << 13];
 		obj.read(0, &mut buf).await.unwrap();
 		assert_eq!(buf, [1; 1 << 13]);
+	})
+}
+
+#[test]
+fn write_tx_read_many() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj_1 = s.create().await.unwrap();
+		obj_1.resize(2000).await.unwrap();
+		obj_1.write(1000, &[1; 1000]).await.unwrap();
+		s.finish_transaction().await.unwrap();
+
+		let obj_2 = s.create().await.unwrap();
+		obj_2.resize(64).await.unwrap();
+		obj_2.write(42, &[2; 2]).await.unwrap();
+		s.finish_transaction().await.unwrap();
+
+		let obj_3 = s.create().await.unwrap();
+		obj_3.resize(1).await.unwrap();
+		obj_3.write(0, &[3]).await.unwrap();
+		s.finish_transaction().await.unwrap();
+
+		let mut buf = [0; 1000];
+		obj_1.read(0, &mut buf).await.unwrap();
+		assert_eq!(buf, [0; 1000]);
+		obj_1.read(1000, &mut buf).await.unwrap();
+		assert_eq!(buf, [1; 1000]);
+
+		let mut buf = [0; 2];
+		obj_2.read(42, &mut buf).await.unwrap();
+		assert_eq!(buf, [2; 2]);
+
+		let mut buf = [0];
+		obj_3.read(0, &mut buf).await.unwrap();
+		assert_eq!(buf, [3]);
 	})
 }
