@@ -174,3 +174,35 @@ fn write_tx_read_many() {
 		assert_eq!(buf, [3]);
 	})
 }
+
+/// Ensure old records are properly disposed of.
+///
+/// `depth == 1`
+#[test]
+fn write_many_depth_eq1() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+		obj.resize(1).await.unwrap();
+		for _ in 0..1000 {
+			obj.write(0, &[1]).await.unwrap();
+			clear(&s).await;
+		}
+	})
+}
+
+/// Ensure old records are properly disposed of.
+///
+/// `depth > 1`
+#[test]
+fn write_many_depth_gt1() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+		obj.resize(1 << 14).await.unwrap();
+		for _ in 0..1000 {
+			obj.write(0, &[1]).await.unwrap();
+			clear(&s).await;
+		}
+	})
+}

@@ -317,32 +317,50 @@ impl<D: Dev> Tree<D> {
 			// Update the root.
 			if self.id == OBJECT_LIST_ID {
 				// Object list root is in header.
+				self.cache.store.destroy(&self.cache.store.object_list());
 				self.cache.store.set_object_list(record);
 				Ok(())
 			} else {
 				// Object root is in object list.
+				// Destroy old root
+				let mut old_rec = Record::default();
+				let l = self
+					.cache
+					.clone()
+					.read_object_table(self.id, old_rec.as_mut())
+					.await?;
+				assert_eq!(l, 32, "old root was not fully read");
+				self.cache.store.destroy(&old_rec);
+
+				// Store new root
 				let l = self
 					.cache
 					.clone()
 					.write_object_table(self.id, record.as_ref())
 					.await?;
-				assert_eq!(l, 32, "root was not fully written");
+				assert_eq!(l, 32, "new root was not fully written");
 				Ok(())
 			}
 		} else {
 			// Update a parent record.
 			let (old_len, new_len);
 			{
+				// Find parent
 				let shift = self.max_record_size().to_raw() - RECORD_SIZE_P2;
 				let (offt, index) = divmod_p2(offset, shift);
 
 				let entry = self.get(parent_depth, offt).await?;
 				let mut entry = entry.get_mut().await?;
 
+				// Destroy old record
+				self.cache.store.destroy(&get_record(&entry.data, index));
+
+				// Calc offset in parent
 				old_len = entry.data.len();
 				let index = index * mem::size_of::<Record>();
 				let min_len = old_len.max(index + mem::size_of::<Record>());
 
+				// Store new record
 				entry.data.resize(min_len, 0);
 				entry.data[index..index + mem::size_of::<Record>()]
 					.copy_from_slice(record.as_ref());
