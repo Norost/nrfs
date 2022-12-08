@@ -275,14 +275,7 @@ impl<D: Dev> Tree<D> {
 			for key in range {
 				let b;
 				(b, buf) = buf.split_at_mut(1usize << self.max_record_size());
-
-				// "Fetch" directly since we're overwriting the entire record anyways.
-				let d = self
-					.cache
-					.clone()
-					.fetch_entry(0, 0, key, &Record::default())
-					.await?;
-
+				let d = self.get(0, key).await?;
 				copy(b, &d.get().data);
 			}
 
