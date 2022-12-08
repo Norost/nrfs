@@ -86,9 +86,9 @@ A header has a variable size, up to 64 KiB.
   |    0 |                                                       |
   +------+            Magic string ("Nora Reliable FS")          |
   |    8 |                                                       |
-  +------+------+------+------+------+---------------------------+
-  |   16 | MirC | CAlg | RLen | BLen |   Version (0x00_00_0003)  |
-  +------+------+------+------+------+---------------------------+
+  +------+------+------+------+------+------+--------------------+
+  |   16 | MirI | MirC | RLen | BLen | CAlg |  Version  (0.2.0)  |
+  +------+------+------+------+------+------+--------------------+
   |   24 |                                                       |
   +------+                          UID                          |
   |   32 |                                                       |
@@ -132,16 +132,20 @@ A header has a variable size, up to 64 KiB.
 
 * Version: The version of the data storage format.
 
+* CAlg: The default compression algorithm to use.
+
 * BLen: The length of a single block as a power of two.
   Affects LBA addressing.
 
 * RLen: The maximum length of a record in bytes as a power of two.
 
-* CAlg: The default compression algorithm to use.
-
 * MirC: The amount of mirror volumes.
   Useful to determine how many mirrors should be waited for before allowing
   writes.
+
+* MirI: The index of this chain in the mirror list.
+  It simplifies loading code & prevents devices from being shuffled between
+  chains on each mount.
 
 * UID: Unique filesystem identifier.
 
