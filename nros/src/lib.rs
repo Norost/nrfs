@@ -80,12 +80,12 @@ pub use {
 	},
 };
 
-use {cache::Cache, core::fmt, record::Record, std::rc::Rc, storage::DevSet};
+use {cache::Cache, core::fmt, record::Record, storage::DevSet};
 
 #[derive(Debug)]
 pub struct Nros<D: Dev> {
 	/// Backing store with cache and allocator.
-	store: Rc<Cache<D>>,
+	store: Cache<D>,
 }
 
 impl<D: Dev> Nros<D> {
@@ -127,18 +127,17 @@ impl<D: Dev> Nros<D> {
 	) -> Result<Self, Error<D>> {
 		let store = Store::new(devices).await.map_err(|_| todo!())?;
 		let store = Cache::new(store, read_cache_size, write_cache_size);
-		let store = Rc::new(store);
 		Ok(Self { store })
 	}
 
 	/// Create an object.
 	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
-		self.store.clone().create().await
+		self.store.create().await
 	}
 
 	/// Create two objects, one at ID and one at ID + 1.
 	pub async fn create_pair(&self) -> Result<(Tree<D>, Tree<D>), Error<D>> {
-		self.store.clone().create_pair().await
+		self.store.create_pair().await
 	}
 
 	/// Decrement the reference count to an object.
@@ -147,7 +146,7 @@ impl<D: Dev> Nros<D> {
 	///
 	/// This function *must not* be used on invalid objects!
 	pub async fn decr_ref(&self, id: u64) -> Result<(), Error<D>> {
-		self.store.clone().decrease_refcount(id).await
+		self.store.decrease_refcount(id).await
 	}
 
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
@@ -160,7 +159,7 @@ impl<D: Dev> Nros<D> {
 
 	/// Return an owned reference to an object.
 	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
-		self.store.clone().get(id).await
+		self.store.get(id).await
 	}
 
 	/// Readjust cache size.

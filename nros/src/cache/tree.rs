@@ -2,7 +2,7 @@ use {
 	super::{Cache, CacheRef, TreeData, OBJECT_LIST_ID},
 	crate::{Dev, Error, MaxRecordSize, Record},
 	core::{mem, ops::RangeInclusive},
-	std::{collections::hash_map, rc::Rc},
+	std::collections::hash_map,
 };
 
 const RECORD_SIZE: u64 = mem::size_of::<Record>() as _;
@@ -14,16 +14,16 @@ const RECORD_SIZE_P2: u8 = mem::size_of::<Record>().ilog2() as _;
 /// evicted.
 // FIXME guarantee TreeData will not be evicted (with locks?).
 #[derive(Clone, Debug)]
-pub struct Tree<D: Dev> {
+pub struct Tree<'a, D: Dev> {
 	/// Underlying cache.
-	cache: Rc<Cache<D>>,
+	cache: &'a Cache<D>,
 	/// ID of the object.
 	id: u64,
 }
 
-impl<D: Dev> Tree<D> {
+impl<'a, D: Dev> Tree<'a, D> {
 	/// Access a tree.
-	pub(super) async fn new(cache: Rc<Cache<D>>, id: u64) -> Result<Self, Error<D>> {
+	pub(super) async fn new(cache: &'a Cache<D>, id: u64) -> Result<Tree<'a, D>, Error<D>> {
 		// Alas, async recursion is hard
 		if id == OBJECT_LIST_ID {
 			Self::new_object_list(cache).await
@@ -37,7 +37,7 @@ impl<D: Dev> Tree<D> {
 	/// # Panics
 	///
 	/// If `id == OBJECT_LIST_ID`.
-	pub(super) async fn new_object(cache: Rc<Cache<D>>, id: u64) -> Result<Self, Error<D>> {
+	pub(super) async fn new_object(cache: &'a Cache<D>, id: u64) -> Result<Tree<'a, D>, Error<D>> {
 		assert!(id != OBJECT_LIST_ID);
 
 		// Lock object now so it doesn't get evicted.
@@ -47,7 +47,7 @@ impl<D: Dev> Tree<D> {
 		if !{ data }.data.contains_key(&id) {
 			// Get length
 			let mut rec = Record::default();
-			cache.clone().read_object_table(id, rec.as_mut()).await?;
+			cache.read_object_table(id, rec.as_mut()).await?;
 			let length = rec.total_length.into();
 			cache.data.borrow_mut().data.insert(
 				id,
@@ -64,7 +64,7 @@ impl<D: Dev> Tree<D> {
 	}
 
 	/// Access the object list.
-	pub(super) async fn new_object_list(cache: Rc<Cache<D>>) -> Result<Self, Error<D>> {
+	pub(super) async fn new_object_list(cache: &'a Cache<D>) -> Result<Tree<'a, D>, Error<D>> {
 		let id = OBJECT_LIST_ID;
 
 		// Lock object now so it doesn't get evicted.
@@ -127,7 +127,6 @@ impl<D: Dev> Tree<D> {
 				new_len = b.len();
 			}
 			self.cache
-				.clone()
 				.adjust_cache_use_both(old_len, new_len)
 				.await?;
 		} else {
@@ -155,7 +154,6 @@ impl<D: Dev> Tree<D> {
 				new_len = b.len();
 			}
 			self.cache
-				.clone()
 				.adjust_cache_use_both(old_len, new_len)
 				.await?;
 
@@ -169,7 +167,6 @@ impl<D: Dev> Tree<D> {
 					// "Fetch" directly since we're overwriting the entire record anyways.
 					let b = self
 						.cache
-						.clone()
 						.fetch_entry(0, 0, key, &Record::default())
 						.await?;
 
@@ -185,7 +182,6 @@ impl<D: Dev> Tree<D> {
 					new_len = b.len();
 				}
 				self.cache
-					.clone()
 					.adjust_cache_use_both(old_len, new_len)
 					.await?;
 			}
@@ -208,7 +204,6 @@ impl<D: Dev> Tree<D> {
 					new_len = b.len();
 				}
 				self.cache
-					.clone()
 					.adjust_cache_use_both(old_len, new_len)
 					.await?;
 			}
@@ -326,7 +321,6 @@ impl<D: Dev> Tree<D> {
 				let mut old_rec = Record::default();
 				let l = self
 					.cache
-					.clone()
 					.read_object_table(self.id, old_rec.as_mut())
 					.await?;
 				assert_eq!(l, 32, "old root was not fully read");
@@ -335,7 +329,6 @@ impl<D: Dev> Tree<D> {
 				// Store new root
 				let l = self
 					.cache
-					.clone()
 					.write_object_table(self.id, record.as_ref())
 					.await?;
 				assert_eq!(l, 32, "new root was not fully written");
@@ -368,7 +361,6 @@ impl<D: Dev> Tree<D> {
 				new_len = entry.data.len();
 			}
 			self.cache
-				.clone()
 				.adjust_cache_use_both(old_len, new_len)
 				.await
 		}
@@ -460,7 +452,6 @@ impl<D: Dev> Tree<D> {
 			// The changes will propagate up.
 			let entry = self
 				.cache
-				.clone()
 				.fetch_entry(self.id, cur_depth, 0, &Record::default())
 				.await?;
 			let mut entry = entry.get_mut().await?;
@@ -503,7 +494,7 @@ impl<D: Dev> Tree<D> {
 		if self.id == OBJECT_LIST_ID {
 			Ok(self.cache.object_list())
 		} else {
-			let list = Self::new(self.cache.clone(), OBJECT_LIST_ID).await?;
+			let list = Self::new(self.cache, OBJECT_LIST_ID).await?;
 			let mut record = Record::default();
 			list.read(self.id * RECORD_SIZE, record.as_mut()).await?;
 			Ok(record)
@@ -554,7 +545,6 @@ impl<D: Dev> Tree<D> {
 			// TODO verify the latter statement.
 			return self
 				.cache
-				.clone()
 				.fetch_entry(self.id, cur_depth, offset, &Record::default())
 				.await;
 		}
@@ -579,7 +569,6 @@ impl<D: Dev> Tree<D> {
 				// Just insert a zeroed record and return that.
 				return self
 					.cache
-					.clone()
 					.fetch_entry(self.id, target_depth, offset, &Record::default())
 					.await;
 			}
@@ -603,7 +592,6 @@ impl<D: Dev> Tree<D> {
 			let offt = offset >> depth_offset_shift(cur_depth);
 			let entry = self
 				.cache
-				.clone()
 				.fetch_entry(self.id, cur_depth, offt, &record)
 				.await?;
 
@@ -634,9 +622,9 @@ impl<D: Dev> Tree<D> {
 	/// There is more than one active lock on the other object,
 	/// i.e. there are multiple [`Tree`] instances referring to the same object.
 	/// Hence the object cannot safely be destroyed.
-	pub async fn replace_with(&self, other: Tree<D>) -> Result<(), Error<D>> {
+	pub async fn replace_with(&self, other: Tree<'a, D>) -> Result<(), Error<D>> {
 		// FIXME check locks
-		self.cache.clone().move_object(other.id, self.id).await
+		self.cache.move_object(other.id, self.id).await
 	}
 
 	/// Get the maximum record size.
@@ -650,7 +638,7 @@ impl<D: Dev> Tree<D> {
 	}
 }
 
-impl<D: Dev> Drop for Tree<D> {
+impl<D: Dev> Drop for Tree<'_, D> {
 	fn drop(&mut self) {
 		let data = { &mut *self.cache.data.borrow_mut() };
 		let hash_map::Entry::Occupied(mut o) = data.locked_objects.entry(self.id) else {
