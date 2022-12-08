@@ -2,14 +2,10 @@ mod allocator;
 pub mod dev;
 
 use {
-	crate::{
-		BlockSize, Compression, Error, MaxRecordSize, Record,
-	},
+	crate::{BlockSize, Compression, Error, MaxRecordSize, Record},
 	alloc::vec::Vec,
 	allocator::Allocator,
-	core::{
-		cell::RefCell,
-	},
+	core::cell::RefCell,
 };
 
 pub use dev::{Dev, DevSet};

@@ -124,3 +124,18 @@ fn write_flush_read_offset_10p6() {
 		assert_eq!(buf, [1; 1000]);
 	})
 }
+
+/// `new` sets global cache size to 4096, so this is guaranteed to cause evictions.
+#[test]
+fn write_read_2p13() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+		obj.resize(1 << 13).await.unwrap();
+		obj.write(0, &[1; 1 << 13]).await.unwrap();
+		dbg!(&obj);
+		let mut buf = [0; 1 << 13];
+		obj.read(0, &mut buf).await.unwrap();
+		assert_eq!(buf, [1; 1 << 13]);
+	})
+}

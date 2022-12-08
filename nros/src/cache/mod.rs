@@ -7,9 +7,7 @@ use {
 	crate::{BlockSize, Dev, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{Ref, RefCell, RefMut},
-		fmt,
-		future,
-		mem,
+		fmt, future, mem,
 		task::{Poll, Waker},
 	},
 	rangemap::RangeSet,
@@ -21,7 +19,6 @@ use {
 const OBJECT_LIST_ID: u64 = u64::MAX;
 
 /// A single cached record tree.
-#[derive(Debug)]
 struct TreeData {
 	/// The current length of the tree.
 	///
@@ -34,8 +31,72 @@ struct TreeData {
 	data: Box<[FxHashMap<u64, Entry>]>,
 }
 
+/// Formatter for [`TreeData`].
+///
+/// The output is more compact than that of `derive(Debug)`, especially for large amounts of data.
+struct FmtTreeData<'a> {
+	data: &'a TreeData,
+	id: u64,
+}
+
+impl fmt::Debug for FmtTreeData<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		struct FmtRecord<'a>(&'a Entry);
+
+		impl fmt::Debug for FmtRecord<'_> {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				let mut f = f.debug_list();
+				let mut i = 0;
+				while i < self.0.data.len() {
+					let mut rec = Record::default();
+					let l = (self.0.data.len() - i).min(mem::size_of::<Record>());
+					rec.as_mut()[..l].copy_from_slice(&self.0.data[i..][..l]);
+					f.entry(&rec);
+					i += l;
+				}
+				f.finish()
+			}
+		}
+
+		struct FmtRecordMap<'a>(&'a FxHashMap<u64, Entry>);
+
+		impl fmt::Debug for FmtRecordMap<'_> {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				let mut f = f.debug_map();
+				for (k, v) in self.0.iter() {
+					f.entry(k, &FmtRecord(v));
+				}
+				f.finish()
+			}
+		}
+
+		struct FmtData<'a>(&'a FmtTreeData<'a>);
+
+		impl fmt::Debug for FmtData<'_> {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				let mut f = f.debug_map();
+				let mut depths = self.0.data.data.iter().enumerate();
+				// Format like data
+				if self.0.id != OBJECT_LIST_ID {
+					let Some((i, l)) = depths.next() else { return f.finish() };
+					f.entry(&i, l);
+				}
+				// Format like records
+				for (i, l) in depths {
+					f.entry(&i, &FmtRecordMap(l));
+				}
+				f.finish()
+			}
+		}
+
+		f.debug_struct(stringify!(TreeData))
+			.field("length", &self.data.length)
+			.field("data", &FmtData(self))
+			.finish()
+	}
+}
+
 /// Cache data.
-#[derive(Debug)]
 pub(crate) struct CacheData {
 	/// Cached records of objects and the object list.
 	///
@@ -71,6 +132,38 @@ pub(crate) struct CacheData {
 	///
 	/// If yes, avoid flushing again since that breaks stuff.
 	is_flushing: bool,
+}
+
+impl fmt::Debug for CacheData {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+
+		struct FmtData<'a>(&'a FxHashMap<u64, TreeData>);
+
+		impl fmt::Debug for FmtData<'_> {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				let mut f = f.debug_map();
+				for (&id, data) in self.0.iter() {
+					f.entry(&id, &FmtTreeData { data, id });
+				}
+				f.finish()
+			}
+		}
+
+		f.debug_struct(stringify!(CacheData))
+			.field("data", &FmtData(&self.data))
+			.field("global_lru", &self.global_lru)
+			.field("write_lru", &self.write_lru)
+			.field("global_cache_max", &self.global_cache_max)
+			.field("write_cache_max", &self.write_cache_max)
+			.field("global_cache_size", &self.global_cache_size)
+			.field("write_cache_size", &self.write_cache_size)
+			.field("locked_objects", &self.locked_objects)
+			.field("locked_records", &self.locked_records)
+			.field("fetching", &self.fetching)
+			.field("used_objects_ids", &self.used_objects_ids)
+			.field("is_flushing", &self.is_flushing)
+			.finish()
+	}
 }
 
 /// Cache algorithm.

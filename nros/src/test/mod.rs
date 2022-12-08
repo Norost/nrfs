@@ -184,9 +184,9 @@ fn read_before_tx_1024() {
 		let obj = s.create().await.unwrap();
 		obj.resize(1024).await.unwrap();
 		obj.write(0, &[1; 1024]).await.unwrap();
-		let mut buf = [0; 1000];
+		let mut buf = [0; 1024];
 		obj.read(0, &mut buf).await.unwrap();
-		assert_eq!(buf, [1; 1000]);
+		assert_eq!(buf, [1; 1024]);
 	})
 }
 

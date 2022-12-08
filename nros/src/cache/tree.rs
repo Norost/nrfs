@@ -1,10 +1,7 @@
 use {
 	super::{Cache, CacheRef, TreeData, OBJECT_LIST_ID},
 	crate::{Dev, Error, MaxRecordSize, Record},
-	core::{
-		mem,
-		ops::RangeInclusive,
-	},
+	core::{mem, ops::RangeInclusive},
 	std::{collections::hash_map, rc::Rc},
 };
 
@@ -194,24 +191,27 @@ impl<D: Dev> Tree<D> {
 			}
 
 			// Copy end record |xxxx----|
-			let (old_len, new_len);
-			{
-				debug_assert_eq!(data.len(), last_offset);
-				let b = self.get(0, last_key).await?;
-				let mut b = b.get_mut().await?;
-				let b = &mut b.data;
-				old_len = b.len();
+			// Don't bother if there is no data
+			if last_offset > 0 {
+				let (old_len, new_len);
+				{
+					debug_assert_eq!(data.len(), last_offset);
+					let b = self.get(0, last_key).await?;
+					let mut b = b.get_mut().await?;
+					let b = &mut b.data;
+					old_len = b.len();
 
-				let min_len = b.len().max(data.len());
-				b.resize(min_len, 0);
-				b[..last_offset].copy_from_slice(data);
-				trim_zeros_end(b);
-				new_len = b.len();
+					let min_len = b.len().max(data.len());
+					b.resize(min_len, 0);
+					b[..last_offset].copy_from_slice(data);
+					trim_zeros_end(b);
+					new_len = b.len();
+				}
+				self.cache
+					.clone()
+					.adjust_cache_use_both(old_len, new_len)
+					.await?;
 			}
-			self.cache
-				.clone()
-				.adjust_cache_use_both(old_len, new_len)
-				.await?;
 		}
 
 		Ok(data.len())
@@ -287,7 +287,8 @@ impl<D: Dev> Tree<D> {
 			}
 
 			// Copy end record |xxxx----|
-			{
+			// Don't bother if there's nothing to copy
+			if last_offset > 0 {
 				debug_assert_eq!(buf.len(), last_offset);
 				let d = self.get(0, last_key).await?;
 				let d = &d.get().data;
@@ -512,28 +513,28 @@ impl<D: Dev> Tree<D> {
 		let rec_size = self.max_record_size().to_raw();
 
 		let mut cur_depth = target_depth;
-		let mut depth_offset_shift = 0;
+		let depth_offset_shift = |d| (rec_size - RECORD_SIZE_P2) * (d - target_depth);
 
 		let root = self.root().await?;
+		let len = self.len().await?;
 
 		// Find the first parent or leaf entry that is present starting from a leaf
 		// and work back downwards.
 
-		// Use the *on-disk* depth as anything above it can only be zeroes anyways.
-		let depth = depth(self.max_record_size(), root.total_length.into());
+		let cache_depth = depth(self.max_record_size(), len);
+		let dev_depth = depth(self.max_record_size(), root.total_length.into());
 
 		// FIXME we need to be careful with resizes while this task is running.
 		// Perhaps lock object IDs somehow?
 
 		// Go up
 		// TODO has_entry doesn't check if an entry is already being fetched.
-		while cur_depth < depth
+		while cur_depth < cache_depth
 			&& !self
 				.cache
-				.has_entry(self.id, cur_depth, offset >> depth_offset_shift)
+				.has_entry(self.id, cur_depth, offset >> depth_offset_shift(cur_depth))
 		{
 			cur_depth += 1;
-			depth_offset_shift += rec_size - RECORD_SIZE_P2;
 		}
 
 		if cur_depth == target_depth {
@@ -549,7 +550,8 @@ impl<D: Dev> Tree<D> {
 
 		// Get first record to fetch.
 		let mut record;
-		if cur_depth == depth {
+		// Check if we found any cached record at all.
+		if cur_depth == cache_depth {
 			// Check if the record we're trying to fetch is within the newly added region from
 			// growing the tree or within the old region.
 			//
@@ -559,21 +561,26 @@ impl<D: Dev> Tree<D> {
 			let offset_byte = offset << rec_size + (rec_size - RECORD_SIZE_P2) * target_depth;
 
 			if offset_byte < root.total_length {
+				// Start iterating on on-dev records.
 				record = root;
+				cur_depth = dev_depth;
 			} else {
-				todo!("zero record")
+				// Just insert a zeroed record and return that.
+				return self
+					.cache
+					.clone()
+					.fetch_entry(self.id, target_depth, offset, &Record::default())
+					.await;
 			}
 
 			cur_depth -= 1;
-			depth_offset_shift -= rec_size - RECORD_SIZE_P2;
 		} else {
-			let offt = offset >> depth_offset_shift;
+			let offt = offset >> depth_offset_shift(cur_depth);
 			let data = self.cache.get_entry(self.id, cur_depth, offt);
 
 			cur_depth -= 1;
-			depth_offset_shift -= rec_size - RECORD_SIZE_P2;
 
-			let offt = offset >> depth_offset_shift;
+			let offt = offset >> depth_offset_shift(cur_depth);
 			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
 				.try_into()
 				.unwrap();
@@ -582,7 +589,7 @@ impl<D: Dev> Tree<D> {
 
 		// Fetch records until we can lock the one we need.
 		let entry = loop {
-			let offt = offset >> depth_offset_shift;
+			let offt = offset >> depth_offset_shift(cur_depth);
 			let entry = self
 				.cache
 				.clone()
@@ -595,10 +602,9 @@ impl<D: Dev> Tree<D> {
 			}
 
 			cur_depth -= 1;
-			depth_offset_shift -= rec_size - RECORD_SIZE_P2;
 
 			// Fetch the next record.
-			let offt = offset >> depth_offset_shift;
+			let offt = offset >> depth_offset_shift(cur_depth);
 			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
 				.try_into()
 				.unwrap();
@@ -635,11 +641,7 @@ impl<D: Dev> Drop for Tree<D> {
 /// Determine record range given an offset, record size and length.
 ///
 /// Ranges are used for efficient iteration.
-fn calc_range(
-	record_size: MaxRecordSize,
-	offset: u64,
-	length: usize,
-) -> RangeInclusive<u64> {
+fn calc_range(record_size: MaxRecordSize, offset: u64, length: usize) -> RangeInclusive<u64> {
 	let start_key = offset >> record_size;
 	let end_key = (offset + u64::try_from(length).unwrap()) >> record_size;
 	start_key..=end_key
