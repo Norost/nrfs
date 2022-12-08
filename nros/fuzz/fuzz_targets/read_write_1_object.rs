@@ -8,15 +8,14 @@ use core::future::Future;
 use core::task::Context;
 
 async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev> {
-	let s = MemDev::new(16, BlockSize::K1);
+	let s = MemDev::new(16, BlockSize::B512);
 	Nros::new(
 		[[s]],
-		BlockSize::K1,
+		BlockSize::B512,
 		max_record_size,
 		Compression::None,
-		// Don't evict cache for tests with small amounts of data, effectively.
-		4 * 1024,
-		4 * 1024,
+		4 * 512,
+		4 * 512,
 	)
 	.await
 	.unwrap()
@@ -35,7 +34,7 @@ where
 
 fuzz_target!(|data: &[u8]| {
     run_(|| async {
-        let s = new(MaxRecordSize::K1).await;
+        let s = new(MaxRecordSize::B512).await;
         let obj = s.create().await.unwrap();
         obj.resize(data.len().try_into().unwrap()).await.unwrap();
         
