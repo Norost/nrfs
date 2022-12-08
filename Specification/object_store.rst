@@ -257,3 +257,65 @@ Determining which slots are free is done by scanning the entire list [#]_.
 Allocation log
 ~~~~~~~~~~~~~~
 
+The allocation log keeps track of allocations and deallocations [#]_.
+
+.. [#] An allocation log is much more convenient to use with transactional
+   filesystems.
+   It can also, combined with defragmentation, be much more compact than e.g.
+   a bitmap as a single log entry can cover a very large range for a fixed
+   cost.
+
+   The log can be rewritten at any points to compactify it.
+
+The log is kept track of as a linked list [#]_,
+where the first 32 bytes are a record pointing to the next element and all
+bytes after it are log entries.
+The bottom of the stack denotes the start of the log.
+
+.. [#] A linked stack has the following useful properties:
+
+   * Appending is very quick.
+     This makes transactions quicker if I/O load is high.
+   * There are no parent records that need to be modified.
+
+   Additionally, deriving the allocation status of any block can trivially be
+   determined while iterating:
+   the *first* (de)allocation entry for any block indicates it status.
+   Any entries lower on the stack for that block can be ignored.
+
+The space used by records for the stack are **not** explicitly recorded in the
+log [#]_.
+
+.. [#] This makes it practical to compress log records.
+
+   The space used by these records can trivially be derived while iterating the
+   stack.
+
+.. table:: Log stack element
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                                                       |
+  +------+                                                       |
+  |    8 |                                                       |
+  +------+                      Next record                      |
+  |   16 |                                                       |
+  +------+                                                       |
+  |   24 |                                                       |
+  +------+-------------------------------------------------------+
+  |  ... |                                                       |
+  +------+-------------------------------------------------------+
+
+.. table:: Log entry
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                          LBA                          |
+  +------+-------------------------------------------------------+
+  |    8 |                          Size                         |
+  +------+-------------------------------------------------------+
+
+If the high bit of Size is set the entry is a deallocation.
+Otherwise it is an allocation.
