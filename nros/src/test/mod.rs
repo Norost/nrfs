@@ -1,3 +1,5 @@
+pub mod fuzz;
+
 mod allocator;
 mod cache;
 mod dev;
@@ -5,11 +7,19 @@ mod record;
 
 use {
 	crate::*,
-	core::{future::Future, task::Context},
+	core::{
+		future::Future,
+		task::{Context, Poll},
+	},
 };
 
-async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev> {
-	let s = MemDev::new(16, BlockSize::K1);
+async fn new_cap(
+	max_record_size: MaxRecordSize,
+	blocks: usize,
+	read_cache_size: usize,
+	write_cache_size: usize,
+) -> Nros<MemDev> {
+	let s = MemDev::new(blocks, BlockSize::K1);
 	Nros::new(
 		[[s]],
 		BlockSize::K1,
@@ -23,15 +33,23 @@ async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev> {
 	.unwrap()
 }
 
+async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev> {
+	new_cap(max_record_size, 16, 4096, 4096).await
+}
+
 /// Create new object store and poll future ad infinitum.
-fn run<F, Fut>(f: F)
+fn run<F, R, Fut>(f: F) -> R
 where
-	F: Fn() -> Fut,
-	Fut: Future<Output = ()>,
+	F: FnOnce() -> Fut,
+	Fut: Future<Output = R>,
 {
 	let mut fut = core::pin::pin!(f());
 	let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
-	while fut.as_mut().poll(&mut cx).is_pending() {}
+	loop {
+		if let Poll::Ready(r) = fut.as_mut().poll(&mut cx) {
+			return r;
+		}
+	}
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
 #![feature(int_roundings)]
+#![feature(iterator_try_collect)]
 #![feature(nonzero_min_max)]
 #![feature(pin_macro)]
 #![feature(type_alias_impl_trait)]
@@ -68,8 +69,8 @@ mod cache;
 pub mod header;
 mod record;
 pub mod storage;
-#[cfg(test)]
-mod test;
+#[cfg(any(test, fuzzing))]
+pub mod test;
 mod util;
 
 pub use {

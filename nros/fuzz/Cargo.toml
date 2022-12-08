@@ -26,3 +26,9 @@ name = "read_write_1_object"
 path = "fuzz_targets/read_write_1_object.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "random_ops"
+path = "fuzz_targets/random_ops.rs"
+test = false
+doc = false

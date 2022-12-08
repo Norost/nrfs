@@ -33,3 +33,12 @@ features = ["xxh3"]
 
 [dependencies.futures-util]
 version = "0.3"
+
+[dev-dependencies.arbitrary]
+version = "1.2"
+features = ["derive"]
+
+# https://github.com/rust-fuzz/cargo-fuzz/issues/256
+[target.'cfg(fuzzing)'.dependencies.arbitrary]
+version = "1.2"
+features = ["derive"]
