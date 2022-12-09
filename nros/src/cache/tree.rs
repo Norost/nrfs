@@ -361,19 +361,18 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 	/// Resize record tree.
 	pub async fn resize(&self, new_len: u64) -> Result<(), Error<D>> {
-		let root = self.root().await?;
 		let len = self.len().await?;
 		if new_len < len {
-			self.shrink(root, new_len).await
+			self.shrink(new_len).await
 		} else if new_len > len {
-			self.grow(root, new_len).await
+			self.grow(new_len).await
 		} else {
 			Ok(())
 		}
 	}
 
 	/// Shrink record tree.
-	async fn shrink(&self, root: Record, new_len: u64) -> Result<(), Error<D>> {
+	async fn shrink(&self, new_len: u64) -> Result<(), Error<D>> {
 		debug_assert!(
 			self.len().await? > new_len,
 			"new_len is equal or larger than cur len"
@@ -410,7 +409,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 		}
 
 		// Reduce depth & remove completely out of range entries.
-		let cur_depth = depth(self.max_record_size(), root.total_length.into());
+		let cur_depth = depth(self.max_record_size(), self.len().await?);
 		let new_depth = depth(self.max_record_size(), new_len);
 
 		// Deallocate records that are out of range.
@@ -428,7 +427,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 		}
 
 		// Trim last record on the right, if necessary.
-		let (mut offt, i) = divmod_p2(new_len, RECORD_SIZE_P2);
+		let (mut offt, i) = divmod_p2(new_len, self.max_record_size().to_raw());
 		if i > 0 {
 			let entry = self.get(0, offt).await?;
 			let mut e = entry.get_mut().await?;
@@ -466,6 +465,19 @@ impl<'a, D: Dev> Tree<'a, D> {
 		v.resize_with(new_depth.into(), Default::default);
 		obj.data = v.into();
 
+		// Set root
+		debug_assert!(
+			obj.data.last().map_or(true, |m| m.len() <= 1),
+			"root level has multiple entries"
+		);
+		debug_assert!(
+			obj.data
+				.last()
+				.and_then(|m| m.keys().next())
+				.map_or(true, |o| *o == 0),
+			"root level entry has offset greater than 0"
+		);
+
 		// Set length
 		obj.length = new_len;
 
@@ -473,14 +485,14 @@ impl<'a, D: Dev> Tree<'a, D> {
 	}
 
 	/// Grow record tree.
-	async fn grow(&self, root: Record, new_len: u64) -> Result<(), Error<D>> {
+	async fn grow(&self, new_len: u64) -> Result<(), Error<D>> {
 		debug_assert!(
 			self.len().await? < new_len,
 			"new_len is equal or smaller than cur len"
 		);
 
 		// Increase depth.
-		let cur_depth = depth(self.max_record_size(), root.total_length.into());
+		let cur_depth = depth(self.max_record_size(), self.len().await?);
 		let new_depth = depth(self.max_record_size(), new_len);
 
 		let root = self.root().await?;

@@ -273,6 +273,19 @@ fn cache_get_large_shift_offset() {
 }
 
 #[test]
+fn tree_shrink_divmod_record_size() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 40002 },
+			Resize { idx: 0, size: 40001 },
+			Write { idx: 0, offset: 0, amount: 12994 },
+		],
+	)
+	.run()
+}
+
+#[test]
 fn cache_grow_add_record_write_cache_size() {
 	Test::new(
 		1 << 16,
