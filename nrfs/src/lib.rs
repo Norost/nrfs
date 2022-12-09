@@ -1,5 +1,6 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(elided_lifetimes_in_paths)]
+#![feature(pin_macro)]
 
 pub mod dir;
 mod file;
