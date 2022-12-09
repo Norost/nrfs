@@ -41,6 +41,8 @@ pub enum Op {
 	///
 	/// This destroys the old object.
 	Move { from_idx: u32, to_idx: u32 },
+	/// Resize an object.
+	Resize { idx: u32, size: u64 },
 }
 
 impl<'a> Arbitrary<'a> for Test {
@@ -127,6 +129,11 @@ impl Test {
 							.replace_with(self.store.get(from_id).await.unwrap())
 							.await
 							.unwrap();
+					}
+					Op::Resize { idx, size } => {
+						let id = self.ids[idx as usize % self.ids.len()];
+						let obj = self.store.get(id).await.unwrap();
+						obj.resize(size).await.unwrap();
 					}
 				}
 			}
