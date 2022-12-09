@@ -220,3 +220,18 @@ fn cache_object_id_double_free_replace_with_self() {
 	)
 	.run()
 }
+
+#[test]
+fn tree_shrink_unimplemented() {
+	// Ditto
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 6872316419617283935 },
+			Write { idx: 0, offset: 18446744073709551455, amount: 65476 },
+			Create { size: 18446744073709486080 },
+			Move { from_idx: 1, to_idx: 0 },
+		],
+	)
+	.run()
+}

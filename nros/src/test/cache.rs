@@ -206,3 +206,31 @@ fn write_many_depth_gt1() {
 		}
 	})
 }
+
+#[test]
+fn shrink_written_object_0() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+		obj.resize(1 << 20).await.unwrap();
+		obj.write((1 << 20) - 1, &[1]).await.unwrap();
+		clear(&s).await;
+		obj.resize(0).await.unwrap();
+	})
+}
+
+#[test]
+fn shrink_written_object_1() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+		obj.resize(1 << 20).await.unwrap();
+		obj.write((1 << 20) - 1, &[1]).await.unwrap();
+		obj.write((1 << 18) - 5, &[2]).await.unwrap();
+		clear(&s).await;
+		obj.resize((1 << 18) - 6).await.unwrap();
+		let mut b = [0];
+		obj.read((1 << 18) - 5, &mut b).await.unwrap();
+		assert_eq!(b, [2]);
+	})
+}

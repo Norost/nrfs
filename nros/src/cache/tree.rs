@@ -380,14 +380,15 @@ impl<'a, D: Dev> Tree<'a, D> {
 		);
 
 		/// Destroy all records in a subtree recursively.
-		#[async_recursion::async_recursion(?Send)]
-		async fn destroy<D: Dev>(
-			tree: &Tree<D>,
+		async fn destroy<'a, D: Dev>(
+			tree: &Tree<'a, D>,
 			depth: u8,
 			offset: u64,
 			record: &Record,
 		) -> Result<(), Error<D>> {
-			if depth > 0 {
+			// The actually recursive part, which does require boxing the future
+			#[async_recursion::async_recursion(?Send)]
+			async fn f<'a, D: Dev>(tree: &Tree<'a, D>, depth: u8, offset: u64) -> Result<(), Error<D>> {
 				// We're a parent node, destroy children.
 				let entry = tree.get(depth, offset).await?;
 				for offt in 1..1usize << tree.max_record_size() {
@@ -395,6 +396,10 @@ impl<'a, D: Dev> Tree<'a, D> {
 					let offt = (offset << tree.max_record_size()) + u64::try_from(offt).unwrap();
 					destroy(tree, depth - 1, offt, &rec).await?;
 				}
+				Ok(())
+			}
+			if depth > 0 && record.length > 0 {
+				f(tree, depth, offset).await?
 			}
 			tree.cache.destroy(tree.id, depth, offset, record);
 			Ok(())
@@ -406,16 +411,33 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 		for d in (new_depth..cur_depth).rev() {
 			// Get current root node.
-			let entry = self.get(d + 1, 0).await?;
+			let entry = self.get(d, 0).await?;
 			// Destroy every subtree after the first child.
-			for offt in 1..1 << self.max_record_size().to_raw() {
-				let rec = get_record(&entry.get().data, offt);
-				destroy(self, d, u64::try_from(offt).unwrap(), &rec).await?;
+			// Do check if d > 0, otherwise it's a leaf and hence has no children.
+			if d > 0 {
+				for offt in 1..1 << self.max_record_size().to_raw() {
+					let rec = get_record(&entry.get().data, offt);
+					destroy(self, d - 1, u64::try_from(offt).unwrap(), &rec).await?;
+				}
 			}
 		}
 
-		// Trim records on the right.
-		todo!()
+		// Trim last record on the right, if necessary
+		let (offt, i) = divmod_p2(new_len, RECORD_SIZE_P2);
+		if i > 0 {
+			let entry = self.get(0, offt).await?;
+			let mut e = entry.get_mut().await?;
+			if i < e.data.len() {
+				let old_len = e.data.len();
+				e.data.resize(i, 0);
+				trim_zeros_end(&mut e.data);
+				let new_len = e.data.len();
+				drop(e);
+				drop(entry);
+				self.cache.adjust_cache_use_both(old_len, new_len).await?;
+			}
+		}
+		Ok(())
 	}
 
 	/// Grow record tree.
