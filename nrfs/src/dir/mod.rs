@@ -3,7 +3,7 @@ pub mod ext;
 mod hashmap;
 
 use {
-	crate::{Error, File, Name, Nrfs, Storage},
+	crate::{Dev, Error, File, Name, Nrfs},
 	core::{
 		fmt,
 		ops::{Deref, DerefMut},
@@ -22,8 +22,8 @@ const TY_SYM: u8 = 3;
 const TY_EMBED_FILE: u8 = 4;
 const TY_EMBED_SYM: u8 = 5;
 
-pub struct Dir<'a, S: Storage> {
-	pub(crate) fs: &'a mut Nrfs<S>,
+pub struct Dir<'a, D: Dev> {
+	pub(crate) fs: &'a mut Nrfs<D>,
 	data: DirData,
 }
 
@@ -42,7 +42,7 @@ pub struct DirData {
 	alloc_map: Option<RangeSet<u64>>,
 }
 
-impl<S: Storage> Deref for Dir<'_, S> {
+impl<D: Dev> Deref for Dir<'_, D> {
 	type Target = DirData;
 
 	fn deref(&self) -> &Self::Target {
@@ -50,14 +50,18 @@ impl<S: Storage> Deref for Dir<'_, S> {
 	}
 }
 
-impl<S: Storage> DerefMut for Dir<'_, S> {
+impl<D: Dev> DerefMut for Dir<'_, D> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		&mut self.data
 	}
 }
 
-impl<'a, S: Storage> Dir<'a, S> {
-	pub(crate) fn new(fs: &'a mut Nrfs<S>, options: &DirOptions) -> Result<Self, Error<S>> {
+impl<'a, D: Dev> Dir<'a, D> {
+	/// Create a new directory.
+	pub(crate) async fn new(
+		fs: &'a mut Nrfs<D>,
+		options: &DirOptions,
+	) -> Result<Dir<'a, D>, Error<D>> {
 		let mut header_len = 24;
 		let mut entry_len = 24;
 		let unix_offset = options.extensions.unix().then(|| {
@@ -88,15 +92,18 @@ impl<'a, S: Storage> Dir<'a, S> {
 				alloc_map: Some(Default::default()),
 			},
 		};
-		slf.id = slf.fs.storage.new_object_pair().map_err(Error::Nros)?;
-		slf.init_with_size(slf.id, options.capacity_p2)?;
+		let (slf_obj, heap_obj) = slf.fs.storage.create_pair().await?;
+		let slf_id = slf_obj.id();
+		drop((slf_obj, heap_obj));
+		slf.id = slf_id;
+		slf.init_with_size(slf.id, options.capacity_p2).await?;
 		Ok(slf)
 	}
 
 	/// Initialize a hashmap object with the given size.
 	///
 	/// This does not modify the current dir structure.
-	fn init_with_size(&mut self, id: u64, map_size_p2: u8) -> Result<(), Error<S>> {
+	async fn init_with_size(&mut self, id: u64, map_size_p2: u8) -> Result<(), Error<D>> {
 		let mut buf = [0; 64];
 		buf[0] = self.header_len8;
 		buf[1] = self.entry_len8;
@@ -122,18 +129,21 @@ impl<'a, S: Storage> Dir<'a, S> {
 		}
 		self.fs
 			.storage
-			.resize(id, self.hashmap_base() + self.entry_size() << map_size_p2)
-			.map_err(Error::Nros)?;
+			.get(id)
+			.await?
+			.resize(self.hashmap_base() + self.entry_size() << map_size_p2)
+			.await?;
 		self.fs
-			.write_all(id, 0, &buf[..usize::from(self.header_len8) * 8])?;
+			.write_all(id, 0, &buf[..usize::from(self.header_len8) * 8])
+			.await?;
 
 		Ok(())
 	}
 
-	pub(crate) fn load(fs: &'a mut Nrfs<S>, id: u64) -> Result<Self, Error<S>> {
+	pub(crate) async fn load(fs: &'a mut Nrfs<D>, id: u64) -> Result<Dir<'a, D>, Error<D>> {
 		// Get basic info
 		let mut buf = [0; 24];
-		fs.read_exact(id, 0, &mut buf)?;
+		fs.read_exact(id, 0, &mut buf).await?;
 		let [header_len8, entry_len8, hash_algorithm, hashmap_size_p2, a, b, c, d, hash_key @ ..] =
 			buf;
 		let entry_count = u32::from_le_bytes([a, b, c, d]);
@@ -145,11 +155,12 @@ impl<'a, S: Storage> Dir<'a, S> {
 		// An extension consists of at least two bytes, ergo +1
 		while offt + 1 < u16::from(header_len8) * 8 {
 			let mut buf = [0; 2];
-			fs.read_exact(id, offt.into(), &mut buf)?;
+			fs.read_exact(id, offt.into(), &mut buf).await?;
 			let [name_len, data_len] = buf;
 			let total_len = u16::from(name_len) + u16::from(data_len);
 			let mut buf = [0; 255 * 2];
-			fs.read_exact(id, u64::from(offt) + 2, &mut buf[..total_len.into()])?;
+			fs.read_exact(id, u64::from(offt) + 2, &mut buf[..total_len.into()])
+				.await?;
 			let (name, data) = buf.split_at(name_len.into());
 			match name {
 				b"unix" => {
@@ -188,51 +199,54 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// Create a new file.
 	///
 	/// This fails if an entry with the given name already exists.
-	pub fn create_file<'b>(
+	pub async fn create_file<'b>(
 		&'b mut self,
 		name: &Name,
 		ext: &Extensions,
-	) -> Result<Option<File<'a, 'b, S>>, Error<S>> {
+	) -> Result<Option<File<'a, 'b, D>>, Error<D>> {
 		let e = NewEntry { name, ty: Type::EmbedFile { offset: 0, length: 0 } };
 		self.insert(e, ext)
+			.await
 			.map(|r| r.map(|i| File::from_embed(self, false, i, 0, 0)))
 	}
 
 	/// Create a new directory.
 	///
 	/// This fails if an entry with the given name already exists.
-	pub fn create_dir<'s>(
+	pub async fn create_dir<'s>(
 		&'s mut self,
 		name: &Name,
 		options: &DirOptions,
 		ext: &Extensions,
-	) -> Result<Option<Dir<'s, S>>, Error<S>> {
-		let d = Dir::new(self.fs, options)?.data;
+	) -> Result<Option<Dir<'s, D>>, Error<D>> {
+		let d = Dir::new(self.fs, options).await?.data;
 		let e = NewEntry { name, ty: Type::Dir { id: d.id } };
 		self.insert(e, ext)
+			.await
 			.map(|r| r.map(|_| Dir { fs: self.fs, data: d }))
 	}
 
 	/// Create a new symbolic link.
 	///
 	/// This fails if an entry with the given name already exists.
-	pub fn create_sym<'b>(
+	pub async fn create_sym<'b>(
 		&'b mut self,
 		name: &Name,
 		ext: &Extensions,
-	) -> Result<Option<File<'a, 'b, S>>, Error<S>> {
+	) -> Result<Option<File<'a, 'b, D>>, Error<D>> {
 		let e = NewEntry { name, ty: Type::EmbedSym { offset: 0, length: 0 } };
 		self.insert(e, ext)
+			.await
 			.map(|r| r.map(|i| File::from_embed(self, true, i, 0, 0)))
 	}
 
-	pub fn next_from<'b>(
+	pub async fn next_from<'b>(
 		&'b mut self,
 		mut index: u32,
-	) -> Result<Option<(Entry<'a, 'b, S>, Option<u32>)>, Error<S>> {
+	) -> Result<Option<(Entry<'a, 'b, D>, Option<u32>)>, Error<D>> {
 		while u64::from(index) < self.capacity() {
 			// Get standard info
-			let e = self.hashmap().get(index)?;
+			let e = self.hashmap().get(index).await?;
 
 			if e.ty == 0 {
 				// Is empty, so skip
@@ -243,34 +257,39 @@ impl<'a, S: Storage> Dir<'a, S> {
 			// Get key
 			let mut key = [0; 255];
 			let key = &mut key[..e.key_len.into()];
-			self.read_heap(e.key_offset, key)?;
+			self.read_heap(e.key_offset, key).await?;
 
 			// Get extension info
-			let e = self.hashmap().get_ext(index, e)?;
+			let e = self.hashmap().get_ext(index, e).await?;
 			let e = Entry::new(self, e, key);
 			return Ok(Some((e, index.checked_add(1))));
 		}
 		Ok(None)
 	}
 
-	pub fn find<'b>(&'b mut self, name: &Name) -> Result<Option<Entry<'a, 'b, S>>, Error<S>> {
-		self.hashmap()
-			.find_index(name)?
-			.map(|(i, e)| {
-				self.hashmap()
-					.get_ext(i, e)
-					.map(|e| Entry::new(self, e, name))
-			})
-			.transpose()
+	pub async fn find<'b>(&'b mut self, name: &Name) -> Result<Option<Entry<'a, 'b, D>>, Error<D>> {
+		if let Some((i, e)) = self.hashmap().find_index(name).await? {
+			self.hashmap()
+				.get_ext(i, e)
+				.await
+				.map(|e| Entry::new(self, e, name))
+				.map(Some)
+		} else {
+			Ok(None)
+		}
 	}
 
 	/// Try to insert a new entry.
 	///
 	/// Returns `None` if an entry with the same name already exists.
-	fn insert(&mut self, entry: NewEntry<'_>, ext: &Extensions) -> Result<Option<u32>, Error<S>> {
+	async fn insert(
+		&mut self,
+		entry: NewEntry<'_>,
+		ext: &Extensions,
+	) -> Result<Option<u32>, Error<D>> {
 		// Check if we should grow the hashmap
 		if self.should_grow() {
-			self.grow()?;
+			self.grow().await?;
 		}
 
 		let name = Some(entry.name);
@@ -287,9 +306,9 @@ impl<'a, S: Storage> Dir<'a, S> {
 			mtime: ext.mtime,
 		};
 
-		let r = self.hashmap().insert(entry, name)?;
+		let r = self.hashmap().insert(entry, name).await?;
 		if r.is_some() {
-			self.set_entry_count(self.entry_count + 1)?;
+			self.set_entry_count(self.entry_count + 1).await?;
 		}
 		Ok(r)
 	}
@@ -300,40 +319,41 @@ impl<'a, S: Storage> Dir<'a, S> {
 	///
 	/// While it does check if the entry is a directory, it does not check whether it's empty.
 	/// It is up to the user to ensure the directory is empty.
-	pub fn remove(&mut self, name: &Name) -> Result<bool, Error<S>> {
-		if let Some((i, e)) = self.hashmap().find_index(name)? {
+	pub async fn remove(&mut self, name: &Name) -> Result<bool, Error<D>> {
+		if let Some((i, e)) = self.hashmap().find_index(name).await? {
 			self.remove_at(i, (e.key_offset, e.key_len), e.ty().unwrap())
+				.await
 				.map(|()| true)
 		} else {
 			Ok(false)
 		}
 	}
 
-	fn remove_at(&mut self, index: u32, key: (u64, u8), ty: Type) -> Result<(), Error<S>> {
-		self.set_entry_count(self.entry_count - 1)?;
-		self.hashmap().remove_at(index)?;
+	async fn remove_at(&mut self, index: u32, key: (u64, u8), ty: Type) -> Result<(), Error<D>> {
+		self.set_entry_count(self.entry_count - 1).await?;
+		self.hashmap().remove_at(index).await?;
 
 		// Deallocate string
-		self.dealloc(key.0, key.1.into())?;
+		self.dealloc(key.0, key.1.into()).await?;
 
 		match ty {
 			Type::File { id } | Type::Sym { id } => {
 				// Dereference object.
-				self.fs.storage.decr_ref(id).map_err(Error::Nros)?;
+				self.fs.storage.decr_ref(id).await?;
 			}
 			Type::Dir { id } => {
 				// Dereference map and heap.
-				self.fs.storage.decr_ref(id).map_err(Error::Nros)?;
-				self.fs.storage.decr_ref(id + 1).map_err(Error::Nros)?;
+				self.fs.storage.decr_ref(id).await?;
+				self.fs.storage.decr_ref(id + 1).await?;
 			}
 			Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
-				self.dealloc(offset, length.into())?;
+				self.dealloc(offset, length.into()).await?;
 			}
 		}
 
 		// Check if we should shrink the hashmap
 		if self.should_shrink() {
-			self.shrink()?;
+			self.shrink().await?;
 		}
 		Ok(())
 	}
@@ -341,12 +361,12 @@ impl<'a, S: Storage> Dir<'a, S> {
 	/// Set the type and offset of an entry.
 	///
 	/// The entry must not be empty, i.e. type is not 0.
-	pub(crate) fn set_ty(&mut self, index: u32, ty: Type) -> Result<(), Error<S>> {
-		let mut e = self.hashmap().get(index)?;
+	pub(crate) async fn set_ty(&mut self, index: u32, ty: Type) -> Result<(), Error<D>> {
+		let mut e = self.hashmap().get(index).await?;
 		debug_assert!(e.ty != 0);
 		e.ty = ty.to_ty();
 		e.id_or_offset = ty.to_data();
-		self.hashmap().set(index, &e).map(|_: u64| ())
+		self.hashmap().set(index, &e).await.map(|_: u64| ())
 	}
 
 	/// Check if the hashmap should grow.
@@ -372,27 +392,29 @@ impl<'a, S: Storage> Dir<'a, S> {
 	}
 
 	/// Compare a stored name with the given name.
-	fn compare_names(&mut self, x: (u8, u64), y: &[u8]) -> Result<bool, Error<S>> {
+	async fn compare_names(&mut self, x: (u8, u64), y: &[u8]) -> Result<bool, Error<D>> {
 		if usize::from(x.0) != y.len() {
 			return Ok(false);
 		}
 		let mut buf = [0; 255];
-		self.fs.read_exact(self.id + 1, x.1, &mut buf[..y.len()])?;
+		self.fs
+			.read_exact(self.id + 1, x.1, &mut buf[..y.len()])
+			.await?;
 		Ok(&buf[..y.len()] == y)
 	}
 
 	/// Allocate heap space for arbitrary data.
 	///
 	/// The returned region is not readable until it is written to.
-	pub(crate) fn alloc(&mut self, len: u64) -> Result<u64, Error<S>> {
+	pub(crate) async fn alloc(&mut self, len: u64) -> Result<u64, Error<D>> {
 		if len == 0 {
 			return Ok(0);
 		}
-		let log = self.alloc_log()?;
+		let log = self.alloc_log().await?;
 		for r in log.gaps(&(0..u64::MAX)) {
 			if r.end - r.start >= len {
 				log.insert(r.start..r.start + len);
-				self.save_alloc_log()?;
+				self.save_alloc_log().await?;
 				return Ok(r.start);
 			}
 		}
@@ -401,50 +423,51 @@ impl<'a, S: Storage> Dir<'a, S> {
 	}
 
 	/// Deallocate heap space.
-	pub(crate) fn dealloc(&mut self, offset: u64, len: u64) -> Result<(), Error<S>> {
+	pub(crate) async fn dealloc(&mut self, offset: u64, len: u64) -> Result<(), Error<D>> {
 		if len > 0 {
 			let r = offset..offset + len;
-			let log = self.alloc_log()?;
+			let log = self.alloc_log().await?;
 			debug_assert!(
 				log.iter().any(|d| r.clone().all(|e| d.contains(&e))),
 				"double free"
 			);
 			log.remove(r);
-			self.save_alloc_log()?;
+			self.save_alloc_log().await?;
 		}
 		Ok(())
 	}
 
 	/// Write a full, minimized allocation log.
-	fn save_alloc_log(&mut self) -> Result<(), Error<S>> {
+	async fn save_alloc_log(&mut self) -> Result<(), Error<D>> {
 		let id = self.id;
 		let mut log_offt = self.alloc_log_base();
 		// Avoid mutable borrow issues
-		self.alloc_log()?;
+		self.alloc_log().await?;
 		let log = self.data.alloc_map.as_mut().unwrap();
 		self.fs
-			.resize(id, log_offt + 16 * log.iter().size_hint().0 as u64)?;
+			.resize(id, log_offt + 16 * log.iter().size_hint().0 as u64)
+			.await?;
 		for r in log.iter() {
 			let mut buf = [0; 16];
 			buf[..8].copy_from_slice(&r.start.to_le_bytes());
 			buf[8..].copy_from_slice(&(r.end - r.start).to_le_bytes());
-			self.fs.write_all(id, log_offt, &buf)?;
+			self.fs.write_all(id, log_offt, &buf).await?;
 			log_offt += 16;
 		}
-		self.fs.resize(self.id, log_offt)
+		self.fs.resize(self.id, log_offt).await
 	}
 
 	/// Get or load the allocation map.
-	fn alloc_log(&mut self) -> Result<&mut RangeSet<u64>, Error<S>> {
+	async fn alloc_log(&mut self) -> Result<&mut RangeSet<u64>, Error<D>> {
 		// I'd use as_mut() but the borrow checker has a bug :(
 		if self.alloc_map.is_some() {
 			return Ok(self.alloc_map.as_mut().unwrap());
 		}
 		let mut m = RangeSet::new();
-		let l = self.fs.length(self.id)?;
+		let l = self.fs.length(self.id).await?;
 		for offt in (self.alloc_log_base()..l).step_by(16) {
 			let mut buf = [0; 16];
-			self.fs.read_exact(self.id, offt, &mut buf)?;
+			self.fs.read_exact(self.id, offt, &mut buf).await?;
 			let [a, b, c, d, e, f, g, h, buf @ ..] = buf;
 			let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
 			let len = u64::from_le_bytes(buf);
@@ -475,29 +498,29 @@ impl<'a, S: Storage> Dir<'a, S> {
 	}
 
 	/// Read a heap value.
-	pub(crate) fn read_heap(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error<S>> {
-		self.fs.read_exact(self.id + 1, offset, buf)
+	pub(crate) async fn read_heap(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
+		self.fs.read_exact(self.id + 1, offset, buf).await
 	}
 
 	/// Write a heap value.
-	pub(crate) fn write_heap(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
-		self.fs.write_grow(self.id + 1, offset, data)
+	pub(crate) async fn write_heap(&mut self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
+		self.fs.write_grow(self.id + 1, offset, data).await
 	}
 
 	/// Grow the hashmap
-	fn grow(&mut self) -> Result<(), Error<S>> {
+	async fn grow(&mut self) -> Result<(), Error<D>> {
 		debug_assert!(
 			self.hashmap_size_p2 < 32,
 			"hashmap is already at maximum size"
 		);
-		self.resize(self.hashmap_size_p2 + 1)
+		self.resize(self.hashmap_size_p2 + 1).await
 	}
 
 	/// Shrink the hashmap.
 	///
 	/// There must be *at least* `capacity / 2 + 1` slots free,
 	/// i.e. `entry_count < capacity / 2`.
-	fn shrink(&mut self) -> Result<(), Error<S>> {
+	async fn shrink(&mut self) -> Result<(), Error<D>> {
 		debug_assert!(
 			self.hashmap_size_p2 != 0,
 			"hashmap is already at minimum size"
@@ -506,44 +529,48 @@ impl<'a, S: Storage> Dir<'a, S> {
 			u64::from(self.entry_count) < self.capacity() / 2,
 			"not enough free slots"
 		);
-		self.resize(self.hashmap_size_p2 - 1)
+		self.resize(self.hashmap_size_p2 - 1).await
 	}
 
 	/// Resize the hashmap
-	fn resize(&mut self, new_size_p2: u8) -> Result<(), Error<S>> {
+	async fn resize(&mut self, new_size_p2: u8) -> Result<(), Error<D>> {
 		// Since we're going to load the entire log we can as well minimize it.
-		self.alloc_log()?;
+		self.alloc_log().await?;
 
-		let new_map_id = self.fs.storage.new_object().map_err(Error::Nros)?;
-		self.init_with_size(new_map_id, new_size_p2)?;
+		let new_map_id = self.fs.storage.create().await?.id();
+		self.init_with_size(new_map_id, new_size_p2).await?;
 
 		// Copy entries
 		for index in (0..self.capacity()).map(|i| i as _) {
-			let e = self.hashmap().get(index)?;
+			let e = self.hashmap().get(index).await?;
 			if e.ty == 0 {
 				continue;
 			}
-			let e = self.hashmap().get_ext(index, e)?;
-			HashMap::new(self, new_map_id, new_size_p2).insert(e, None)?;
+			let e = self.hashmap().get_ext(index, e).await?;
+			HashMap::new(self, new_map_id, new_size_p2)
+				.insert(e, None)
+				.await?;
 		}
 
 		// Replace old map
 		self.fs
 			.storage
-			.move_object(self.id, new_map_id)
-			.map_err(Error::Nros)?;
+			.get(self.id)
+			.await?
+			.replace_with(self.fs.storage.get(new_map_id).await?)
+			.await?;
 		self.hashmap_size_p2 = new_size_p2;
-		self.save_alloc_log()
+		self.save_alloc_log().await
 	}
 
 	/// Update the entry count.
-	fn set_entry_count(&mut self, count: u32) -> Result<(), Error<S>> {
-		self.fs.write_all(self.id, 4, &count.to_le_bytes())?;
+	async fn set_entry_count(&mut self, count: u32) -> Result<(), Error<D>> {
+		self.fs.write_all(self.id, 4, &count.to_le_bytes()).await?;
 		self.entry_count = count;
 		Ok(())
 	}
 
-	fn hashmap(&mut self) -> HashMap<'a, '_, S> {
+	fn hashmap(&mut self) -> HashMap<'a, '_, D> {
 		HashMap::new(self, self.id, self.hashmap_size_p2)
 	}
 
@@ -551,26 +578,26 @@ impl<'a, S: Storage> Dir<'a, S> {
 		self.data
 	}
 
-	pub fn from_data(fs: &'a mut Nrfs<S>, data: DirData) -> Self {
+	pub fn from_data(fs: &'a mut Nrfs<D>, data: DirData) -> Self {
 		Self { fs, data }
 	}
 
-	pub fn transfer(
+	pub async fn transfer(
 		&mut self,
 		name: &Name,
 		to_dir: &mut DirData,
 		to_name: &Name,
-	) -> Result<bool, Error<S>> {
-		if let Some((i, e)) = self.hashmap().find_index(name)? {
-			let e = self.hashmap().get_ext(i, e)?;
+	) -> Result<bool, Error<D>> {
+		if let Some((i, e)) = self.hashmap().find_index(name).await? {
+			let e = self.hashmap().get_ext(i, e).await?;
 			core::mem::swap(&mut self.data, to_dir);
 			if self.should_grow() {
-				if let Err(e) = self.grow() {
+				if let Err(e) = self.grow().await {
 					core::mem::swap(&mut self.data, to_dir);
 					return Err(e);
 				}
 			}
-			let r = match self.hashmap().insert(e, Some(to_name)) {
+			let r = match self.hashmap().insert(e, Some(to_name)).await {
 				Ok(r) => r,
 				Err(e) => {
 					core::mem::swap(&mut self.data, to_dir);
@@ -578,25 +605,25 @@ impl<'a, S: Storage> Dir<'a, S> {
 				}
 			};
 			if r.is_some() {
-				let r = self.set_entry_count(self.entry_count + 1);
+				let r = self.set_entry_count(self.entry_count + 1).await;
 				core::mem::swap(&mut self.data, to_dir);
 				r?;
-				self.hashmap().remove_at(i)?;
-				self.set_entry_count(self.entry_count - 1)?;
+				self.hashmap().remove_at(i).await?;
+				self.set_entry_count(self.entry_count - 1).await?;
 				return Ok(true);
 			}
 		}
 		Ok(false)
 	}
 
-	pub fn rename(&mut self, from: &Name, to: &Name) -> Result<bool, Error<S>> {
-		if let Some((i, e)) = self.hashmap().find_index(from)? {
-			let e = self.hashmap().get_ext(i, e)?;
+	pub async fn rename(&mut self, from: &Name, to: &Name) -> Result<bool, Error<D>> {
+		if let Some((i, e)) = self.hashmap().find_index(from).await? {
+			let e = self.hashmap().get_ext(i, e).await?;
 			// Resizing is not necessary as there is guaranteed to be a free spot
 			// and we'll free another spot if the insert succeeds.
-			let r = self.hashmap().insert(e, Some(to));
+			let r = self.hashmap().insert(e, Some(to)).await;
 			if r?.is_some() {
-				self.hashmap().remove_at(i)?;
+				self.hashmap().remove_at(i).await?;
 				return Ok(true);
 			}
 		}
@@ -614,9 +641,9 @@ impl DirData {
 	}
 }
 
-impl<S: Storage> fmt::Debug for Dir<'_, S>
+impl<D: Dev> fmt::Debug for Dir<'_, D>
 where
-	Nrfs<S>: fmt::Debug,
+	Nrfs<D>: fmt::Debug,
 {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Dir))
@@ -637,8 +664,8 @@ where
 	}
 }
 
-pub struct Entry<'a, 'b, S: Storage> {
-	dir: &'b mut Dir<'a, S>,
+pub struct Entry<'a, 'b, D: Dev> {
+	dir: &'b mut Dir<'a, D>,
 	index: u32,
 	hash: u32,
 	ty: Result<Type, u8>,
@@ -649,8 +676,8 @@ pub struct Entry<'a, 'b, S: Storage> {
 	mtime: Option<ext::mtime::Entry>,
 }
 
-impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
-	fn new(dir: &'b mut Dir<'a, S>, e: RawEntryExt, name: &[u8]) -> Self {
+impl<'a, 'b, D: Dev> Entry<'a, 'b, D> {
+	fn new(dir: &'b mut Dir<'a, D>, e: RawEntryExt, name: &[u8]) -> Self {
 		debug_assert_eq!(usize::from(e.entry.key_len), name.len());
 		let mut key = [0; 255];
 		key[..name.len()].copy_from_slice(name);
@@ -683,7 +710,7 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 		matches!(&self.ty, Ok(Type::Sym { .. }) | Ok(Type::EmbedSym { .. }))
 	}
 
-	pub fn as_file(&mut self) -> Option<File<'a, '_, S>> {
+	pub fn as_file(&mut self) -> Option<File<'a, '_, D>> {
 		Some(match self.ty {
 			Ok(Type::File { id }) => File::from_obj(self.dir, false, id, self.index),
 			Ok(Type::EmbedFile { offset, length }) => {
@@ -693,14 +720,14 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 		})
 	}
 
-	pub fn as_dir(&mut self) -> Option<Result<Dir<'_, S>, Error<S>>> {
+	pub async fn as_dir(&mut self) -> Option<Result<Dir<'_, D>, Error<D>>> {
 		Some(match self.ty {
-			Ok(Type::Dir { id }) => Dir::load(self.dir.fs, id),
+			Ok(Type::Dir { id }) => Dir::load(self.dir.fs, id).await,
 			_ => return None,
 		})
 	}
 
-	pub fn as_sym(&mut self) -> Option<File<'a, '_, S>> {
+	pub fn as_sym(&mut self) -> Option<File<'a, '_, D>> {
 		Some(match self.ty {
 			Ok(Type::Sym { id }) => File::from_obj(self.dir, true, id, self.index),
 			Ok(Type::EmbedSym { offset, length }) => {
@@ -717,12 +744,14 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 		}
 	}
 
-	pub fn remove(self) -> Result<(), Error<S>> {
-		self.dir.remove_at(
-			self.index,
-			(self.key_offset, self.key_len),
-			self.ty.unwrap(), // TODO handle unknown entry types gracefully
-		)
+	pub async fn remove(self) -> Result<(), Error<D>> {
+		self.dir
+			.remove_at(
+				self.index,
+				(self.key_offset, self.key_len),
+				self.ty.unwrap(), // TODO handle unknown entry types gracefully
+			)
+			.await
 	}
 
 	pub fn ext_unix(&self) -> Option<&ext::unix::Entry> {
@@ -733,14 +762,14 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 		self.mtime.as_ref()
 	}
 
-	pub fn ext_set_unix(&mut self, unix: ext::unix::Entry) -> Result<bool, Error<S>> {
-		let r = self.dir.ext_set_unix(self.index, unix)?;
+	pub async fn ext_set_unix(&mut self, unix: ext::unix::Entry) -> Result<bool, Error<D>> {
+		let r = self.dir.ext_set_unix(self.index, unix).await?;
 		self.unix = r.then(|| unix);
 		Ok(r)
 	}
 
-	pub fn ext_set_mtime(&mut self, mtime: ext::mtime::Entry) -> Result<bool, Error<S>> {
-		let r = self.dir.ext_set_mtime(self.index, mtime)?;
+	pub async fn ext_set_mtime(&mut self, mtime: ext::mtime::Entry) -> Result<bool, Error<D>> {
+		let r = self.dir.ext_set_mtime(self.index, mtime).await?;
 		self.mtime = r.then(|| mtime);
 		Ok(r)
 	}
@@ -753,7 +782,7 @@ impl<'a, 'b, S: Storage> Entry<'a, 'b, S> {
 	}
 }
 
-impl<S: Storage + fmt::Debug> fmt::Debug for Entry<'_, '_, S> {
+impl<D: Dev + fmt::Debug> fmt::Debug for Entry<'_, '_, D> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Entry))
 			.field("index", &self.index)

@@ -11,121 +11,140 @@ pub use {
 	dir::{Dir, DirOptions},
 	file::File,
 	name::Name,
-	nros::{Compression, MaxRecordSize, Read, Storage, Write},
+	nros::{BlockSize, Compression, Dev, MaxRecordSize},
 };
 
 use core::fmt;
 
 #[derive(Debug)]
-pub struct Nrfs<S: Storage> {
-	storage: nros::Nros<S>,
+pub struct Nrfs<D: Dev> {
+	storage: nros::Nros<D>,
 }
 
-impl<S: Storage> Nrfs<S> {
-	pub fn new(
-		storage: S,
+impl<D: Dev> Nrfs<D> {
+	pub async fn new<M, C>(
+		mirrors: M,
+		block_size: BlockSize,
 		max_record_size: MaxRecordSize,
 		dir: &DirOptions,
 		compression: Compression,
-		cache_size: u16,
-	) -> Result<Self, NewError<S>> {
-		let storage = nros::Nros::new(storage, max_record_size, compression, cache_size)
-			.map_err(NewError::Nros)?;
+		global_cache_size: usize,
+		dirty_cache_size: usize,
+	) -> Result<Self, Error<D>>
+	where
+		M: IntoIterator<Item = C>,
+		C: IntoIterator<Item = D>,
+	{
+		let storage = nros::Nros::new(
+			mirrors,
+			block_size,
+			max_record_size,
+			compression,
+			global_cache_size,
+			dirty_cache_size,
+		)
+		.await?;
 		let mut s = Self { storage };
-		Dir::new(&mut s, dir).map_err(NewError::Error)?;
+		Dir::new(&mut s, dir).await?;
 		Ok(s)
 	}
 
-	pub fn load(storage: S, cache_size: u16) -> Result<Self, nros::LoadError<S>> {
-		Ok(Self { storage: nros::Nros::load(storage, cache_size)? })
+	pub async fn load(
+		devices: Vec<D>,
+		global_cache_size: usize,
+		dirty_cache_size: usize,
+	) -> Result<Self, Error<D>> {
+		Ok(Self {
+			storage: nros::Nros::load(devices, global_cache_size, dirty_cache_size).await?,
+		})
 	}
 
-	pub fn root_dir(&mut self) -> Result<Dir<'_, S>, Error<S>> {
-		Dir::load(self, 0)
+	pub async fn root_dir(&mut self) -> Result<Dir<'_, D>, Error<D>> {
+		Dir::load(self, 0).await
 	}
 
-	pub fn finish_transaction(&mut self) -> Result<(), Error<S>> {
-		self.storage.finish_transaction().map_err(Error::Nros)
+	pub async fn finish_transaction(&mut self) -> Result<(), Error<D>> {
+		self.storage.finish_transaction().await.map_err(Error::Nros)
 	}
 
-	pub fn get_dir(&mut self, id: u64) -> Result<Dir<'_, S>, Error<S>> {
-		Dir::load(self, id)
+	pub async fn get_dir(&mut self, id: u64) -> Result<Dir<'_, D>, Error<D>> {
+		Dir::load(self, id).await
 	}
 
-	fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
-		self.storage.read(id, offset, buf).map_err(Error::Nros)
+	async fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
+		self.storage
+			.get(id)
+			.await?
+			.read(offset, buf)
+			.await
+			.map_err(Error::Nros)
 	}
 
-	fn read_exact(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<(), Error<S>> {
+	async fn read_exact(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
 		self.read(id, offset, buf)
+			.await
 			.and_then(|l| (l == buf.len()).then_some(()).ok_or(Error::Truncated))
 	}
 
-	fn write(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<usize, Error<S>> {
-		self.storage.write(id, offset, data).map_err(Error::Nros)
+	async fn write(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<usize, Error<D>> {
+		self.storage
+			.get(id)
+			.await?
+			.write(offset, data)
+			.await
+			.map_err(Error::Nros)
 	}
 
-	fn write_all(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
+	async fn write_all(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
 		self.write(id, offset, data)
+			.await
 			.and_then(|l| (l == data.len()).then_some(()).ok_or(Error::Truncated))
 	}
 
 	/// This function automatically grows the object if it can't contain the data.
-	fn write_grow(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<S>> {
-		if self.length(id)? < offset + data.len() as u64 {
-			self.resize(id, offset + data.len() as u64)?;
+	async fn write_grow(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
+		if self.length(id).await? < offset + data.len() as u64 {
+			self.resize(id, offset + data.len() as u64).await?;
 		}
-		self.write_all(id, offset, data)
+		self.write_all(id, offset, data).await
 	}
 
-	fn resize(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
-		self.storage.resize(id, len).map_err(Error::Nros)
+	async fn resize(&mut self, id: u64, len: u64) -> Result<(), Error<D>> {
+		self.storage
+			.get(id)
+			.await?
+			.resize(len)
+			.await
+			.map_err(Error::Nros)
 	}
 
-	fn length(&mut self, id: u64) -> Result<u64, Error<S>> {
-		self.storage.object_len(id).map_err(Error::Nros)
+	async fn length(&mut self, id: u64) -> Result<u64, Error<D>> {
+		self.storage.get(id).await?.len().await.map_err(Error::Nros)
 	}
 
-	pub fn storage(&self) -> &S {
-		&self.storage.storage()
+	pub async fn unmount(self) -> Result<Vec<D>, Error<D>> {
+		self.storage.unmount().await.map_err(Error::Nros)
+	}
+
+	pub fn block_size(&self) -> BlockSize {
+		self.storage.block_size()
 	}
 }
 
-pub enum NewError<S>
+pub enum Error<D>
 where
-	S: Storage,
+	D: Dev,
 {
-	Nros(nros::NewError<S>),
-	Error(Error<S>),
-}
-
-pub enum Error<S>
-where
-	S: Storage,
-{
-	Nros(nros::Error<S>),
+	Nros(nros::Error<D>),
 	Truncated,
 	CorruptExtension,
 	UnknownHashAlgorithm(u8),
 }
 
-impl<S> fmt::Debug for NewError<S>
+impl<D> fmt::Debug for Error<D>
 where
-	S: Storage,
-	S::Error: fmt::Debug,
-{
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Nros(e) => f.debug_tuple("Nros").field(e).finish(),
-			Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
-		}
-	}
-}
-
-impl<S> fmt::Debug for Error<S>
-where
-	S: Storage,
-	S::Error: fmt::Debug,
+	D: Dev,
+	D::Error: fmt::Debug,
 {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
@@ -136,5 +155,11 @@ where
 				f.debug_tuple("UnknownHashAlgorithm").field(&n).finish()
 			}
 		}
+	}
+}
+
+impl<D: Dev> From<nros::Error<D>> for Error<D> {
+	fn from(err: nros::Error<D>) -> Self {
+		Self::Nros(err)
 	}
 }
