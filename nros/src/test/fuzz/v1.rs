@@ -237,7 +237,7 @@ fn tree_shrink_unimplemented() {
 }
 
 #[test]
-fn cache_entry_missing() {
+fn cache_move_object_stale_lru() {
 	Test::new(
 		1 << 16,
 		[

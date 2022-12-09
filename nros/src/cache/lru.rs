@@ -91,6 +91,11 @@ impl<V> LruList<V> {
 		self.nodes.get(index).map(|node| &node.value)
 	}
 
+	/// Get a mutable reference to a value by node index.
+	pub fn get_mut(&mut self, index: Idx) -> Option<&mut V> {
+		self.nodes.get_mut(index).map(|node| &mut node.value)
+	}
+
 	/// Insert a value at the front of the list.
 	///
 	/// # Panics

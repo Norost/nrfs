@@ -460,7 +460,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			}
 			offt >>= self.max_record_size().to_raw() - RECORD_SIZE_P2;
 		}
-		
+
 		// Reduce depth.
 		let mut v = mem::take(&mut obj.data).into_vec();
 		v.resize_with(new_depth.into(), Default::default);

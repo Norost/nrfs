@@ -340,11 +340,25 @@ impl<D: Dev> Cache<D> {
 		let l = self.write_object_table(to, rec.as_ref()).await?;
 		assert!(l > 0, "ID out of range");
 
-		// Move object data.
+		// Move object data & fix LRU entries.
 		{
-			let data = { &mut self.data.borrow_mut().data };
-			let obj = data.remove(&from).expect("object not present");
-			data.insert(to, obj);
+			let data = { &mut *self.data.borrow_mut() };
+			let obj = data.data.remove(&from).expect("object not present");
+			for level in obj.data.iter() {
+				for entry in level.values() {
+					data.global_lru
+						.get_mut(entry.global_index)
+						.expect("invalid global LRU index")
+						.0 = to;
+					if let Some(idx) = entry.write_index {
+						data.write_lru
+							.get_mut(idx)
+							.expect("invalid write LRU index")
+							.0 = to;
+					}
+				}
+			}
+			data.data.insert(to, obj);
 		}
 
 		// Destroy original object.
