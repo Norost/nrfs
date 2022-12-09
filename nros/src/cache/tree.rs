@@ -107,6 +107,10 @@ impl<'a, D: Dev> Tree<'a, D> {
 			data
 		};
 
+		if data.is_empty() {
+			return Ok(0);
+		}
+
 		let range = calc_range(self.max_record_size(), offset, data.len());
 		let (first_offset, last_offset) =
 			calc_record_offsets(self.max_record_size(), offset, data.len());
@@ -222,6 +226,10 @@ impl<'a, D: Dev> Tree<'a, D> {
 		} else {
 			buf
 		};
+
+		if buf.is_empty() {
+			return Ok(0);
+		}
 
 		let range = calc_range(self.max_record_size(), offset, buf.len());
 		let (first_offset, last_offset) =
