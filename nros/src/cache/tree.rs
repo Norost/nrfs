@@ -493,18 +493,19 @@ impl<'a, D: Dev> Tree<'a, D> {
 	}
 
 	/// Grow record tree.
-	async fn grow(&self, new_len: u64) -> Result<(), Error<D>> {
+	async fn grow(&self, new_obj_len: u64) -> Result<(), Error<D>> {
 		debug_assert!(
-			self.len().await? < new_len,
-			"new_len is equal or smaller than cur len"
+			self.len().await? < new_obj_len,
+			"new_obj_len is equal or smaller than cur len"
 		);
 
 		// Increase depth.
 		let cur_depth = depth(self.max_record_size(), self.len().await?);
-		let new_depth = depth(self.max_record_size(), new_len);
+		let new_depth = depth(self.max_record_size(), new_obj_len);
 
 		let root = self.root().await?;
 
+		let (old_len, new_len);
 		if cur_depth < new_depth {
 			// Resize to account for new depth
 			{
@@ -524,14 +525,15 @@ impl<'a, D: Dev> Tree<'a, D> {
 			let mut entry = entry.get_mut().await?;
 
 			// Zero out unused fields
-			let old_len = entry.data.len();
+			old_len = entry.data.len();
 			entry.data.extend_from_slice(
 				Record { total_length: 0.into(), references: 0.into(), ..root }.as_ref(),
 			);
 			trim_zeros_end(&mut entry.data);
-			let new_len = entry.data.len();
+			new_len = entry.data.len();
 			drop(entry);
-			self.cache.adjust_cache_use_both(old_len, new_len).await?;
+		} else {
+			(old_len, new_len) = (0, 0);
 		}
 
 		self.cache
@@ -540,7 +542,12 @@ impl<'a, D: Dev> Tree<'a, D> {
 			.data
 			.get_mut(&self.id)
 			.expect("object is not cached")
-			.length = new_len;
+			.length = new_obj_len;
+
+		// Adjusting cache size may lead to a flush, so make sure the object length
+		// is corrected before calling it.
+		self.cache.adjust_cache_use_both(old_len, new_len).await?;
+
 		Ok(())
 	}
 

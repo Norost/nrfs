@@ -309,16 +309,13 @@ impl<D: Dev> Cache<D> {
 		let entry = obj.data[usize::from(depth)].remove(&offset)?;
 
 		// Remove entry from LRUs
-		let len = entry.data.len(); // TODO len() or capacity()?;
+		let len = entry.data.len();
 		data.global_lru.remove(entry.global_index);
 		data.global_cache_size -= len;
 		if let Some(idx) = entry.write_index {
 			data.write_lru.remove(idx);
 			data.write_cache_size -= len;
 		}
-
-		// TODO remove the object at an appropriate time.
-		// i.e. right after the root has been saved and there are no remaining cached records.
 
 		Some(entry)
 	}

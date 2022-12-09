@@ -312,3 +312,16 @@ fn tree_get_target_depth_above_dev_depth() {
 	)
 	.run()
 }
+
+#[test]
+fn tree_grow_flush_concurrent() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 217080124979923771 },
+			Write { idx: 960051513, offset: 4123390705508810553, amount: 65535 },
+			Resize { idx: 4294967295, size: 1889604303433841151 },
+		],
+	)
+	.run()
+}

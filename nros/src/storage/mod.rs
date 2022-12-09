@@ -48,7 +48,9 @@ where
 
 		let blocks = self.calc_block_count(len);
 		#[cfg(debug_assertions)]
-		self.allocator.borrow().assert_alloc(lba, blocks.try_into().unwrap());
+		self.allocator
+			.borrow()
+			.assert_alloc(lba, blocks.try_into().unwrap());
 
 		let count = blocks << self.block_size();
 		let data = self
