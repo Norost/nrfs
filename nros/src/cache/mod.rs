@@ -327,6 +327,10 @@ impl<D: Dev> Cache<D> {
 	///
 	/// The old object is destroyed.
 	pub async fn move_object(&self, from: u64, to: u64) -> Result<(), Error<D>> {
+		if from == to {
+			return Ok(()); // Don't even bother.
+		}
+
 		let mut rec = Record::default();
 		// Free allocations
 		self.get(to).await?.resize(0).await?;

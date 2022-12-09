@@ -37,6 +37,10 @@ pub enum Op {
 	Read { idx: u32, offset: u64, amount: u16 },
 	/// Remount the filesystem.
 	Remount,
+	/// Move an object.
+	///
+	/// This destroys the old object.
+	Move { from_idx: u32, to_idx: u32 },
 }
 
 impl<'a> Arbitrary<'a> for Test {
@@ -107,6 +111,22 @@ impl Test {
 					Op::Remount => {
 						let devs = self.store.unmount().await.unwrap();
 						self.store = Nros::load(devs, 4096, 4096).await.unwrap();
+					}
+					Op::Move { from_idx, to_idx } => {
+						let from_i = from_idx as usize % self.ids.len();
+						let to_i = to_idx as usize % self.ids.len();
+						let from_id = self.ids[from_i];
+						let to_id = self.ids[to_i];
+						if from_i != to_i {
+							self.ids.swap_remove(from_i);
+						}
+						self.store
+							.get(to_id)
+							.await
+							.unwrap()
+							.replace_with(self.store.get(from_id).await.unwrap())
+							.await
+							.unwrap();
 					}
 				}
 			}
@@ -182,6 +202,20 @@ fn tree_read_offset_len_check_overflow() {
 			Remount,
 			Remount,
 			Read { idx: 4287993237, offset: 697696064, amount: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn cache_object_id_double_free_replace_with_self() {
+	// Manually "reduced" a bit, mainly use zeroes everywhere
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 0 },
+			Move { from_idx: 0, to_idx: 0 },
+			Move { from_idx: 0, to_idx: 0 },
 		],
 	)
 	.run()
