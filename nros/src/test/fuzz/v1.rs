@@ -286,13 +286,27 @@ fn tree_shrink_divmod_record_size() {
 }
 
 #[test]
-fn cache_grow_add_record_write_cache_size() {
+fn tree_grow_add_record_write_cache_size() {
 	Test::new(
 		1 << 16,
 		[
 			Create { size: 217080124979886539 },
 			Write { idx: 960051513, offset: 18446742978491529529, amount: 65535 },
 			Resize { idx: 4293656575, size: 18301847378652561407 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_get_target_depth_above_dev_depth() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 281474976655851 },
+			Write { idx: 4293603329, offset: 18446743984320625663, amount: 65535 },
+			Resize { idx: 4294967295, size: 16947046754988065023 },
 			Resize { idx: 0, size: 0 },
 		],
 	)

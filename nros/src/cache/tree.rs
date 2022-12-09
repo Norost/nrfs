@@ -626,21 +626,19 @@ impl<'a, D: Dev> Tree<'a, D> {
 			let shift = rec_size + (rec_size - RECORD_SIZE_P2) * target_depth;
 			// The shift may be 64 or larger if we're close to the root.
 			// With large offsets this may overflow, so use u128.
-			//let offset_byte = offset.wrapping_shl(shift.into());
 			let offset_byte = u128::from(offset) << shift;
 
-			//if offset_byte < root.total_length {
-			if offset_byte < u128::from(u64::from(root.total_length)) {
-				// Start iterating on on-dev records.
-				record = root;
-				cur_depth = dev_depth;
-			} else {
+			if offset_byte >= u128::from(u64::from(root.total_length)) || target_depth > dev_depth {
 				// Just insert a zeroed record and return that.
 				return self
 					.cache
 					.fetch_entry(self.id, target_depth, offset, &Record::default())
 					.await;
 			}
+
+			// Start iterating on on-dev records.
+			record = root;
+			cur_depth = dev_depth;
 
 			cur_depth -= 1;
 		} else {
