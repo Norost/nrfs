@@ -1,5 +1,6 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
+#![feature(hash_drain_filter)]
 #![feature(int_roundings)]
 #![feature(iterator_try_collect)]
 #![feature(nonzero_min_max)]

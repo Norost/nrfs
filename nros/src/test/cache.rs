@@ -228,9 +228,26 @@ fn shrink_written_object_1() {
 		obj.write((1 << 20) - 1, &[1]).await.unwrap();
 		obj.write((1 << 18) - 5, &[2]).await.unwrap();
 		clear(&s).await;
-		obj.resize((1 << 18) - 6).await.unwrap();
+		obj.resize((1 << 18) - 4).await.unwrap();
 		let mut b = [0];
 		obj.read((1 << 18) - 5, &mut b).await.unwrap();
 		assert_eq!(b, [2]);
+	})
+}
+
+#[test]
+fn shrink_written_object_3() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+		obj.resize(1 << 20).await.unwrap();
+		obj.write((1 << 20) - 1, &[1]).await.unwrap();
+		obj.write((1 << 18) - 5, &[2]).await.unwrap();
+		clear(&s).await;
+		obj.resize((1 << 18) - 6).await.unwrap();
+		let mut b = [5];
+		let l = obj.read((1 << 18) - 5, &mut b).await.unwrap();
+		assert_eq!(l, 0);
+		assert_eq!(b, [5]);
 	})
 }

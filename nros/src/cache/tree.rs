@@ -362,7 +362,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 	/// Resize record tree.
 	pub async fn resize(&self, new_len: u64) -> Result<(), Error<D>> {
 		let root = self.root().await?;
-		let len = u64::from(root.total_length);
+		let len = self.len().await?;
 		if new_len < len {
 			self.shrink(root, new_len).await
 		} else if new_len > len {
@@ -375,7 +375,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 	/// Shrink record tree.
 	async fn shrink(&self, root: Record, new_len: u64) -> Result<(), Error<D>> {
 		debug_assert!(
-			root.total_length > new_len,
+			self.len().await? > new_len,
 			"new_len is equal or larger than cur len"
 		);
 
@@ -388,7 +388,11 @@ impl<'a, D: Dev> Tree<'a, D> {
 		) -> Result<(), Error<D>> {
 			// The actually recursive part, which does require boxing the future
 			#[async_recursion::async_recursion(?Send)]
-			async fn f<'a, D: Dev>(tree: &Tree<'a, D>, depth: u8, offset: u64) -> Result<(), Error<D>> {
+			async fn f<'a, D: Dev>(
+				tree: &Tree<'a, D>,
+				depth: u8,
+				offset: u64,
+			) -> Result<(), Error<D>> {
 				// We're a parent node, destroy children.
 				let entry = tree.get(depth, offset).await?;
 				for offt in 1..1usize << tree.max_record_size() {
@@ -409,6 +413,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 		let cur_depth = depth(self.max_record_size(), root.total_length.into());
 		let new_depth = depth(self.max_record_size(), new_len);
 
+		// Deallocate records that are out of range.
 		for d in (new_depth..cur_depth).rev() {
 			// Get current root node.
 			let entry = self.get(d, 0).await?;
@@ -422,8 +427,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 			}
 		}
 
-		// Trim last record on the right, if necessary
-		let (offt, i) = divmod_p2(new_len, RECORD_SIZE_P2);
+		// Trim last record on the right, if necessary.
+		let (mut offt, i) = divmod_p2(new_len, RECORD_SIZE_P2);
 		if i > 0 {
 			let entry = self.get(0, offt).await?;
 			let mut e = entry.get_mut().await?;
@@ -436,14 +441,41 @@ impl<'a, D: Dev> Tree<'a, D> {
 				drop(entry);
 				self.cache.adjust_cache_use_both(old_len, new_len).await?;
 			}
+			offt += 1;
 		}
+
+		let data = { &mut *self.cache.data.borrow_mut() };
+		let obj = { data.data.get_mut(&self.id).expect("no entry for object") };
+
+		// Remove cache entries that are out of range.
+		for level in obj.data.iter_mut() {
+			for (_, entry) in level.drain_filter(|o, _| *o >= offt) {
+				// Remove from LRUs
+				data.global_lru.remove(entry.global_index);
+				data.global_cache_size -= entry.data.len();
+				if let Some(idx) = entry.write_index {
+					data.write_lru.remove(idx);
+					data.write_cache_size -= entry.data.len();
+				}
+			}
+			offt >>= self.max_record_size().to_raw() - RECORD_SIZE_P2;
+		}
+		
+		// Reduce depth.
+		let mut v = mem::take(&mut obj.data).into_vec();
+		v.resize_with(new_depth.into(), Default::default);
+		obj.data = v.into();
+
+		// Set length
+		obj.length = new_len;
+
 		Ok(())
 	}
 
 	/// Grow record tree.
 	async fn grow(&self, root: Record, new_len: u64) -> Result<(), Error<D>> {
 		debug_assert!(
-			root.total_length < new_len,
+			self.len().await? < new_len,
 			"new_len is equal or smaller than cur len"
 		);
 
