@@ -673,7 +673,7 @@ impl<D: Dev> Cache<D> {
 			self.data.borrow_mut().write_cache_size -= len;
 
 			// Store the record in the appropriate place.
-			let obj = Tree::new(self.clone(), id).await?;
+			let obj = Tree::new(self, id).await?;
 			obj.update_record(depth, offset, rec).await?;
 			drop(obj);
 			data = self.data.borrow_mut();
@@ -696,7 +696,7 @@ impl<D: Dev> Cache<D> {
 				let rec = self.store.write(&entry.data).await?;
 
 				// Store the record in the appropriate place.
-				let obj = Tree::new(self.clone(), id).await?;
+				let obj = Tree::new(self, id).await?;
 				obj.update_record(depth, offset, rec).await?;
 			}
 

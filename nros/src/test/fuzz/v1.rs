@@ -249,3 +249,18 @@ fn cache_move_object_stale_lru() {
 	)
 	.run()
 }
+
+#[test]
+fn cache_get_large_shift_offset() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 6872316419617283935 },
+			Write { idx: 4294926175, offset: 18446744073709551615, amount: 24575 },
+			Write { idx: 1600085855, offset: 71777215877963615, amount: 17247 },
+			Create { size: 18446743382226067295 },
+			Move { from_idx: 255, to_idx: 0 },
+		],
+	)
+	.run()
+}
