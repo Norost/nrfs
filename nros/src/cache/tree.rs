@@ -504,10 +504,14 @@ impl<'a, D: Dev> Tree<'a, D> {
 			let mut entry = entry.get_mut().await?;
 
 			// Zero out unused fields
+			let old_len = entry.data.len();
 			entry.data.extend_from_slice(
 				Record { total_length: 0.into(), references: 0.into(), ..root }.as_ref(),
 			);
 			trim_zeros_end(&mut entry.data);
+			let new_len = entry.data.len();
+			drop(entry);
+			self.cache.adjust_cache_use_both(old_len, new_len).await?;
 		}
 
 		self.cache

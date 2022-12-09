@@ -271,3 +271,17 @@ fn cache_get_large_shift_offset() {
 	)
 	.run()
 }
+
+#[test]
+fn cache_grow_add_record_write_cache_size() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 217080124979886539 },
+			Write { idx: 960051513, offset: 18446742978491529529, amount: 65535 },
+			Resize { idx: 4293656575, size: 18301847378652561407 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
