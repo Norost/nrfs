@@ -251,3 +251,30 @@ fn shrink_written_object_3() {
 		assert_eq!(b, [5]);
 	})
 }
+
+#[test]
+fn grow_grow() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+
+		obj.resize(1 << 15).await.unwrap();
+
+		obj.write((1 << 15) - (1 << 10), &[1]).await.unwrap();
+
+		obj.resize(1 << 25).await.unwrap();
+
+		obj.write((1 << 25) - (1 << 10) - 1, &[2, 2]).await.unwrap();
+
+		clear(&s).await;
+
+		let mut b = [0; 1];
+		obj.read((1 << 15) - (1 << 10), &mut b).await.unwrap();
+		assert_eq!(b, [1]);
+
+		let mut b = [0; 2];
+		obj.read((1 << 25) - (1 << 10) - 1, &mut b).await.unwrap();
+		assert_eq!(b, [2, 2]);
+	})
+}

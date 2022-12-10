@@ -325,3 +325,17 @@ fn tree_grow_flush_concurrent() {
 	)
 	.run()
 }
+
+#[test]
+fn grow_root_double_ref() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 1 << 60 },
+			Write { idx: 0, offset: 96641949647915046, amount: u16::MAX },
+			Resize { idx: 0, size: u64::MAX },
+			Remount,
+		],
+	)
+	.run()
+}

@@ -327,6 +327,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 					.read_object_table(self.id, old_rec.as_mut())
 					.await?;
 				assert_eq!(l, 32, "old root was not fully read");
+
 				self.cache.store.destroy(&old_rec);
 
 				// Store new root
@@ -494,59 +495,45 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 	/// Grow record tree.
 	async fn grow(&self, new_obj_len: u64) -> Result<(), Error<D>> {
+		let obj_len = self.len().await?;
 		debug_assert!(
-			self.len().await? < new_obj_len,
+			obj_len < new_obj_len,
 			"new_obj_len is equal or smaller than cur len"
 		);
 
-		// Increase depth.
-		let cur_depth = depth(self.max_record_size(), self.len().await?);
-		let new_depth = depth(self.max_record_size(), new_obj_len);
-
 		let root = self.root().await?;
 
-		let (old_len, new_len);
+		// Increase depth.
+		let dev_depth = depth(self.max_record_size(), root.total_length.into());
+		let cur_depth = depth(self.max_record_size(), obj_len);
+		let new_depth = depth(self.max_record_size(), new_obj_len);
+
+		let mut data = self.cache.data.borrow_mut();
+		let obj = data.data.get_mut(&self.id).expect("no entry for object");
+
+		// Adjust length now so flushes that may occur during mark_dirty() work properly.
+		obj.length = new_obj_len;
+
 		if cur_depth < new_depth {
 			// Resize to account for new depth
-			{
-				let mut data = self.cache.data.borrow_mut();
-				let data = data.data.get_mut(&self.id).expect("no entry for object");
-				let mut v = mem::take(&mut data.data).into_vec();
-				v.resize_with(new_depth.into(), Default::default);
-				data.data = v.into();
+			let mut v = mem::take(&mut obj.data).into_vec();
+			v.resize_with(new_depth.into(), Default::default);
+			obj.data = v.into();
+			drop(data);
+
+			// If the depth changed, mark the root record as dirty
+			// so a copy is effectively made when it is flushed.
+			//
+			// This is slightly inefficient if no changes are made to this record
+			// but it should not have a measurable impact.
+			if cur_depth > 0 {
+				self.cache
+					.fetch_entry(self.id, cur_depth - 1, 0, &root)
+					.await?
+					.mark_dirty()
+					.await?;
 			}
-
-			// Add a single new, empty record and add the current root as a child to it.
-			// The changes will propagate up.
-			let entry = self
-				.cache
-				.fetch_entry(self.id, cur_depth, 0, &Record::default())
-				.await?;
-			let mut entry = entry.get_mut().await?;
-
-			// Zero out unused fields
-			old_len = entry.data.len();
-			entry.data.extend_from_slice(
-				Record { total_length: 0.into(), references: 0.into(), ..root }.as_ref(),
-			);
-			trim_zeros_end(&mut entry.data);
-			new_len = entry.data.len();
-			drop(entry);
-		} else {
-			(old_len, new_len) = (0, 0);
 		}
-
-		self.cache
-			.data
-			.borrow_mut()
-			.data
-			.get_mut(&self.id)
-			.expect("object is not cached")
-			.length = new_obj_len;
-
-		// Adjusting cache size may lead to a flush, so make sure the object length
-		// is corrected before calling it.
-		self.cache.adjust_cache_use_both(old_len, new_len).await?;
 
 		Ok(())
 	}
@@ -643,7 +630,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// With large offsets this may overflow, so use u128.
 			let offset_byte = u128::from(offset) << shift;
 
-			if offset_byte >= u128::from(u64::from(root.total_length)) || target_depth > dev_depth {
+			if offset_byte >= u128::from(u64::from(root.total_length)) || target_depth >= dev_depth {
 				// Just insert a zeroed record and return that.
 				return self
 					.cache
@@ -670,6 +657,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 		}
 
 		// Fetch records until we can lock the one we need.
+		debug_assert!(cur_depth >= target_depth);
 		let entry = loop {
 			let offt = offset >> depth_offset_shift(cur_depth);
 			let entry = self

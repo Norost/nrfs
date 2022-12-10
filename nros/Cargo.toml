@@ -3,6 +3,15 @@ name = "nros"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+#default = ["never-overwrite-in-transaction"]
+# Disallow writing over records allocated & freed in the same transacion.
+#
+# This option is useful for detecting use-after-frees.
+# It should not be enabled in production as it greatly increases the space
+# usage of each transaction.
+never-overwrite-in-transaction = []
+
 [dependencies.arena]
 git = "https://git.sr.ht/~demindiro/arena"
 

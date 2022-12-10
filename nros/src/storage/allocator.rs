@@ -137,7 +137,7 @@ impl Allocator {
 		// FIXME really stupid
 		for i in start..start + blocks {
 			debug_assert!(self.alloc_map.contains(&i), "double free");
-			if self.dirty_map.contains(&i) {
+			if !cfg!(feature = "never-overwrite-in-transaction") && self.dirty_map.contains(&i) {
 				self.dirty_map.remove(i..i + 1);
 				self.alloc_map.remove(i..i + 1);
 			} else {
@@ -153,8 +153,8 @@ impl Allocator {
 	pub fn assert_alloc(&self, start: u64, blocks: u64) {
 		// FIXME really stupid
 		for i in start..start + blocks {
-			debug_assert!(self.alloc_map.contains(&i), "use-after-free");
-			debug_assert!(!self.free_map.contains(&i), "use-after-free");
+			debug_assert!(self.alloc_map.contains(&i), "use-after-free (lba: {})", i);
+			debug_assert!(!self.free_map.contains(&i), "use-after-free (lba: {})", i);
 		}
 	}
 

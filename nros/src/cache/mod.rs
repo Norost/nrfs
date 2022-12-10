@@ -45,14 +45,18 @@ impl fmt::Debug for FmtTreeData<'_> {
 
 		impl fmt::Debug for FmtRecord<'_> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-				let mut f = f.debug_list();
+				let mut f = f.debug_map();
 				let mut i = 0;
+				let mut index = 0;
 				while i < self.0.data.len() {
 					let mut rec = Record::default();
 					let l = (self.0.data.len() - i).min(mem::size_of::<Record>());
 					rec.as_mut()[..l].copy_from_slice(&self.0.data[i..][..l]);
-					f.entry(&rec);
+					if rec != Record::default() {
+						f.entry(&index, &rec);
+					}
 					i += l;
+					index += 1;
 				}
 				f.finish()
 			}
@@ -806,6 +810,15 @@ impl<'a, D: Dev> CacheRef<'a, D> {
 	/// If something is already borrowing the underlying [`TreeData`].
 	fn get(&self) -> Ref<Entry> {
 		self.cache.get_entry(self.id, self.depth, self.offset)
+	}
+
+	/// Explicitly mark this entry as dirty.
+	///
+	/// # Panics
+	///
+	/// If something is already borrowing the underlying [`TreeData`].
+	async fn mark_dirty(&self) -> Result<(), Error<D>> {
+		self.get_mut().await.map(|_| ())
 	}
 }
 
