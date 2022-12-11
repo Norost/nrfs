@@ -297,11 +297,13 @@ impl<D: Dev> Cache<D> {
 	}
 
 	/// Destroy a record and it's associated cache entry, if any.
-	fn destroy(&self, id: u64, depth: u8, offset: u64, record: &Record) {
-		let _ = self.remove_entry(id, depth, offset);
+	fn destroy(&self, id: u64, depth: u8, offset: u64, record: &Record) -> Vec<u8> {
+		let entry = self.remove_entry(id, depth, offset).expect("invalid entry");
 
 		// Free blocks referenced by record.
-		self.store.destroy(record)
+		self.store.destroy(record);
+
+		entry.data
 	}
 
 	/// Remove an entry from the cache.
@@ -515,6 +517,21 @@ impl<D: Dev> Cache<D> {
 			.is_some()
 	}
 
+	/// Get a mutable reference to an object's data.
+	///
+	/// # Panics
+	///
+	/// If another borrow is alive.
+	///
+	/// If the object is not present.
+	fn get_object_entry_mut(&self, id: u64) -> RefMut<TreeData> {
+		RefMut::map(self.data.borrow_mut(), |data| {
+			data.data
+				.get_mut(&id)
+				.expect("cache entry by id does not exist")
+		})
+	}
+
 	/// Get a cached entry.
 	///
 	/// # Panics
@@ -544,13 +561,10 @@ impl<D: Dev> Cache<D> {
 	///
 	/// If the entry is not present.
 	fn get_entry_mut_no_mark(&self, id: u64, depth: u8, offset: u64) -> RefMut<Entry> {
-		RefMut::map(self.data.borrow_mut(), |data| {
-			data.data
-				.get_mut(&id)
-				.expect("cache entry by id does not exist")
-				.data[usize::from(depth)]
-			.get_mut(&offset)
-			.expect("cache entry by offset does not exist")
+		RefMut::map(self.get_object_entry_mut(id), |obj| {
+			obj.data[usize::from(depth)]
+				.get_mut(&offset)
+				.expect("cache entry by offset does not exist")
 		})
 	}
 
@@ -686,6 +700,11 @@ impl<D: Dev> Cache<D> {
 				.global_lru
 				.last()
 				.expect("no nodes despite non-zero write cache size");
+
+			if data.locked_records.contains_key(&(id, depth, offset)) {
+				todo!("don't flush locked records");
+			}
+
 			drop(data);
 			let entry = self
 				.remove_entry(id, depth, offset)
@@ -819,6 +838,18 @@ impl<'a, D: Dev> CacheRef<'a, D> {
 	/// If something is already borrowing the underlying [`TreeData`].
 	async fn mark_dirty(&self) -> Result<(), Error<D>> {
 		self.get_mut().await.map(|_| ())
+	}
+
+	/// Destroy the record associated with this entry.
+	///
+	/// # Panics
+	///
+	/// If something is already borrowing the underlying [`TreeData`].
+	fn destroy(self, record: &Record) -> Vec<u8> {
+		let cache = self.cache.clone();
+		let &CacheRef { id, depth, offset, .. } = &self;
+		drop(self);
+		cache.destroy(id, depth, offset, record)
 	}
 }
 

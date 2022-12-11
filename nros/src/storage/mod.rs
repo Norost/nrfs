@@ -104,6 +104,7 @@ where
 
 	/// Destroy a record.
 	pub fn destroy(&self, record: &Record) {
+		//(record.length > 0).then(|| dbg!(record.lba));
 		self.allocator.borrow_mut().free(
 			record.lba.into(),
 			self.calc_block_count(record.length.into()) as _,

@@ -278,3 +278,20 @@ fn grow_grow() {
 		assert_eq!(b, [2, 2]);
 	})
 }
+
+#[test]
+fn grow_write_shrink_many() {
+	run(|| async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+
+		for i in 0..10 {
+			obj.resize(1 << 60).await.unwrap();
+			obj.write(0, &[1]).await.unwrap();
+			clear(&s).await;
+			obj.resize(0).await.unwrap();
+			clear(&s).await;
+		}
+	})
+}

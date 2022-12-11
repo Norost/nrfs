@@ -339,3 +339,35 @@ fn grow_root_double_ref() {
 	)
 	.run()
 }
+
+#[test]
+fn tree_shrink_destroy_depth_off_by_one() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 6223798073269682271 },
+			Write { idx: 0, offset: 5999147927136639863, amount: 65286 },
+			Remount,
+			Resize { idx: 0, size: 1 },
+		],
+	)
+	.run()
+}
+
+/// This case made me realize [`Tree::shrink`] was overly complex.
+///
+/// Now it is still complex but at least it works now,
+/// at least until I run the fuzzer again.
+#[test]
+fn tree_rewrite_resize_from_scratch() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 6223798073269682271 },
+			Write { idx: 0, offset: 5999147927136639863, amount: 65286 },
+			Resize { idx: 0, size: 432345568522491477 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
