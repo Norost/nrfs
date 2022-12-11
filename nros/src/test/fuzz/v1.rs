@@ -383,3 +383,42 @@ fn tree_shrink_shift_overflow() {
 	)
 	.run()
 }
+
+#[test]
+fn write_resize_double_free() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 18446744073692785643 },
+			Write { idx: 3828083684, offset: 16441494229869395940, amount: 11236 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_resize_another_use_after_free() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 3544668469065756931 },
+			Write { idx: 0, offset: 3544668469065756977, amount: 38807 },
+			Resize { idx: 0, size: 1 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_write_shrink() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 6148820866244280425 },
+			Write { idx: 0, offset: 18398705676741115903, amount: 65535 },
+			Resize { idx: 0, size: 1 },
+		],
+	)
+	.run()
+}

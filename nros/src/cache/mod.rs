@@ -9,6 +9,7 @@ use {
 		cell::{Ref, RefCell, RefMut},
 		fmt, future, mem,
 		task::{Poll, Waker},
+		ops::{Deref, DerefMut},
 	},
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
@@ -107,23 +108,8 @@ pub(crate) struct CacheData {
 	/// The key, in order, is `(id, depth, offset)`.
 	/// Using separate hashmaps allows using only a prefix of the key.
 	data: FxHashMap<u64, TreeData>,
-	/// Linked list for global LRU evictions.
-	global_lru: lru::LruList<(u64, u8, u64)>,
-	/// Linked list for flushing dirty records.
-	///
-	/// This is not used for eviction but ensures an excessive amount of writes does not hold up
-	/// reads.
-	// TODO consider adding a sort of dirty map so records are grouped by object & sorted,
-	// which may improve read performance.
-	write_lru: lru::LruList<(u64, u8, u64)>,
-	/// The maximum amount of total bytes to keep cache.
-	global_cache_max: usize,
-	/// The maximum amount of dirty bytes to keep.
-	write_cache_max: usize,
-	/// The total amount of cached bytes.
-	global_cache_size: usize,
-	/// The total amount of dirty cached bytes.
-	write_cache_size: usize,
+	/// LRUs to manage cache size.
+	lrus: Lrus,
 	/// Object entries that are currently in use and must not be evicted.
 	locked_objects: FxHashMap<u64, usize>,
 	/// Record entries that are currently in use and must not be evicted.
@@ -154,12 +140,7 @@ impl fmt::Debug for CacheData {
 
 		f.debug_struct(stringify!(CacheData))
 			.field("data", &FmtData(&self.data))
-			.field("global_lru", &self.global_lru)
-			.field("write_lru", &self.write_lru)
-			.field("global_cache_max", &self.global_cache_max)
-			.field("write_cache_max", &self.write_cache_max)
-			.field("global_cache_size", &self.global_cache_size)
-			.field("write_cache_size", &self.write_cache_size)
+			.field("lrus", &self.lrus)
 			.field("locked_objects", &self.locked_objects)
 			.field("locked_records", &self.locked_records)
 			.field("fetching", &self.fetching)
@@ -167,6 +148,29 @@ impl fmt::Debug for CacheData {
 			.field("is_flushing", &self.is_flushing)
 			.finish()
 	}
+}
+
+/// Cache LRU queues, with tracking per byte used.
+#[derive(Debug)]
+struct Lrus {
+	/// LRU list for global evictions.
+	global: Lru,
+	/// LRU list for flushing dirty records.
+	///
+	/// This is not used for eviction but ensures an excessive amount of writes does not hold up
+	/// reads.
+	dirty: Lru,
+}
+
+/// Cache LRU queue, with tracking per byte used.
+#[derive(Debug)]
+struct Lru {
+	/// Linked list for LRU entries
+	lru: lru::LruList<(u64, u8, u64)>,
+	/// The maximum amount of total bytes to keep cached.
+	cache_max: usize,
+	/// The amount of cached bytes.
+	cache_size: usize,
 }
 
 /// Cache algorithm.
@@ -183,16 +187,16 @@ impl<D: Dev> Cache<D> {
 	///
 	/// # Panics
 	///
-	/// If `global_cache_max` is smaller than `write_cache_max`.
+	/// If `global_cache_max` is smaller than `dirty_cache_max`.
 	///
-	/// If `write_cache_max` is smaller than the maximum record size.
-	pub fn new(store: Store<D>, global_cache_max: usize, write_cache_max: usize) -> Self {
+	/// If `dirty_cache_max` is smaller than the maximum record size.
+	pub fn new(store: Store<D>, global_cache_max: usize, dirty_cache_max: usize) -> Self {
 		assert!(
-			global_cache_max >= write_cache_max,
+			global_cache_max >= dirty_cache_max,
 			"global cache size is smaller than write cache"
 		);
 		assert!(
-			write_cache_max >= 1 << store.max_record_size().to_raw(),
+			dirty_cache_max >= 1 << store.max_record_size().to_raw(),
 			"write cache size is smaller than the maximum record size"
 		);
 
@@ -213,12 +217,18 @@ impl<D: Dev> Cache<D> {
 			store,
 			data: RefCell::new(CacheData {
 				data: Default::default(),
-				global_lru: Default::default(),
-				write_lru: Default::default(),
-				global_cache_max,
-				write_cache_max,
-				global_cache_size: 0,
-				write_cache_size: 0,
+				lrus: Lrus {
+					global: Lru {
+						lru: Default::default(),
+						cache_max: global_cache_max,
+						cache_size: 0,
+					},
+					dirty: Lru {
+						lru: Default::default(),
+						cache_max: dirty_cache_max,
+						cache_size: 0,
+					},
+				},
 				locked_objects: Default::default(),
 				locked_records: Default::default(),
 				fetching: Default::default(),
@@ -316,11 +326,11 @@ impl<D: Dev> Cache<D> {
 
 		// Remove entry from LRUs
 		let len = entry.data.len();
-		data.global_lru.remove(entry.global_index);
-		data.global_cache_size -= len;
+		data.lrus.global.lru.remove(entry.global_index);
+		data.lrus.global.cache_size -= len;
 		if let Some(idx) = entry.write_index {
-			data.write_lru.remove(idx);
-			data.write_cache_size -= len;
+			data.lrus.dirty.lru.remove(idx);
+			data.lrus.dirty.cache_size -= len;
 		}
 
 		Some(entry)
@@ -349,12 +359,12 @@ impl<D: Dev> Cache<D> {
 			let obj = data.data.remove(&from).expect("object not present");
 			for level in obj.data.iter() {
 				for entry in level.values() {
-					data.global_lru
+					data.lrus.global.lru
 						.get_mut(entry.global_index)
 						.expect("invalid global LRU index")
 						.0 = to;
 					if let Some(idx) = entry.write_index {
-						data.write_lru
+						data.lrus.dirty.lru
 							.get_mut(idx)
 							.expect("invalid write LRU index")
 							.0 = to;
@@ -461,12 +471,12 @@ impl<D: Dev> Cache<D> {
 					offset,
 					Entry {
 						data: d,
-						global_index: data.global_lru.insert((id, depth, offset)),
+						global_index: data.lrus.global.lru.insert((id, depth, offset)),
 						write_index: None,
 					},
 				);
 				debug_assert!(prev.is_none(), "entry was already present");
-				data.global_cache_size += len;
+				data.lrus.global.cache_size += len;
 
 				// Wake other tasks waiting for this entry.
 				data.fetching
@@ -570,8 +580,8 @@ impl<D: Dev> Cache<D> {
 
 	/// Get a cached entry.
 	///
-	/// This will mark the entry as dirty, which in turn may trigger a flush of other dirty
-	/// entries.
+	/// When the [`EntryRefMut`] is dropped the entry will be marked as dirty.
+	/// This may later trigger a flush.
 	///
 	/// # Panics
 	///
@@ -583,40 +593,22 @@ impl<D: Dev> Cache<D> {
 		id: u64,
 		depth: u8,
 		offset: u64,
-	) -> Result<RefMut<Entry>, Error<D>> {
-		let entry = RefMut::map(self.data.borrow_mut(), |data| {
+	) -> Result<EntryRefMut, Error<D>> {
+		// Flush since we may be exceeding write cache limits.
+		self.flush().await?;
+
+		let (entry, lrus) = RefMut::map_split(self.data.borrow_mut(), |data| {
 			let entry = data
 				.data
 				.get_mut(&id)
 				.expect("cache entry by id does not exist")
 				.data[usize::from(depth)]
-			.get_mut(&offset)
-			.expect("cache entry by offset does not exist");
-
-			if let Some(idx) = entry.write_index {
-				// Already dirty, bump to front
-				data.write_lru.promote(idx);
-			} else {
-				// Not dirty yet, add to list.
-				let key = *data
-					.global_lru
-					.get(entry.global_index)
-					.expect("entry not in global LRU");
-				entry.write_index = Some(data.write_lru.insert(key));
-
-				// TODO should we use len() or capacity()?
-				// Maybe shrink data too from time to time?
-				data.write_cache_size += entry.data.len();
-			}
-
-			entry
+				.get_mut(&offset)
+				.expect("cache entry by offset does not exist");
+			(entry, &mut data.lrus)
 		});
 
-		// Flush since we may be exceeding write cache limits.
-		// TODO figure out how to flush and still make the borrow stuff work.
-		//self.clone().flush().await?;
-
-		Ok(entry)
+		Ok(EntryRefMut { original_len: entry.data.len(), entry, lrus, id, depth, offset })
 	}
 
 	/// Get the root record of the object list.
@@ -638,22 +630,8 @@ impl<D: Dev> Cache<D> {
 		);
 		{
 			let mut data = { &mut *self.data.borrow_mut() };
-			data.global_cache_max = global_max;
-			data.write_cache_max = write_max;
-		}
-		self.flush().await
-	}
-
-	/// Recalculate total cache usage from resizing a record and flush if necessary.
-	///
-	/// This adjusts both read and write cache.
-	async fn adjust_cache_use_both(&self, old_len: usize, new_len: usize) -> Result<(), Error<D>> {
-		{
-			let data = { &mut *self.data.borrow_mut() };
-			data.global_cache_size += new_len;
-			data.global_cache_size -= old_len;
-			data.write_cache_size += new_len;
-			data.write_cache_size -= old_len;
+			data.lrus.global.cache_max = global_max;
+			data.lrus.dirty.cache_max = write_max;
 		}
 		self.flush().await
 	}
@@ -668,10 +646,10 @@ impl<D: Dev> Cache<D> {
 		}
 		data.is_flushing = true;
 
-		while data.write_cache_size > data.write_cache_max {
+		while data.lrus.dirty.cache_size > data.lrus.dirty.cache_max {
 			// Remove last written to entry.
 			let (id, depth, offset) = data
-				.write_lru
+				.lrus.dirty.lru
 				.remove_last()
 				.expect("no nodes despite non-zero write cache size");
 			drop(data);
@@ -685,7 +663,7 @@ impl<D: Dev> Cache<D> {
 			entry.write_index = None;
 			let len = entry.data.len();
 			drop(entry);
-			self.data.borrow_mut().write_cache_size -= len;
+			self.data.borrow_mut().lrus.dirty.cache_size -= len;
 
 			// Store the record in the appropriate place.
 			let obj = Tree::new(self, id).await?;
@@ -694,14 +672,16 @@ impl<D: Dev> Cache<D> {
 			data = self.data.borrow_mut();
 		}
 
-		while data.global_cache_size > data.global_cache_max {
+		while data.lrus.global.cache_size > data.lrus.global.cache_max {
 			// Remove last written to entry.
 			let &(id, depth, offset) = data
-				.global_lru
+				.lrus
+				.global.lru
 				.last()
 				.expect("no nodes despite non-zero write cache size");
 
 			if data.locked_records.contains_key(&(id, depth, offset)) {
+				break; // TODO meh
 				todo!("don't flush locked records");
 			}
 
@@ -731,7 +711,7 @@ impl<D: Dev> Cache<D> {
 	///
 	/// The cache is flushed before returning the underlying [`Store`].
 	pub async fn unmount(self) -> Result<Store<D>, Error<D>> {
-		let global_max = self.data.borrow().global_cache_max;
+		let global_max = self.data.borrow().lrus.global.cache_max;
 		self.resize_cache(global_max, 0).await?;
 		debug_assert_eq!(
 			self.cache_status().dirty_usage,
@@ -747,7 +727,7 @@ impl<D: Dev> Cache<D> {
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();
-		CacheStatus { global_usage: data.global_cache_size, dirty_usage: data.write_cache_size }
+		CacheStatus { global_usage: data.lrus.global.cache_size, dirty_usage: data.lrus.dirty.cache_size }
 	}
 
 	/// Check if cache size matches real usage
@@ -763,7 +743,7 @@ impl<D: Dev> Cache<D> {
 			.map(|v| v.data.len())
 			.sum::<usize>();
 		assert_eq!(
-			real_global_usage, data.global_cache_size,
+			real_global_usage, data.lrus.global.cache_size,
 			"global cache size mismatch"
 		);
 	}
@@ -812,7 +792,7 @@ impl<'a, D: Dev> CacheRef<'a, D> {
 	/// # Panics
 	///
 	/// If something is already borrowing the underlying [`TreeData`].
-	async fn get_mut(&self) -> Result<RefMut<Entry>, Error<D>> {
+	async fn get_mut(&self) -> Result<EntryRefMut, Error<D>> {
 		self.cache
 			.get_entry_mut(self.id, self.depth, self.offset)
 			.await
@@ -908,4 +888,51 @@ pub struct CacheStatus {
 	pub global_usage: usize,
 	/// Total amount of memory used by dirty record data.
 	pub dirty_usage: usize,
+}
+
+/// Mutable reference to a cache entry.
+///
+/// This will mark the entry as dirty when it is dropped.
+struct EntryRefMut<'a> {
+	/// The length of the entry at the time of borrowing.
+	original_len: usize,
+
+	id: u64,
+	depth: u8,
+	offset: u64,
+	entry: RefMut<'a, Entry>,
+	lrus: RefMut<'a, Lrus>,
+}
+
+impl Deref for EntryRefMut<'_> {
+	type Target = Entry;
+
+	fn deref(&self) -> &Entry {
+		&self.entry
+	}
+}
+
+impl DerefMut for EntryRefMut<'_> {
+	fn deref_mut(&mut self) -> &mut Entry {
+		&mut self.entry
+	}
+}
+
+// TODO async drop would be nice.
+impl Drop for EntryRefMut<'_> {
+	fn drop(&mut self) {
+		// Check if we still need to mark the entry as dirty.
+		// Otherwise promote.
+		if let Some(idx) = self.entry.write_index {
+			self.lrus.dirty.lru.promote(idx);
+			self.lrus.dirty.cache_size += self.entry.data.len();
+			self.lrus.dirty.cache_size -= self.original_len;
+		} else {
+			let idx = self.lrus.dirty.lru.insert((self.id, self.depth, self.offset));
+			self.lrus.dirty.cache_size += self.entry.data.len();
+			self.entry.write_index = Some(idx);
+		}
+		self.lrus.global.cache_size += self.entry.data.len();
+		self.lrus.global.cache_size -= self.original_len;
+	}
 }

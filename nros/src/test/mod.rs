@@ -25,9 +25,8 @@ async fn new_cap(
 		BlockSize::K1,
 		max_record_size,
 		Compression::None,
-		// Don't evict cache for tests with small amounts of data, effectively.
-		4 * 1024,
-		4 * 1024,
+		read_cache_size,
+		write_cache_size,
 	)
 	.await
 	.unwrap()

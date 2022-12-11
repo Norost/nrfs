@@ -116,24 +116,17 @@ impl<'a, D: Dev> Tree<'a, D> {
 			calc_record_offsets(self.max_record_size(), offset, data.len());
 
 		if range.start() == range.end() {
-			let (old_len, new_len);
-			{
-				// We need to slice one record twice
-				let b = self.get(0, *range.start()).await?;
+			// We need to slice one record twice
+			let b = self.get(0, *range.start()).await?;
 
-				let mut b = b.get_mut().await?;
+			let mut b = b.get_mut().await?;
 
-				let b = &mut b.data;
-				old_len = b.len();
+			let b = &mut b.data;
 
-				let min_len = last_offset.max(b.len());
-				b.resize(min_len, 0);
-				b[first_offset..last_offset].copy_from_slice(data);
-				trim_zeros_end(b);
-
-				new_len = b.len();
-			}
-			self.cache.adjust_cache_use_both(old_len, new_len).await?;
+			let min_len = last_offset.max(b.len());
+			b.resize(min_len, 0);
+			b[first_offset..last_offset].copy_from_slice(data);
+			trim_zeros_end(b);
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
 			let mut data = data;
@@ -143,7 +136,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 			let last_key = range.next_back().unwrap();
 
 			// Copy to first record |----xxxx|
-			let (old_len, new_len);
 			{
 				let d;
 				(d, data) = data.split_at((1usize << self.max_record_size()) - first_offset);
@@ -151,60 +143,45 @@ impl<'a, D: Dev> Tree<'a, D> {
 				let b = self.get(0, first_key).await?;
 				let mut b = b.get_mut().await?;
 				let b = &mut b.data;
-				old_len = b.len();
 
 				b.resize(first_offset, 0);
 				b.extend_from_slice(d);
 				trim_zeros_end(b);
-				new_len = b.len();
 			}
-			self.cache.adjust_cache_use_both(old_len, new_len).await?;
 
 			// Copy middle records |xxxxxxxx|
 			for key in range {
-				let (old_len, new_len);
-				{
-					let d;
-					(d, data) = data.split_at(1usize << self.max_record_size());
+				let d;
+				(d, data) = data.split_at(1usize << self.max_record_size());
 
-					// "Fetch" directly since we're overwriting the entire record anyways.
-					let b = self
-						.cache
-						.fetch_entry(self.id, 0, key, &Record::default())
-						.await?;
+				// "Fetch" directly since we're overwriting the entire record anyways.
+				let b = self
+					.cache
+					.fetch_entry(self.id, 0, key, &Record::default())
+					.await?;
 
-					let mut b = b.get_mut().await?;
-					let b = &mut b.data;
-					old_len = b.len();
+				let mut b = b.get_mut().await?;
+				let b = &mut b.data;
 
-					// If the record was already fetched, it'll have ignored the &Record::default().
-					// Hence we need to clear it manually.
-					b.clear();
-					b.extend_from_slice(d);
-					trim_zeros_end(b);
-					new_len = b.len();
-				}
-				self.cache.adjust_cache_use_both(old_len, new_len).await?;
+				// If the record was already fetched, it'll have ignored the &Record::default().
+				// Hence we need to clear it manually.
+				b.clear();
+				b.extend_from_slice(d);
+				trim_zeros_end(b);
 			}
 
 			// Copy end record |xxxx----|
 			// Don't bother if there is no data
 			if last_offset > 0 {
-				let (old_len, new_len);
-				{
-					debug_assert_eq!(data.len(), last_offset);
-					let b = self.get(0, last_key).await?;
-					let mut b = b.get_mut().await?;
-					let b = &mut b.data;
-					old_len = b.len();
+				debug_assert_eq!(data.len(), last_offset);
+				let b = self.get(0, last_key).await?;
+				let mut b = b.get_mut().await?;
+				let b = &mut b.data;
 
-					let min_len = b.len().max(data.len());
-					b.resize(min_len, 0);
-					b[..last_offset].copy_from_slice(data);
-					trim_zeros_end(b);
-					new_len = b.len();
-				}
-				self.cache.adjust_cache_use_both(old_len, new_len).await?;
+				let min_len = b.len().max(data.len());
+				b.resize(min_len, 0);
+				b[..last_offset].copy_from_slice(data);
+				trim_zeros_end(b);
 			}
 		}
 
@@ -340,36 +317,31 @@ impl<'a, D: Dev> Tree<'a, D> {
 			}
 		} else {
 			// Update a parent record.
-			let (old_len, new_len);
-			{
-				// Find parent
-				let shift = self.max_record_size().to_raw() - RECORD_SIZE_P2;
-				let (offt, index) = divmod_p2(offset, shift);
+			// Find parent
+			let shift = self.max_record_size().to_raw() - RECORD_SIZE_P2;
+			let (offt, index) = divmod_p2(offset, shift);
 
-				let entry = self.get(parent_depth, offt).await?;
-				let mut entry = entry.get_mut().await?;
+			let entry = self.get(parent_depth, offt).await?;
+			let mut entry = entry.get_mut().await?;
 
-				// Destroy old record
-				let old_record = get_record(&entry.data, index);
-				self.cache.store.destroy(&old_record);
+			// Destroy old record
+			let old_record = get_record(&entry.data, index);
+			self.cache.store.destroy(&old_record);
 
-				// Calc offset in parent
-				old_len = entry.data.len();
-				let index = index * mem::size_of::<Record>();
-				let min_len = old_len.max(index + mem::size_of::<Record>());
+			// Calc offset in parent
+			let index = index * mem::size_of::<Record>();
+			let min_len = entry.data.len().max(index + mem::size_of::<Record>());
 
-				// Store new record
-				entry.data.resize(min_len, 0);
-				entry.data[index..index + mem::size_of::<Record>()]
-					.copy_from_slice(record.as_ref());
-				trim_zeros_end(&mut entry.data);
-				new_len = entry.data.len();
+			// Store new record
+			entry.data.resize(min_len, 0);
+			entry.data[index..index + mem::size_of::<Record>()]
+				.copy_from_slice(record.as_ref());
+			trim_zeros_end(&mut entry.data);
 
-				let old_record2 = get_record(&entry.data, index);
-				(old_record.length > 0 && old_record2.length > 0)
-					.then(|| assert_ne!(old_record.lba, old_record2.lba));
-			}
-			self.cache.adjust_cache_use_both(old_len, new_len).await
+			let old_record2 = get_record(&entry.data, index);
+			(old_record.length > 0 && old_record2.length > 0)
+				.then(|| assert_ne!(old_record.lba, old_record2.lba));
+			Ok(())
 		}
 	}
 
@@ -458,7 +430,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				let entries =
 					mem::take(&mut self.cache.get_object_entry_mut(self.id).data[usize::from(d)]);
 				for (offt, entry) in entries {
-					for index in 0..1 << rec_size_p2 {
+					for index in 0..1 << rec_size_p2 - RECORD_SIZE_P2 {
 						let rec = get_record(&entry.data, index.try_into().unwrap());
 						destroy(
 							self,
@@ -500,7 +472,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 			drop(entry);
 			let fut: Pin<Box<dyn Future<Output = _>>> =
 				Box::pin(self.cache.write_object_table(self.id, new_root.as_ref()));
-			fut.await?;
+			let l = fut.await?;
+			debug_assert_eq!(l, mem::size_of::<Record>());
 		}
 
 		// Destroy out-of-range records
@@ -572,8 +545,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// The entries haven't been flushed nor do they have any on-dev allocations, so just
 			// remove them from LRUs.
 			for entry in entries.values() {
-				data.global_lru.remove(entry.global_index);
-				data.global_cache_size -= entry.data.len();
+				data.lrus.global.lru.remove(entry.global_index);
+				data.lrus.global.cache_size -= entry.data.len();
 				// The entry *must* be dirty as otherwise it either:
 				// - wouldn't exist
 				// - have a parent node, in which case it was already destroyed in a previous
@@ -581,18 +554,18 @@ impl<'a, D: Dev> Tree<'a, D> {
 				// ... except if d == cur_depth. Meh
 				if let Some(idx) = entry.write_index {
 					//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
-					data.write_lru.remove(idx);
-					data.write_cache_size -= entry.data.len();
+					data.lrus.dirty.lru.remove(idx);
+					data.lrus.dirty.cache_size -= entry.data.len();
 				}
 			}
 
 			// Destroy all subtrees.
 			drop(data);
 			for (offset, entry) in entries {
-				for index in 0..1 << rec_size_p2 - RECORD_SIZE_P2 {
-					let rec = get_record(&entry.data, index);
-					let offt =
-						(offset << rec_size_p2 - RECORD_SIZE_P2) + u64::try_from(index).unwrap();
+				let skip_first = (offset == 0).into();
+				for index in skip_first..1 << rec_size_p2 - RECORD_SIZE_P2 {
+					let rec = get_record(&entry.data, index.try_into().unwrap());
+					let offt = (offset << rec_size_p2 - RECORD_SIZE_P2) + index;
 					destroy(self, d - 1, offt, &rec).await?;
 				}
 			}
@@ -634,8 +607,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// The entries haven't been flushed nor do they have any on-dev allocations, so just
 			// remove them from LRUs.
 			for (_, entry) in entries.iter() {
-				data.global_lru.remove(entry.global_index);
-				data.global_cache_size -= entry.data.len();
+				data.lrus.global.lru.remove(entry.global_index);
+				data.lrus.global.cache_size -= entry.data.len();
 				// The entry *must* be dirty as otherwise it either:
 				// - wouldn't exist
 				// - have a parent node, in which case it was already destroyed in a previous
@@ -647,8 +620,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 				*/
 				if let Some(idx) = entry.write_index {
 					//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
-					data.write_lru.remove(idx);
-					data.write_cache_size -= entry.data.len();
+					data.lrus.dirty.lru.remove(idx);
+					data.lrus.dirty.cache_size -= entry.data.len();
 				}
 			}
 			drop(data);
@@ -656,9 +629,9 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// Destroy all subtrees.
 			if d > 0 {
 				for (offset, entry) in entries {
-					for index in 0..1 << self.max_record_size().to_raw() - RECORD_SIZE_P2 {
+					for index in 0..1 << rec_size_p2 - RECORD_SIZE_P2 {
 						let rec = get_record(&entry.data, index);
-						let offt = (offset << self.max_record_size().to_raw() - RECORD_SIZE_P2)
+						let offt = (offset << rec_size_p2 - RECORD_SIZE_P2)
 							+ u64::try_from(index).unwrap();
 						destroy(self, d - 1, offt, &rec).await?;
 					}
@@ -697,9 +670,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 					entry.data.resize(new_rec_len, 0);
 				}
 			}
-			self.cache
-				.adjust_cache_use_both(old_rec_len, new_rec_len)
-				.await?;
 		}
 
 		// Presto, at last
@@ -772,9 +742,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 		if self.id == OBJECT_LIST_ID {
 			Ok(self.cache.object_list())
 		} else {
-			let list = Self::new(self.cache, OBJECT_LIST_ID).await?;
 			let mut record = Record::default();
-			list.read(self.id * RECORD_SIZE, record.as_mut()).await?;
+			self.cache.read_object_table(self.id, record.as_mut()).await?;
 			Ok(record)
 		}
 	}
