@@ -455,11 +455,18 @@ impl<'a, D: Dev> Tree<'a, D> {
 			}
 
 			for d in (1..cur_depth).rev() {
-				let entries = mem::take(&mut self.cache.get_object_entry_mut(self.id).data[usize::from(d)]);
+				let entries =
+					mem::take(&mut self.cache.get_object_entry_mut(self.id).data[usize::from(d)]);
 				for (offt, entry) in entries {
 					for index in 0..1 << rec_size_p2 {
 						let rec = get_record(&entry.data, index.try_into().unwrap());
-						destroy(self, d - 1, (offt << rec_size_p2 - RECORD_SIZE_P2) + index, &rec).await?;
+						destroy(
+							self,
+							d - 1,
+							(offt << rec_size_p2 - RECORD_SIZE_P2) + index,
+							&rec,
+						)
+						.await?;
 					}
 				}
 			}
@@ -609,7 +616,11 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 		// We need to be careful here not to destroy too much.
 		for d in (0..new_depth).rev() {
-			let offset_bound = (new_len - 1) >> rec_size_p2 + (rec_size_p2 - RECORD_SIZE_P2) * d;
+			// In case of overflow, assume 0
+			// Should only happen for root records, where we want 0 anyways.
+			let offset_bound = (new_len - 1)
+				.checked_shr((rec_size_p2 + (rec_size_p2 - RECORD_SIZE_P2) * d).into())
+				.unwrap_or(0);
 
 			// None of the entries remaining in this level need to be kept, so just take them out.
 			let mut data = self.cache.data.borrow_mut();
@@ -647,11 +658,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 				let offt = new_len >> rec_size_p2 + (rec_size_p2 - RECORD_SIZE_P2) * (d - 1);
 				// Round up to a multiple of record size.
 				let offt = (offt + RECORD_SIZE - 1) & !(RECORD_SIZE - 1);
-				let (offset, index) = divmod_p2(
-					offt,
-					rec_size_p2 - RECORD_SIZE_P2,
-				);
-				
+				let (offset, index) = divmod_p2(offt, rec_size_p2 - RECORD_SIZE_P2);
+
 				// If index == 0 we don't need to trim anything.
 				if index > 0 {
 					let entry = self.get(d, offset_bound).await?;
@@ -676,7 +684,9 @@ impl<'a, D: Dev> Tree<'a, D> {
 					entry.data.resize(new_rec_len, 0);
 				}
 			}
-			self.cache.adjust_cache_use_both(old_rec_len, new_rec_len).await?;
+			self.cache
+				.adjust_cache_use_both(old_rec_len, new_rec_len)
+				.await?;
 		}
 
 		// Presto, at last

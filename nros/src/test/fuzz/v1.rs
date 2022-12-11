@@ -359,7 +359,7 @@ fn tree_shrink_destroy_depth_off_by_one() {
 /// Now it is still complex but at least it works now,
 /// at least until I run the fuzzer again.
 #[test]
-fn tree_rewrite_resize_from_scratch() {
+fn tree_rewrite_shrink_from_scratch() {
 	Test::new(
 		1 << 16,
 		[
@@ -367,6 +367,18 @@ fn tree_rewrite_resize_from_scratch() {
 			Write { idx: 0, offset: 5999147927136639863, amount: 65286 },
 			Resize { idx: 0, size: 432345568522491477 },
 			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_shrink_shift_overflow() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 17870283318554001399 },
+			Resize { idx: 0, size: 17868031521458223095 },
 		],
 	)
 	.run()
