@@ -62,7 +62,7 @@ impl<'a> Arbitrary<'a> for Test {
 impl Test {
 	pub fn new(blocks: usize, ops: impl Into<Box<[Op]>>) -> Self {
 		Self {
-			store: run(|| new_cap(MaxRecordSize::K1, blocks, 4096, 4096)),
+			store: run(new_cap(MaxRecordSize::K1, blocks, 4096, 4096)),
 			ops: ops.into(),
 			ids: Default::default(),
 			contents: Default::default(),
@@ -70,7 +70,7 @@ impl Test {
 	}
 
 	pub fn run(mut self) {
-		run(|| async {
+		run(async {
 			for op in self.ops.into_vec() {
 				match op {
 					Op::Create { size } => {

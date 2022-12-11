@@ -11,7 +11,7 @@ async fn clear(s: &Nros<MemDev>) {
 
 #[test]
 fn create_flush_get() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let id = s.create().await.unwrap().id();
 		clear(&s).await;
@@ -21,7 +21,7 @@ fn create_flush_get() {
 
 #[test]
 fn write_flush_read() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
 		let obj = s.create().await.unwrap();
@@ -40,7 +40,7 @@ fn write_flush_read() {
 
 #[test]
 fn write_flush_read_offset_1000() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
 		let obj = s.create().await.unwrap();
@@ -59,7 +59,7 @@ fn write_flush_read_offset_1000() {
 
 #[test]
 fn write_flush_read_offset_1024() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
 		let obj = s.create().await.unwrap();
@@ -80,7 +80,7 @@ fn write_flush_read_offset_1024() {
 
 #[test]
 fn write_flush_read_offset_1023() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		s.store.verify_cache_usage();
 
@@ -102,7 +102,7 @@ fn write_flush_read_offset_1023() {
 
 #[test]
 fn write_flush_read_offset_10p6() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 
@@ -128,7 +128,7 @@ fn write_flush_read_offset_10p6() {
 /// `new` sets global cache size to 4096, so this is guaranteed to cause evictions.
 #[test]
 fn write_read_2p13() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1 << 13).await.unwrap();
@@ -141,7 +141,7 @@ fn write_read_2p13() {
 
 #[test]
 fn write_tx_read_many() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
 		let obj_1 = s.create().await.unwrap();
@@ -180,7 +180,7 @@ fn write_tx_read_many() {
 /// `depth == 1`
 #[test]
 fn write_many_depth_eq1() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1).await.unwrap();
@@ -196,7 +196,7 @@ fn write_many_depth_eq1() {
 /// `depth > 1`
 #[test]
 fn write_many_depth_gt1() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1 << 14).await.unwrap();
@@ -209,7 +209,7 @@ fn write_many_depth_gt1() {
 
 #[test]
 fn shrink_written_object_0() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1 << 20).await.unwrap();
@@ -221,7 +221,7 @@ fn shrink_written_object_0() {
 
 #[test]
 fn shrink_written_object_1() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1 << 20).await.unwrap();
@@ -237,7 +237,7 @@ fn shrink_written_object_1() {
 
 #[test]
 fn shrink_written_object_3() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1 << 20).await.unwrap();
@@ -254,7 +254,7 @@ fn shrink_written_object_3() {
 
 #[test]
 fn grow_grow() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
 		let obj = s.create().await.unwrap();
@@ -281,7 +281,7 @@ fn grow_grow() {
 
 #[test]
 fn grow_write_shrink_many() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
 		let obj = s.create().await.unwrap();
