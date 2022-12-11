@@ -573,14 +573,16 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// remove them from LRUs.
 			for entry in entries.values() {
 				data.global_lru.remove(entry.global_index);
+				data.global_cache_size -= entry.data.len();
 				// The entry *must* be dirty as otherwise it either:
 				// - wouldn't exist
 				// - have a parent node, in which case it was already destroyed in a previous
 				//   iteration.
 				// ... except if d == cur_depth. Meh
 				if let Some(idx) = entry.write_index {
-					debug_assert_eq!(d, cur_depth, "not in dirty LRU");
+					//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
 					data.write_lru.remove(idx);
+					data.write_cache_size -= entry.data.len();
 				}
 			}
 
@@ -633,26 +635,37 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// remove them from LRUs.
 			for (_, entry) in entries.iter() {
 				data.global_lru.remove(entry.global_index);
+				data.global_cache_size -= entry.data.len();
 				// The entry *must* be dirty as otherwise it either:
 				// - wouldn't exist
 				// - have a parent node, in which case it was already destroyed in a previous
 				//   iteration.
+				// FIXME above statement appears to be wrong? Please verify.
+				/*
 				data.write_lru
 					.remove(entry.write_index.expect("not in dirty LRU"));
+				*/
+				if let Some(idx) = entry.write_index {
+					//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
+					data.write_lru.remove(idx);
+					data.write_cache_size -= entry.data.len();
+				}
 			}
+			drop(data);
 
 			// Destroy all subtrees.
-			for (offset, entry) in entries {
-				for index in 0..1 << self.max_record_size().to_raw() - RECORD_SIZE_P2 {
-					let rec = get_record(&entry.data, index);
-					let offt = (offset << self.max_record_size().to_raw() - RECORD_SIZE_P2)
-						+ u64::try_from(index).unwrap();
-					destroy(self, d - 1, offt, &rec).await?;
+			if d > 0 {
+				for (offset, entry) in entries {
+					for index in 0..1 << self.max_record_size().to_raw() - RECORD_SIZE_P2 {
+						let rec = get_record(&entry.data, index);
+						let offt = (offset << self.max_record_size().to_raw() - RECORD_SIZE_P2)
+							+ u64::try_from(index).unwrap();
+						destroy(self, d - 1, offt, &rec).await?;
+					}
 				}
 			}
 
 			// Trim record at boundary
-			drop(data);
 			let mut old_rec_len @ mut new_rec_len = 0;
 			if d > 0 {
 				let offt = new_len >> rec_size_p2 + (rec_size_p2 - RECORD_SIZE_P2) * (d - 1);
