@@ -23,6 +23,11 @@ use {
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
 const OBJECT_LIST_ID: u64 = u64::MAX;
 
+/// Estimated fixed cost for every cached entry.
+///
+/// This is in addition to the amount of data stored by the entry.
+const CACHE_ENTRY_FIXED_COST: usize = mem::size_of::<Entry>();
+
 /// Cache data.
 pub(crate) struct CacheData {
 	/// Cached records of objects and the object list.
@@ -88,7 +93,7 @@ impl Lrus {
 	/// Adjust cache usage based on manually removed entry.
 	fn adjust_cache_removed_entry(&mut self, entry: &Entry) {
 		self.global.lru.remove(entry.global_index);
-		self.global.cache_size -= entry.data.len();
+		self.global.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
 		// The entry *must* be dirty as otherwise it either:
 		// - wouldn't exist
 		// - have a parent node, in which case it was already destroyed in a previous
@@ -97,7 +102,7 @@ impl Lrus {
 		if let Some(idx) = entry.write_index {
 			//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
 			self.dirty.lru.remove(idx);
-			self.dirty.cache_size -= entry.data.len();
+			self.dirty.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
 		}
 	}
 }
@@ -197,13 +202,31 @@ impl<D: Dev> Cache<D> {
 		slf.used_objects_ids.remove(id..id + 1);
 	}
 
+	/// Get an existing root,
+	async fn get_object_root(&self, id: u64) -> Result<Record, Error<D>> {
+		if id == OBJECT_LIST_ID {
+			Ok(self.store.object_list())
+		} else {
+			let offset = id * (mem::size_of::<Record>() as u64);
+			let list = Tree::new_object_list(self).await?;
+			let mut root = Record::default();
+			let l = list.read(offset, root.as_mut()).await?;
+			debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully read");
+			Ok(root)
+		}
+	}
+
 	/// Update an existing root,
 	/// i.e. without resizing the object list.
 	async fn set_object_root(&self, id: u64, root: &Record) -> Result<(), Error<D>> {
-		let offset = id * (mem::size_of::<Record>() as u64);
-		let list = Tree::new_object_list(self).await?;
-		let l = list.write(offset, root.as_ref()).await?;
-		debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully written");
+		if id == OBJECT_LIST_ID {
+			self.store.set_object_list(*root);
+		} else {
+			let offset = id * (mem::size_of::<Record>() as u64);
+			let list = Tree::new_object_list(self).await?;
+			let l = list.write(offset, root.as_ref()).await?;
+			debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully written");
+		}
 		Ok(())
 	}
 
@@ -273,16 +296,7 @@ impl<D: Dev> Cache<D> {
 		let data = { &mut *self.data.borrow_mut() };
 		let obj = data.data.get_mut(&id)?;
 		let entry = obj.data[usize::from(depth)].remove(&offset)?;
-
-		// Remove entry from LRUs
-		let len = entry.data.len();
-		data.lrus.global.lru.remove(entry.global_index);
-		data.lrus.global.cache_size -= len;
-		if let Some(idx) = entry.write_index {
-			data.lrus.dirty.lru.remove(idx);
-			data.lrus.dirty.cache_size -= len;
-		}
-
+		data.lrus.adjust_cache_removed_entry(&entry);
 		Some(entry)
 	}
 
@@ -430,7 +444,7 @@ impl<D: Dev> Cache<D> {
 					},
 				);
 				debug_assert!(prev.is_none(), "entry was already present");
-				data.lrus.global.cache_size += len;
+				data.lrus.global.cache_size += len + CACHE_ENTRY_FIXED_COST;
 
 				// Wake other tasks waiting for this entry.
 				data.fetching
@@ -631,7 +645,7 @@ impl<D: Dev> Cache<D> {
 			entry.write_index = None;
 			let len = entry.data.len();
 			drop(entry);
-			self.data.borrow_mut().lrus.dirty.cache_size -= len;
+			self.data.borrow_mut().lrus.dirty.cache_size -= len + CACHE_ENTRY_FIXED_COST;
 
 			// Store the record in the appropriate place.
 			let obj = Tree::new(self, id).await?;
@@ -689,6 +703,7 @@ impl<D: Dev> Cache<D> {
 	///
 	/// The cache is flushed before returning the underlying [`Store`].
 	pub async fn unmount(self) -> Result<Store<D>, Error<D>> {
+		trace!("unmount");
 		let global_max = self.data.borrow().lrus.global.cache_max;
 		self.resize_cache(global_max, 0).await?;
 		debug_assert_eq!(
@@ -721,7 +736,7 @@ impl<D: Dev> Cache<D> {
 			.values()
 			.flat_map(|o| o.data.iter())
 			.flat_map(|m| m.values())
-			.map(|v| v.data.len())
+			.map(|v| v.data.len() + CACHE_ENTRY_FIXED_COST)
 			.sum::<usize>();
 		assert_eq!(
 			real_global_usage, data.lrus.global.cache_size,
@@ -917,7 +932,7 @@ impl Drop for EntryRefMut<'_> {
 				.dirty
 				.lru
 				.insert((self.id, self.depth, self.offset));
-			self.lrus.dirty.cache_size += self.entry.data.len();
+			self.lrus.dirty.cache_size += self.entry.data.len() + CACHE_ENTRY_FIXED_COST;
 			self.entry.write_index = Some(idx);
 		}
 		self.lrus.global.cache_size += self.entry.data.len();

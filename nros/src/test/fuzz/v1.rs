@@ -49,11 +49,27 @@ impl<'a> Arbitrary<'a> for Test {
 	fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
 		// Always start with a create.
 		let create_op = Op::Create { size: u.arbitrary()? };
+		let m = 1 << 11;
 		Ok(Self::new(
 			1 << 16, // Increase or decrease as you see fit.
 			[Ok(create_op)]
 				.into_iter()
 				.chain(u.arbitrary_iter::<Op>()?)
+				/*
+				.map(|op| {
+					op.map(|op| match op {
+						Op::Create { size } => Op::Create { size: size % m },
+						Op::Write { idx, offset, amount } => {
+							Op::Write { idx, offset: offset % m, amount }
+						}
+						Op::Read { idx, offset, amount } => {
+							Op::Read { idx, offset: offset % m, amount }
+						}
+						Op::Resize { idx, size } => Op::Resize { idx, size: size % m },
+						op => op,
+					})
+				})
+				*/
 				.try_collect::<Box<_>>()?,
 		))
 	}
@@ -62,7 +78,7 @@ impl<'a> Arbitrary<'a> for Test {
 impl Test {
 	pub fn new(blocks: usize, ops: impl Into<Box<[Op]>>) -> Self {
 		Self {
-			store: run(new_cap(MaxRecordSize::K1, blocks, 4096, 4096)),
+			store: run(new_cap(MaxRecordSize::K1, blocks, 4096 << 12, 4096)),
 			ops: ops.into(),
 			ids: Default::default(),
 			contents: Default::default(),
@@ -111,6 +127,7 @@ impl Test {
 						}
 					}
 					Op::Remount => {
+						self.store.resize_cache(4096, 0).await.unwrap();
 						let devs = self.store.unmount().await.unwrap();
 						self.store = Nros::load(devs, 4096, 4096).await.unwrap();
 					}
@@ -129,11 +146,17 @@ impl Test {
 							.replace_with(self.store.get(from_id).await.unwrap())
 							.await
 							.unwrap();
+
+						let c = self.contents.remove(&from_id).unwrap();
+						self.contents.insert(to_id, c);
 					}
 					Op::Resize { idx, size } => {
 						let id = self.ids[idx as usize % self.ids.len()];
 						let obj = self.store.get(id).await.unwrap();
 						obj.resize(size).await.unwrap();
+						if size < u64::MAX {
+							self.contents.get_mut(&id).unwrap().remove(size..u64::MAX);
+						}
 					}
 				}
 			}
@@ -450,7 +473,7 @@ fn tree_write_resize_1_double_free() {
 }
 
 #[test]
-fn tree_write_shrink_double_free() {
+fn tree_write_shrink_shrink_use_after_free() {
 	Test::new(
 		1 << 16,
 		[
@@ -458,6 +481,79 @@ fn tree_write_shrink_double_free() {
 			Write { idx: 0, offset: 18390793471280101717, amount: 65535 },
 			Resize { idx: 0, size: 18388299555398483947 },
 			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_shrink_idk_man() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 18446744073709551614 },
+			Write { idx: 65501, offset: 15987206784517266935, amount: 56797 },
+			Resize { idx: 7415, size: 15987205831607189504 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_reeeeeeeeeeeeee() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 827 },
+			Resize { idx: 0, size: 16999953897322704879 },
+			Write { idx: 0, offset: 2047, amount: 65535 },
+			Resize { idx: 0, size: 1099511628031 },
+		],
+	)
+	.run()
+}
+
+/// It was a bug in the test runner itself, amazing...
+#[test]
+fn test_small_resize() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 1003 },
+			Write { idx: 0, offset: 0, amount: 2 },
+			Resize { idx: 0, size: 1 },
+			Resize { idx: 0, size: 2 },
+			Read { idx: 0, offset: 0, amount: 2 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn unflushed_empty_dirty_entries() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 1026 },
+			Write { idx: 0, offset: 1025, amount: 1 },
+			Remount,
+			Resize { idx: 0, size: 1025 },
+			Remount,
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn create_shrink() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 1 << 21 },
+			Resize { idx: 0, size: (1 << 20) + 1 },
+			Remount,
 		],
 	)
 	.run()

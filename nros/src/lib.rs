@@ -66,6 +66,14 @@ macro_rules! n2e {
 	};
 }
 
+/// Tracing in debug mode only.
+macro_rules! trace {
+	($($arg:tt)*) => {
+		#[cfg(feature = "trace")]
+		eprintln!(concat!("[DEBUG] {}"), format_args!($($arg)*));
+	};
+}
+
 mod cache;
 pub mod header;
 mod record;

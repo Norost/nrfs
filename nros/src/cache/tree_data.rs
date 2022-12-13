@@ -19,7 +19,7 @@ pub struct TreeData {
 	///
 	/// The index in the array is correlated with depth.
 	/// The key is correlated with offset.
-	pub data: Box<[FxHashMap<u64, Entry>]>,
+	pub(super) data: Box<[FxHashMap<u64, Entry>]>,
 	/// Lock on the data of this tree.
 	///
 	/// This is to prevent race conditions with concurrent writes, flushing ...
@@ -69,7 +69,10 @@ pub struct FlushLock<'a> {
 
 impl<'a> FlushLock<'a> {
 	// Attempt to acquire a flush lock
-	pub fn new(data: &'a RefCell<CacheData>, id: u64) -> impl Future<Output = FlushLock<'a>> + 'a {
+	pub(super) fn new(
+		data: &'a RefCell<CacheData>,
+		id: u64,
+	) -> impl Future<Output = FlushLock<'a>> + 'a {
 		future::poll_fn(move |cx| {
 			let mut d = data.borrow_mut();
 			let tree = d.data.get_mut(&id).expect("cache entry by id not present");
@@ -112,17 +115,17 @@ pub struct FmtTreeData<'a> {
 
 impl fmt::Debug for FmtTreeData<'_> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		struct FmtRecord<'a>(&'a Entry);
+		struct FmtRecordList<'a>(&'a [u8]);
 
-		impl fmt::Debug for FmtRecord<'_> {
+		impl fmt::Debug for FmtRecordList<'_> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				let mut f = f.debug_map();
 				let mut i = 0;
 				let mut index = 0;
-				while i < self.0.data.len() {
+				while i < self.0.len() {
 					let mut rec = Record::default();
-					let l = (self.0.data.len() - i).min(mem::size_of::<Record>());
-					rec.as_mut()[..l].copy_from_slice(&self.0.data[i..][..l]);
+					let l = (self.0.len() - i).min(mem::size_of::<Record>());
+					rec.as_mut()[..l].copy_from_slice(&self.0[i..][..l]);
 					if rec != Record::default() {
 						f.entry(&index, &rec);
 					}
@@ -130,6 +133,26 @@ impl fmt::Debug for FmtTreeData<'_> {
 					index += 1;
 				}
 				f.finish()
+			}
+		}
+
+		struct FmtRecord<'a>(&'a Entry);
+
+		impl fmt::Debug for FmtRecord<'_> {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				#[derive(Debug)]
+				#[allow(dead_code)]
+				struct T<'a> {
+					data: FmtRecordList<'a>,
+					global_index: super::lru::Idx,
+					write_index: Option<super::lru::Idx>,
+				}
+				T {
+					data: FmtRecordList(&self.0.data),
+					global_index: self.0.global_index,
+					write_index: self.0.write_index,
+				}
+				.fmt(f)
 			}
 		}
 

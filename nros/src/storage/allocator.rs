@@ -71,8 +71,10 @@ impl Allocator {
 			let end = usize::try_from(size).unwrap();
 
 			// Add record itself
-			alloc_map.insert(lba..lba + size);
-			ignore.insert(lba..lba + size);
+			let record_blocks =
+				u64::try_from(store.calc_block_count(record.length.into())).unwrap();
+			alloc_map.insert(lba..lba + record_blocks);
+			ignore.insert(lba..lba + record_blocks);
 
 			// Add entries
 			let entry_mask = mem::size_of::<Entry>() - 1;
