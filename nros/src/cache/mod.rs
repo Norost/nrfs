@@ -1,10 +1,11 @@
 mod lru;
 mod tree;
+mod tree_data;
 
 pub use tree::Tree;
 
 use {
-	crate::{BlockSize, Dev, Error, MaxRecordSize, Record, Store},
+	crate::{util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{Ref, RefCell, RefMut},
 		fmt,
@@ -16,160 +17,11 @@ use {
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
 	std::collections::hash_map,
+	tree_data::{FlushLock, FmtTreeData, TreeData},
 };
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
 const OBJECT_LIST_ID: u64 = u64::MAX;
-
-/// A single cached record tree.
-struct TreeData {
-	/// The current length of the tree.
-	///
-	/// This may not match the length stored in the root if the tree was resized.
-	length: u64,
-	/// Cached records.
-	///
-	/// The index in the array is correlated with depth.
-	/// The key is correlated with offset.
-	data: Box<[FxHashMap<u64, Entry>]>,
-	/// Lock on the data of this tree.
-	///
-	/// This is to prevent race conditions with concurrent writes, flushing ...
-	lock: TreeDataLock,
-	/// Wakers for tasks attempting to operate on this tree.
-	wakers: Vec<Waker>,
-}
-
-#[derive(Debug, Default)]
-enum TreeDataLock {
-	/// No lock is active.
-	#[default]
-	None,
-	/// Read lock, with amount of readers.
-	///
-	/// Prevents writes.
-	Read { readers: u32 },
-	/// Pending write lock, with amount of readers.
-	///
-	/// Used to signal that a writer is waiting.
-	/// Prevents reads & writes.
-	PendingWrite { readers: u32 },
-	/// Prevent reads and writes.
-	Write,
-	/// Prevent flushing.
-	Flush,
-}
-
-struct FlushLock<'a> {
-	data: &'a RefCell<CacheData>,
-	id: u64,
-}
-
-impl<'a> FlushLock<'a> {
-	// Attempt to acquire a flush lock
-	fn new(data: &'a RefCell<CacheData>, id: u64) -> impl Future<Output = FlushLock<'a>> + 'a {
-		future::poll_fn(move |cx| {
-			let mut d = data.borrow_mut();
-			let tree = d.data.get_mut(&id).expect("cache entry by id not present");
-			match &tree.lock {
-				TreeDataLock::None => {
-					tree.lock = TreeDataLock::Flush;
-					Poll::Ready(Self { data, id })
-				}
-				_ => {
-					tree.wakers.push(cx.waker().clone());
-					Poll::Pending
-				}
-			}
-		})
-	}
-}
-
-impl Drop for FlushLock<'_> {
-	fn drop(&mut self) {
-		let mut data = self.data.borrow_mut();
-		let tree = data
-			.data
-			.get_mut(&self.id)
-			.expect("cache entry by id not present");
-		tree.lock = TreeDataLock::None;
-		// Take so we free the allocated memory too.
-		mem::take(&mut tree.wakers)
-			.into_iter()
-			.for_each(|w| w.wake());
-	}
-}
-
-/// Formatter for [`TreeData`].
-///
-/// The output is more compact than that of `derive(Debug)`, especially for large amounts of data.
-struct FmtTreeData<'a> {
-	data: &'a TreeData,
-	id: u64,
-}
-
-impl fmt::Debug for FmtTreeData<'_> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		struct FmtRecord<'a>(&'a Entry);
-
-		impl fmt::Debug for FmtRecord<'_> {
-			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-				let mut f = f.debug_map();
-				let mut i = 0;
-				let mut index = 0;
-				while i < self.0.data.len() {
-					let mut rec = Record::default();
-					let l = (self.0.data.len() - i).min(mem::size_of::<Record>());
-					rec.as_mut()[..l].copy_from_slice(&self.0.data[i..][..l]);
-					if rec != Record::default() {
-						f.entry(&index, &rec);
-					}
-					i += l;
-					index += 1;
-				}
-				f.finish()
-			}
-		}
-
-		struct FmtRecordMap<'a>(&'a FxHashMap<u64, Entry>);
-
-		impl fmt::Debug for FmtRecordMap<'_> {
-			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-				let mut f = f.debug_map();
-				for (k, v) in self.0.iter() {
-					f.entry(k, &FmtRecord(v));
-				}
-				f.finish()
-			}
-		}
-
-		struct FmtData<'a>(&'a FmtTreeData<'a>);
-
-		impl fmt::Debug for FmtData<'_> {
-			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-				let mut f = f.debug_map();
-				let mut depths = self.0.data.data.iter().enumerate();
-				// Format like data
-				if self.0.id != OBJECT_LIST_ID {
-					let Some((i, l)) = depths.next() else { return f.finish() };
-					f.entry(&i, l);
-				}
-				// Format like records
-				for (i, l) in depths {
-					f.entry(&i, &FmtRecordMap(l));
-				}
-				f.finish()
-			}
-		}
-
-		f.debug_struct(stringify!(TreeData))
-			.field("length", &self.data.length)
-			.field("data", &FmtData(self))
-			.field("lock", &self.data.lock)
-			.field("wakers", &self.data.wakers)
-			.finish()
-	}
-}
 
 /// Cache data.
 pub(crate) struct CacheData {
@@ -343,6 +195,16 @@ impl<D: Dev> Cache<D> {
 		let mut slf = self.data.borrow_mut();
 		debug_assert!(slf.used_objects_ids.contains(&id), "double free");
 		slf.used_objects_ids.remove(id..id + 1);
+	}
+
+	/// Update an existing root,
+	/// i.e. without resizing the object list.
+	async fn set_object_root(&self, id: u64, root: &Record) -> Result<(), Error<D>> {
+		let offset = id * (mem::size_of::<Record>() as u64);
+		let list = Tree::new_object_list(self).await?;
+		let l = list.write(offset, root.as_ref()).await?;
+		debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully written");
+		Ok(())
 	}
 
 	async fn write_object_table(&self, id: u64, data: &[u8]) -> Result<usize, Error<D>> {
@@ -747,7 +609,12 @@ impl<D: Dev> Cache<D> {
 				.last()
 				.expect("no nodes despite non-zero write cache size");
 
-			if let TreeDataLock::Flush = data.data.get(&id).expect("invalid object").lock {
+			if data
+				.data
+				.get(&id)
+				.expect("invalid object")
+				.is_flush_locked()
+			{
 				break; // TODO continue with another record or object.
 			}
 
@@ -782,7 +649,12 @@ impl<D: Dev> Cache<D> {
 				.last()
 				.expect("no nodes despite non-zero write cache size");
 
-			if let TreeDataLock::Flush = data.data.get(&id).expect("invalid object").lock {
+			if data
+				.data
+				.get(&id)
+				.expect("invalid object")
+				.is_flush_locked()
+			{
 				break; // TODO continue with another record or object.
 			}
 
@@ -1030,6 +902,9 @@ impl DerefMut for EntryRefMut<'_> {
 // TODO async drop would be nice.
 impl Drop for EntryRefMut<'_> {
 	fn drop(&mut self) {
+		// Trim zeros, which we always want to do.
+		trim_zeros_end(&mut self.entry.data);
+
 		// Check if we still need to mark the entry as dirty.
 		// Otherwise promote.
 		if let Some(idx) = self.entry.write_index {

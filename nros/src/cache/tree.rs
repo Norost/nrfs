@@ -1,9 +1,6 @@
 use {
-	super::{Cache, CacheRef, TreeData, OBJECT_LIST_ID},
-	crate::{
-		util::{get_record, trim_zeros_end},
-		Dev, Error, MaxRecordSize, Record,
-	},
+	super::{Cache, CacheRef, FlushLock, TreeData, OBJECT_LIST_ID},
+	crate::{util::get_record, Dev, Error, MaxRecordSize, Record},
 	core::{future::Future, mem, ops::RangeInclusive, pin::Pin},
 	std::collections::hash_map,
 };
@@ -52,17 +49,11 @@ impl<'a, D: Dev> Tree<'a, D> {
 			let mut rec = Record::default();
 			cache.read_object_table(id, rec.as_mut()).await?;
 			let length = rec.total_length.into();
-			cache.data.borrow_mut().data.insert(
-				id,
-				TreeData {
-					length,
-					data: (0..depth(cache.max_record_size(), length))
-						.map(|_| Default::default())
-						.collect(),
-					lock: Default::default(),
-					wakers: Default::default(),
-				},
-			);
+			cache
+				.data
+				.borrow_mut()
+				.data
+				.insert(id, TreeData::new(depth(cache.max_record_size(), length)));
 		}
 
 		Ok(Self { cache, id })
@@ -80,14 +71,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			hash_map::Entry::Occupied(_) => {}
 			hash_map::Entry::Vacant(e) => {
 				let length = u64::from(cache.store.object_list().total_length);
-				e.insert(TreeData {
-					length,
-					data: (0..depth(cache.max_record_size(), length))
-						.map(|_| Default::default())
-						.collect(),
-					lock: Default::default(),
-					wakers: Default::default(),
-				});
+				e.insert(TreeData::new(depth(cache.max_record_size(), length)));
 			}
 		}
 
@@ -130,7 +114,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 			let min_len = last_offset.max(b.len());
 			b.resize(min_len, 0);
 			b[first_offset..last_offset].copy_from_slice(data);
-			trim_zeros_end(b);
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
 			let mut data = data;
@@ -150,7 +133,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 				b.resize(first_offset, 0);
 				b.extend_from_slice(d);
-				trim_zeros_end(b);
 			}
 
 			// Copy middle records |xxxxxxxx|
@@ -171,7 +153,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 				// Hence we need to clear it manually.
 				b.clear();
 				b.extend_from_slice(d);
-				trim_zeros_end(b);
 			}
 
 			// Copy end record |xxxx----|
@@ -185,7 +166,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 				let min_len = b.len().max(data.len());
 				b.resize(min_len, 0);
 				b[..last_offset].copy_from_slice(data);
-				trim_zeros_end(b);
 			}
 		}
 
@@ -339,7 +319,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// Store new record
 			entry.data.resize(min_len, 0);
 			entry.data[index..index + mem::size_of::<Record>()].copy_from_slice(record.as_ref());
-			trim_zeros_end(&mut entry.data);
 
 			let old_record2 = get_record(&entry.data, index);
 			(old_record.length > 0 && old_record2.length > 0)
@@ -400,7 +379,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 		let rec_size_p2 = self.max_record_size().to_raw();
 
 		// Prevent flushing as we'll be operating directly on the cache data of this tree.
-		let _flush_lock = super::FlushLock::new(&self.cache.data, self.id).await;
+		let _flush_lock = FlushLock::new(&self.cache.data, self.id).await;
 
 		let dev_root = self.root().await?;
 
@@ -690,60 +669,78 @@ impl<'a, D: Dev> Tree<'a, D> {
 	}
 
 	/// Grow record tree.
-	async fn grow(&self, new_obj_len: u64) -> Result<(), Error<D>> {
-		let obj_len = self.len().await?;
+	async fn grow(&self, new_len: u64) -> Result<(), Error<D>> {
+		// There are two cases to consider when growing a record tree:
+		//
+		// * The depth does not change.
+		//   Nothing to do then.
+		//
+		// * The depth changes.
+		//   *Move* the root record to a new record and zero out the root record entry.
+		//   The dirty new record will bubble up and eventually a new root entry is created.
+
+		let _flush_lock = FlushLock::new(&self.cache.data, self.id).await;
+
+		let cur_root = self.root().await?;
+		let cur_len = u64::from(cur_root.total_length);
+
 		debug_assert!(
-			obj_len < new_obj_len,
-			"new_obj_len is equal or smaller than cur len"
+			cur_len < new_len,
+			"new len is equal or smaller than cur len"
 		);
 
-		let root = self.root().await?;
+		let cur_depth = depth(self.max_record_size(), cur_len);
+		let new_depth = depth(self.max_record_size(), new_len);
 
-		// Increase depth.
-		let dev_depth = depth(self.max_record_size(), root.total_length.into());
-		let cur_depth = depth(self.max_record_size(), obj_len);
-		let new_depth = depth(self.max_record_size(), new_obj_len);
+		let new_root;
 
-		let mut data = self.cache.data.borrow_mut();
-		let obj = data.data.get_mut(&self.id).expect("no entry for object");
-
-		// Adjust length now so flushes that may occur during mark_dirty() work properly.
-		obj.length = new_obj_len;
-
+		// Check if the depth changed.
+		// If so we need to move the current root.
 		if cur_depth < new_depth {
 			// Resize to account for new depth
-			let mut v = mem::take(&mut obj.data).into_vec();
-			v.resize_with(new_depth.into(), Default::default);
-			obj.data = v.into();
-			drop(data);
-
-			// If the depth changed, mark the root record as dirty
-			// so a copy is effectively made when it is flushed.
-			//
-			// This is slightly inefficient if no changes are made to this record
-			// but it should not have a measurable impact.
-			if cur_depth > 0 {
-				self.cache
-					.fetch_entry(self.id, cur_depth - 1, 0, &root)
-					.await?
-					.mark_dirty()
-					.await?;
+			{
+				let mut obj = self.cache.get_object_entry_mut(self.id);
+				let mut v = mem::take(&mut obj.data).into_vec();
+				v.resize_with(new_depth.into(), Default::default);
+				obj.data = v.into();
 			}
+
+			// Add a new record on top and move the root to it.
+			{
+				let entry = self
+					.cache
+					.fetch_entry(self.id, cur_depth, 0, &Record::default())
+					.await?;
+				let mut entry = entry.get_mut().await?;
+				debug_assert!(entry.data.is_empty(), "data should be empty");
+				entry.data.extend_from_slice(
+					Record { total_length: 0.into(), references: 0.into(), ..cur_root }.as_ref(),
+				);
+			}
+
+			// New root does not refer to any existing records, so use default.
+			new_root = Record {
+				total_length: new_len.into(),
+				references: cur_root.references,
+				..Default::default()
+			};
+		} else {
+			// Just adjust length and presto
+			new_root = Record {
+				total_length: new_len.into(),
+				..cur_root
+			};
 		}
+
+		// Fixup root.
+		self.cache.set_object_root(self.id, &new_root).await?;
 
 		Ok(())
 	}
 
 	/// The length of the record tree in bytes.
 	pub async fn len(&self) -> Result<u64, Error<D>> {
-		Ok(self
-			.cache
-			.data
-			.borrow()
-			.data
-			.get(&self.id)
-			.expect("object not in cache")
-			.length)
+		Ok(self.root().await?.total_length.into())
 	}
 
 	/// Get the root record of this tree.
