@@ -308,18 +308,21 @@ impl<D: Dev> Cache<D> {
 			return Ok(()); // Don't even bother.
 		}
 
-		let mut rec = Record::default();
 		// Free allocations
 		self.get(to).await?.resize(0).await?;
+
 		// Copy
-		let l = self.read_object_table(from, rec.as_mut()).await?;
-		assert!(l > 0, "ID out of range");
-		let l = self.write_object_table(to, rec.as_ref()).await?;
-		assert!(l > 0, "ID out of range");
+		{
+			let _locks_from = FlushLock::new(&self.data, from).await;
+			let _locks_to = FlushLock::new(&self.data, to).await;
+			let rec = self.get_object_root(from).await?;
+			self.set_object_root(to, &rec).await?;
+		}
 
 		// Move object data & fix LRU entries.
 		{
 			let data = { &mut *self.data.borrow_mut() };
+
 			let obj = data.data.remove(&from).expect("object not present");
 			for level in obj.data.iter() {
 				for entry in level.values() {

@@ -50,8 +50,14 @@ impl<'a> Arbitrary<'a> for Test {
 		// Always start with a create.
 		let create_op = Op::Create { size: u.arbitrary()? };
 		let m = 1 << 11;
+
+		let dirty_cache_size = u.int_in_range(1024..=1 << 24)?;
+		let global_cache_size = u.int_in_range(dirty_cache_size..=1 << 24)?;
+
 		Ok(Self::new(
-			1 << 16, // Increase or decrease as you see fit.
+			1 << 16,
+			global_cache_size,
+			dirty_cache_size,
 			[Ok(create_op)]
 				.into_iter()
 				.chain(u.arbitrary_iter::<Op>()?)
@@ -76,9 +82,19 @@ impl<'a> Arbitrary<'a> for Test {
 }
 
 impl Test {
-	pub fn new(blocks: usize, ops: impl Into<Box<[Op]>>) -> Self {
+	pub fn new(
+		blocks: usize,
+		global_cache: usize,
+		dirty_cache: usize,
+		ops: impl Into<Box<[Op]>>,
+	) -> Self {
 		Self {
-			store: run(new_cap(MaxRecordSize::K1, blocks, 4096 << 12, 4096)),
+			store: run(new_cap(
+				MaxRecordSize::K1,
+				blocks,
+				global_cache,
+				dirty_cache,
+			)),
 			ops: ops.into(),
 			ids: Default::default(),
 			contents: Default::default(),
@@ -168,13 +184,21 @@ use Op::*;
 
 #[test]
 fn unset_allocator_lba() {
-	Test::new(512, [Create { size: 18446744073709486123 }, Remount]).run()
+	Test::new(
+		512,
+		4096,
+		4096,
+		[Create { size: 18446744073709486123 }, Remount],
+	)
+	.run()
 }
 
 #[test]
 fn allocator_save_space_leak() {
 	Test::new(
 		512,
+		4096,
+		4096,
 		[
 			Create { size: 18446744073709546299 },
 			Remount,
@@ -200,6 +224,8 @@ fn allocator_save_space_leak() {
 fn large_object_shift_overflow() {
 	Test::new(
 		512,
+		4096,
+		4096,
 		[
 			Create { size: 18446567461959458655 },
 			Write { idx: 4294967295, offset: 6917529024946200575, amount: 24415 },
@@ -212,6 +238,8 @@ fn large_object_shift_overflow() {
 fn tree_write_full_to_id_0() {
 	Test::new(
 		512,
+		4096,
+		4096,
 		[
 			Create { size: 18446587943058402107 },
 			Remount,
@@ -226,6 +254,8 @@ fn tree_write_full_to_id_0() {
 fn tree_read_offset_len_check_overflow() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 18446744073709551595 },
 			Read { idx: 2509608341, offset: 18446744073709551509, amount: 38155 },
@@ -242,6 +272,8 @@ fn cache_object_id_double_free_replace_with_self() {
 	// Manually "reduced" a bit, mainly use zeroes everywhere
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 0 },
 			Move { from_idx: 0, to_idx: 0 },
@@ -256,6 +288,8 @@ fn tree_shrink_unimplemented() {
 	// Ditto
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 6872316419617283935 },
 			Write { idx: 0, offset: 18446744073709551455, amount: 65476 },
@@ -270,6 +304,8 @@ fn tree_shrink_unimplemented() {
 fn cache_move_object_stale_lru() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 18446721160059038699 },
 			Create { size: 18442240474082180864 },
@@ -284,6 +320,8 @@ fn cache_move_object_stale_lru() {
 fn cache_get_large_shift_offset() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 6872316419617283935 },
 			Write { idx: 4294926175, offset: 18446744073709551615, amount: 24575 },
@@ -299,6 +337,8 @@ fn cache_get_large_shift_offset() {
 fn tree_shrink_divmod_record_size() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 40002 },
 			Resize { idx: 0, size: 40001 },
@@ -312,6 +352,8 @@ fn tree_shrink_divmod_record_size() {
 fn tree_grow_add_record_write_cache_size() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 217080124979886539 },
 			Write { idx: 960051513, offset: 18446742978491529529, amount: 65535 },
@@ -326,6 +368,8 @@ fn tree_grow_add_record_write_cache_size() {
 fn tree_get_target_depth_above_dev_depth() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 281474976655851 },
 			Write { idx: 4293603329, offset: 18446743984320625663, amount: 65535 },
@@ -340,6 +384,8 @@ fn tree_get_target_depth_above_dev_depth() {
 fn tree_grow_flush_concurrent() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 217080124979923771 },
 			Write { idx: 960051513, offset: 4123390705508810553, amount: 65535 },
@@ -353,6 +399,8 @@ fn tree_grow_flush_concurrent() {
 fn grow_root_double_ref() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 1 << 60 },
 			Write { idx: 0, offset: 96641949647915046, amount: u16::MAX },
@@ -367,6 +415,8 @@ fn grow_root_double_ref() {
 fn tree_shrink_destroy_depth_off_by_one() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 6223798073269682271 },
 			Write { idx: 0, offset: 5999147927136639863, amount: 65286 },
@@ -385,6 +435,8 @@ fn tree_shrink_destroy_depth_off_by_one() {
 fn tree_rewrite_shrink_from_scratch() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 6223798073269682271 },
 			Write { idx: 0, offset: 5999147927136639863, amount: 65286 },
@@ -399,6 +451,8 @@ fn tree_rewrite_shrink_from_scratch() {
 fn tree_shrink_shift_overflow() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 17870283318554001399 },
 			Resize { idx: 0, size: 17868031521458223095 },
@@ -411,6 +465,8 @@ fn tree_shrink_shift_overflow() {
 fn write_resize_double_free() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 18446744073692785643 },
 			Write { idx: 3828083684, offset: 16441494229869395940, amount: 11236 },
@@ -424,6 +480,8 @@ fn write_resize_double_free() {
 fn tree_resize_another_use_after_free() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 3544668469065756931 },
 			Write { idx: 0, offset: 3544668469065756977, amount: 38807 },
@@ -437,6 +495,8 @@ fn tree_resize_another_use_after_free() {
 fn tree_write_shrink() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 6148820866244280425 },
 			Write { idx: 0, offset: 18398705676741115903, amount: 65535 },
@@ -450,6 +510,8 @@ fn tree_write_shrink() {
 fn tree_write_resize_0_double_free() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 18390793239351867851 },
 			Write { idx: 0, offset: 18373873072982296662, amount: 65279 },
@@ -463,6 +525,8 @@ fn tree_write_resize_0_double_free() {
 fn tree_write_resize_1_double_free() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 18390793239351867851 },
 			Write { idx: 0, offset: 18373873072982296662, amount: 65279 },
@@ -476,6 +540,8 @@ fn tree_write_resize_1_double_free() {
 fn tree_write_shrink_shrink_use_after_free() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 18446462598732840961 },
 			Write { idx: 0, offset: 18390793471280101717, amount: 65535 },
@@ -490,6 +556,8 @@ fn tree_write_shrink_shrink_use_after_free() {
 fn tree_shrink_idk_man() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 18446744073709551614 },
 			Write { idx: 65501, offset: 15987206784517266935, amount: 56797 },
@@ -504,6 +572,8 @@ fn tree_shrink_idk_man() {
 fn tree_reeeeeeeeeeeeee() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 827 },
 			Resize { idx: 0, size: 16999953897322704879 },
@@ -519,6 +589,8 @@ fn tree_reeeeeeeeeeeeee() {
 fn test_small_resize() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 1003 },
 			Write { idx: 0, offset: 0, amount: 2 },
@@ -534,6 +606,8 @@ fn test_small_resize() {
 fn unflushed_empty_dirty_entries() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 1026 },
 			Write { idx: 0, offset: 1025, amount: 1 },
@@ -550,10 +624,29 @@ fn unflushed_empty_dirty_entries() {
 fn create_shrink() {
 	Test::new(
 		1 << 16,
+		4096,
+		4096,
 		[
 			Create { size: 1 << 21 },
 			Resize { idx: 0, size: (1 << 20) + 1 },
 			Remount,
+		],
+	)
+	.run()
+}
+
+#[test]
+fn god_have_mercy_upon_me() {
+	Test::new(
+		1 << 16,
+		1 << 24,
+		4096,
+		[
+			Create { size: 18446494612532378059 },
+			Create { size: 96077500568653133 },
+			Write { idx: 1, offset: 18446462784140684075, amount: 65535 },
+			Move { from_idx: 1, to_idx: 0 },
+			Resize { idx: 0, size: 0 },
 		],
 	)
 	.run()

@@ -14,6 +14,7 @@ use {
 };
 
 /// A single cached record tree.
+#[derive(Debug)]
 pub struct TreeData {
 	/// Cached records.
 	///

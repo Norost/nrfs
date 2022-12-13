@@ -120,6 +120,7 @@ impl Allocator {
 		if blocks == 0 {
 			return Some(0);
 		}
+		trace!("alloc {}", blocks);
 		for r in self.alloc_map.gaps(&(0..block_count)) {
 			if r.end - r.start >= blocks {
 				self.alloc_map.insert(r.start..r.start + blocks);
@@ -136,6 +137,7 @@ impl Allocator {
 		if blocks == 0 {
 			return;
 		}
+		trace!("free {}, len {}", start, blocks);
 		// FIXME really stupid
 		for i in start..start + blocks {
 			debug_assert!(self.alloc_map.contains(&i), "double free (lba: {})", i);
