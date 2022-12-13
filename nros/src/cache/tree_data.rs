@@ -38,48 +38,52 @@ impl TreeData {
 		}
 	}
 
-	/// Check if a flush lock is active.
-	pub fn is_flush_locked(&self) -> bool {
-		matches!(self.lock, Lock::Flush)
+	/// Check if a read & write lock is active.
+	pub fn is_read_write_locked(&self) -> bool {
+		matches!(self.lock, Lock::ReadWrite { .. })
+	}
+
+	/// Check if a resize lock is active.
+	pub fn is_resize_locked(&self) -> bool {
+		matches!(self.lock, Lock::Resize)
 	}
 }
 
+/// Lock to indicate certain operations are in progress.
+///
+/// This may prevent certain other operations from occuring.
 #[derive(Debug)]
 enum Lock {
 	/// No lock is active.
 	None,
-	/// Read lock, with amount of readers.
-	///
-	/// Prevents writes.
-	Read { readers: u32 },
-	/// Pending write lock, with amount of readers.
-	///
-	/// Used to signal that a writer is waiting.
-	/// Prevents reads & writes.
-	PendingWrite { readers: u32 },
-	/// Prevent reads and writes.
-	Write,
-	/// Prevent flushing.
-	Flush,
+	/// A number of reads or writes are in progress.
+	ReadWrite { users: u32 },
+	/// A resize is in progress.
+	Resize,
 }
 
-pub struct FlushLock<'a> {
+/// Read & write lock.
+pub struct ReadWriteLock<'a> {
 	data: &'a RefCell<CacheData>,
 	id: u64,
 }
 
-impl<'a> FlushLock<'a> {
-	// Attempt to acquire a flush lock
+impl<'a> ReadWriteLock<'a> {
+	/// Attempt to acquire a read & write lock.
 	pub(super) fn new(
 		data: &'a RefCell<CacheData>,
 		id: u64,
-	) -> impl Future<Output = FlushLock<'a>> + 'a {
+	) -> impl Future<Output = ReadWriteLock<'a>> + 'a {
 		future::poll_fn(move |cx| {
 			let mut d = data.borrow_mut();
 			let tree = d.data.get_mut(&id).expect("cache entry by id not present");
-			match &tree.lock {
-				Lock::None => {
-					tree.lock = Lock::Flush;
+			match &mut tree.lock {
+				lock @ Lock::None => {
+					*lock = Lock::ReadWrite { users: 1 };
+					Poll::Ready(Self { data, id })
+				}
+				Lock::ReadWrite { users } => {
+					*users += 1;
 					Poll::Ready(Self { data, id })
 				}
 				_ => {
@@ -91,7 +95,56 @@ impl<'a> FlushLock<'a> {
 	}
 }
 
-impl Drop for FlushLock<'_> {
+/// Release the lock.
+impl Drop for ReadWriteLock<'_> {
+	fn drop(&mut self) {
+		let mut data = self.data.borrow_mut();
+		let tree = data
+			.data
+			.get_mut(&self.id)
+			.expect("cache entry by id not present");
+		match &mut tree.lock {
+			Lock::ReadWrite { users } => *users -= 1,
+			_ => unreachable!(),
+		}
+		// Take so we free the allocated memory too.
+		mem::take(&mut tree.wakers)
+			.into_iter()
+			.for_each(|w| w.wake());
+	}
+}
+
+/// Resize lock.
+pub struct ResizeLock<'a> {
+	data: &'a RefCell<CacheData>,
+	id: u64,
+}
+
+impl<'a> ResizeLock<'a> {
+	/// Attempt to acquire a read & write lock.
+	pub(super) fn new(
+		data: &'a RefCell<CacheData>,
+		id: u64,
+	) -> impl Future<Output = ResizeLock<'a>> + 'a {
+		future::poll_fn(move |cx| {
+			let mut d = data.borrow_mut();
+			let tree = d.data.get_mut(&id).expect("cache entry by id not present");
+			match &mut tree.lock {
+				lock @ Lock::None => {
+					*lock = Lock::Resize;
+					Poll::Ready(Self { data, id })
+				}
+				_ => {
+					tree.wakers.push(cx.waker().clone());
+					Poll::Pending
+				}
+			}
+		})
+	}
+}
+
+/// Release the lock.
+impl Drop for ResizeLock<'_> {
 	fn drop(&mut self) {
 		let mut data = self.data.borrow_mut();
 		let tree = data

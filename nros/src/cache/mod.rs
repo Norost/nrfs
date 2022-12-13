@@ -9,7 +9,7 @@ use {
 	core::{
 		cell::{Ref, RefCell, RefMut},
 		fmt,
-		future::{self, Future},
+		future,
 		mem,
 		ops::{Deref, DerefMut},
 		task::{Poll, Waker},
@@ -17,7 +17,7 @@ use {
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
 	std::collections::hash_map,
-	tree_data::{FlushLock, FmtTreeData, TreeData},
+	tree_data::{ReadWriteLock, ResizeLock, FmtTreeData, TreeData},
 };
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
@@ -311,12 +311,17 @@ impl<D: Dev> Cache<D> {
 		// Free allocations
 		self.get(to).await?.resize(0).await?;
 
-		// Copy
+		// NOTE There is a brief period where the lock is not acquired.
+		// However, as long as the API is singlethreaded this should not be an issue
+		// as there is no await point in between the period the lock is released.
+
+		// Move
 		{
-			let _locks_from = FlushLock::new(&self.data, from).await;
-			let _locks_to = FlushLock::new(&self.data, to).await;
+			let _locks_from = ResizeLock::new(&self.data, from).await;
+			let _locks_to = ResizeLock::new(&self.data, to).await;
 			let rec = self.get_object_root(from).await?;
 			self.set_object_root(to, &rec).await?;
+			self.set_object_root(from, &Default::default()).await?;
 		}
 
 		// Move object data & fix LRU entries.
@@ -344,10 +349,6 @@ impl<D: Dev> Cache<D> {
 			}
 			data.data.insert(to, obj);
 		}
-
-		// Destroy original object.
-		self.write_object_table(from, Record::default().as_ref())
-			.await?;
 
 		self.dealloc_id(from);
 		Ok(())
@@ -626,11 +627,12 @@ impl<D: Dev> Cache<D> {
 				.last()
 				.expect("no nodes despite non-zero write cache size");
 
+			// Avoid flushing during a resize, as it can mess up the reference to the root record.
 			if data
 				.data
 				.get(&id)
 				.expect("invalid object")
-				.is_flush_locked()
+				.is_resize_locked()
 			{
 				break; // TODO continue with another record or object.
 			}
@@ -670,7 +672,7 @@ impl<D: Dev> Cache<D> {
 				.data
 				.get(&id)
 				.expect("invalid object")
-				.is_flush_locked()
+				.is_resize_locked()
 			{
 				break; // TODO continue with another record or object.
 			}

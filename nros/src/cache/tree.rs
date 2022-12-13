@@ -1,5 +1,5 @@
 use {
-	super::{Cache, CacheRef, FlushLock, TreeData, OBJECT_LIST_ID},
+	super::{Cache, CacheRef, ReadWriteLock, ResizeLock, TreeData, OBJECT_LIST_ID},
 	crate::{util::get_record, Dev, Error, MaxRecordSize, Record},
 	core::{future::Future, mem, ops::RangeInclusive, pin::Pin},
 	std::collections::hash_map,
@@ -90,6 +90,9 @@ impl<'a, D: Dev> Tree<'a, D> {
 			offset,
 			data.len()
 		);
+
+		let _lock = ReadWriteLock::new(&self.cache.data, self.id);
+
 		let len = self.len().await?;
 
 		// Ensure all data fits.
@@ -185,6 +188,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 	pub async fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
 		trace!("read id {}, offset {}, len {}", self.id, offset, buf.len());
 		let len = self.len().await?;
+
+		let _lock = ReadWriteLock::new(&self.cache.data, self.id);
 
 		// Ensure all data fits in buffer.
 		let buf = if len <= offset {
@@ -391,7 +396,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 		let rec_size_p2 = self.max_record_size().to_raw();
 
 		// Prevent flushing as we'll be operating directly on the cache data of this tree.
-		let _flush_lock = FlushLock::new(&self.cache.data, self.id).await;
+		let _lock = ResizeLock::new(&self.cache.data, self.id).await;
 
 		let cur_len = u64::from(cur_root.total_length);
 
@@ -666,7 +671,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 		//   *Move* the root record to a new record and zero out the root record entry.
 		//   The dirty new record will bubble up and eventually a new root entry is created.
 
-		let _flush_lock = FlushLock::new(&self.cache.data, self.id).await;
+		let _lock = ResizeLock::new(&self.cache.data, self.id).await;
 
 		let cur_len = u64::from(cur_root.total_length);
 
