@@ -357,28 +357,45 @@ impl<D: Dev> Cache<D> {
 	/// Increase the reference count of an object.
 	///
 	/// This may fail if the reference count is already [`u16::MAX`].
-	pub async fn increase_refcount(&self, id: u64) -> Result<(), Error<D>> {
-		let mut rec = Record::default();
-		self.read_object_table(id, rec.as_mut()).await?;
-		if rec.references == u16::MAX {
-			todo!("too many refs");
+	/// On failure, the returned value is `false`, otherwise `true`.
+	pub async fn increase_refcount(&self, id: u64) -> Result<bool, Error<D>> {
+		// Ensure the root doesn't get modified while we're working with it.
+		let _lock = ResizeLock::new(&self.data, id).await;
+
+		let mut root = self.get_object_root(id).await?;
+		assert!(root.references != 0, "invalid object");
+		if root.references == u16::MAX {
+			return Ok(false);
 		}
-		rec.references += 1;
-		self.write_object_table(id, rec.as_ref()).await?;
-		Ok(())
+		root.references += 1;
+		self.set_object_root(id, &root).await?;
+
+		Ok(true)
 	}
 
 	/// Decrease the reference count of an object.
 	///
 	/// If the reference count reaches 0 the object is destroyed.
+	///
+	/// # Panics
+	///
+	/// If the object isn't valid, i.e. reference count is already 0.
 	pub async fn decrease_refcount(&self, id: u64) -> Result<(), Error<D>> {
-		let mut rec = Record::default();
-		self.read_object_table(id, rec.as_mut()).await?;
-		if rec.references == 0 {
-			todo!("invalid object");
+		// Ensure the root doesn't get modified while we're working with it.
+		let lock = ResizeLock::new(&self.data, id).await;
+
+		let mut root = self.get_object_root(id).await?;
+		assert!(root.references != 0, "invalid object");
+		root.references -= 1;
+		self.set_object_root(id, &root).await?;
+
+		drop(lock);
+
+		if root.references == 0 {
+			// Free space.
+			self.get(id).await?.resize(0).await?;
 		}
-		rec.references -= 1;
-		self.write_object_table(id, rec.as_ref()).await?;
+
 		Ok(())
 	}
 
@@ -679,7 +696,6 @@ impl<D: Dev> Cache<D> {
 
 			if data.locked_records.contains_key(&(id, depth, offset)) {
 				break; // TODO meh
-				todo!("don't flush locked records");
 			}
 
 			drop(data);
@@ -810,15 +826,6 @@ impl<'a, D: Dev> CacheRef<'a, D> {
 	/// If something is already borrowing the underlying [`TreeData`].
 	fn get(&self) -> Ref<Entry> {
 		self.cache.get_entry(self.id, self.depth, self.offset)
-	}
-
-	/// Explicitly mark this entry as dirty.
-	///
-	/// # Panics
-	///
-	/// If something is already borrowing the underlying [`TreeData`].
-	async fn mark_dirty(&self) -> Result<(), Error<D>> {
-		self.get_mut().await.map(|_| ())
 	}
 
 	/// Destroy the record associated with this entry.

@@ -1,7 +1,7 @@
 use {
 	crate::{Compression, MaxRecordSize, Record},
 	core::fmt,
-	endian::{u16le, u32le, u64le},
+	endian::u64le,
 };
 
 #[repr(C, align(64))]

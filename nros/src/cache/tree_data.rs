@@ -1,5 +1,3 @@
-use crate::Tree;
-
 use {
 	super::{CacheData, Entry, OBJECT_LIST_ID},
 	crate::Record,
@@ -36,11 +34,6 @@ impl TreeData {
 			lock: Lock::None,
 			wakers: Default::default(),
 		}
-	}
-
-	/// Check if a read & write lock is active.
-	pub fn is_read_write_locked(&self) -> bool {
-		matches!(self.lock, Lock::ReadWrite { .. })
 	}
 
 	/// Check if a resize lock is active.

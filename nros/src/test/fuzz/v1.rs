@@ -49,7 +49,6 @@ impl<'a> Arbitrary<'a> for Test {
 	fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
 		// Always start with a create.
 		let create_op = Op::Create { size: u.arbitrary()? };
-		let m = 1 << 11;
 
 		let dirty_cache_size = u.int_in_range(1024..=1 << 24)?;
 		let global_cache_size = u.int_in_range(dirty_cache_size..=1 << 24)?;

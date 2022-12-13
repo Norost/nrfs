@@ -1,11 +1,10 @@
 use {
 	super::{Cache, CacheRef, ReadWriteLock, ResizeLock, TreeData, OBJECT_LIST_ID},
 	crate::{util::get_record, Dev, Error, MaxRecordSize, Record},
-	core::{future::Future, mem, ops::RangeInclusive, pin::Pin},
+	core::{mem, ops::RangeInclusive},
 	std::collections::hash_map,
 };
 
-const RECORD_SIZE: u64 = mem::size_of::<Record>() as _;
 const RECORD_SIZE_P2: u8 = mem::size_of::<Record>().ilog2() as _;
 
 /// Implementation of a record tree.

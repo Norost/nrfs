@@ -86,11 +86,6 @@ impl<V> LruList<V> {
 		(!self.nodes.is_empty()).then(|| &self.nodes.get(self.tail).unwrap().value)
 	}
 
-	/// Get a value by node index.
-	pub fn get(&self, index: Idx) -> Option<&V> {
-		self.nodes.get(index).map(|node| &node.value)
-	}
-
 	/// Get a mutable reference to a value by node index.
 	pub fn get_mut(&mut self, index: Idx) -> Option<&mut V> {
 		self.nodes.get_mut(index).map(|node| &mut node.value)
