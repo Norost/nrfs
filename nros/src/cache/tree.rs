@@ -59,6 +59,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 					data: (0..depth(cache.max_record_size(), length))
 						.map(|_| Default::default())
 						.collect(),
+					lock: Default::default(),
+					wakers: Default::default(),
 				},
 			);
 		}
@@ -83,6 +85,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 					data: (0..depth(cache.max_record_size(), length))
 						.map(|_| Default::default())
 						.collect(),
+					lock: Default::default(),
+					wakers: Default::default(),
 				});
 			}
 		}
@@ -334,8 +338,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 			// Store new record
 			entry.data.resize(min_len, 0);
-			entry.data[index..index + mem::size_of::<Record>()]
-				.copy_from_slice(record.as_ref());
+			entry.data[index..index + mem::size_of::<Record>()].copy_from_slice(record.as_ref());
 			trim_zeros_end(&mut entry.data);
 
 			let old_record2 = get_record(&entry.data, index);
@@ -393,17 +396,19 @@ impl<'a, D: Dev> Tree<'a, D> {
 		//   For the leaf node, just resize.
 
 		let cur_len = self.len().await?;
-		let dev_root = self.root().await?;
 
 		let rec_size_p2 = self.max_record_size().to_raw();
+
+		// Prevent flushing as we'll be operating directly on the cache data of this tree.
+		let _flush_lock = super::FlushLock::new(&self.cache.data, self.id).await;
+
+		let dev_root = self.root().await?;
 
 		let cur_depth = depth(self.max_record_size(), cur_len);
 		let new_depth = depth(self.max_record_size(), new_len);
 		let dev_depth = depth(self.max_record_size(), dev_root.total_length.into());
 
 		debug_assert!(cur_len > new_len, "new_len is equal or larger than cur len");
-
-		// Set cached length.
 
 		// Special-case 0 so we can avoid some annoying & hard-to-read checks below.
 		//
@@ -426,6 +431,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				destroy(self, dev_depth - 1, 0, &dev_root).await?;
 			}
 
+			// Destroy parents
 			for d in (1..cur_depth).rev() {
 				let entries =
 					mem::take(&mut self.cache.get_object_entry_mut(self.id).data[usize::from(d)]);
@@ -440,6 +446,26 @@ impl<'a, D: Dev> Tree<'a, D> {
 						)
 						.await?;
 					}
+					self.cache
+						.data
+						.borrow_mut()
+						.lrus
+						.adjust_cache_removed_entry(&entry);
+				}
+			}
+
+			// Destroy leaves
+			{
+				let mut data = self.cache.data.borrow_mut();
+				let entries = mem::take(
+					&mut data
+						.data
+						.get_mut(&self.id)
+						.expect("cache entry by id not present")
+						.data[0],
+				);
+				for (_, entry) in entries {
+					data.lrus.adjust_cache_removed_entry(&entry);
 				}
 			}
 
@@ -510,6 +536,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			}
 
 			if depth > 0 && record.length > 0 {
+				dbg!(depth, offset, record);
 				f(tree, depth, offset, record).await?
 			}
 
@@ -545,18 +572,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// The entries haven't been flushed nor do they have any on-dev allocations, so just
 			// remove them from LRUs.
 			for entry in entries.values() {
-				data.lrus.global.lru.remove(entry.global_index);
-				data.lrus.global.cache_size -= entry.data.len();
-				// The entry *must* be dirty as otherwise it either:
-				// - wouldn't exist
-				// - have a parent node, in which case it was already destroyed in a previous
-				//   iteration.
-				// ... except if d == cur_depth. Meh
-				if let Some(idx) = entry.write_index {
-					//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
-					data.lrus.dirty.lru.remove(idx);
-					data.lrus.dirty.cache_size -= entry.data.len();
-				}
+				data.lrus.adjust_cache_removed_entry(&entry);
 			}
 
 			// Destroy all subtrees.
@@ -639,7 +655,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 			}
 
 			// Trim record at boundary
-			let mut old_rec_len @ mut new_rec_len = 0;
 			if d > 0 {
 				let offt = new_len >> rec_size_p2 + (rec_size_p2 - RECORD_SIZE_P2) * (d - 1);
 				// Round up to a multiple of record size.
@@ -655,8 +670,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 						destroy(self, d - 1, offset + u64::try_from(i).unwrap(), &rec).await?;
 					}
 					let mut entry = entry.get_mut().await?;
-					old_rec_len = entry.data.len();
-					new_rec_len = entry.data.len().min(index);
+					let new_rec_len = entry.data.len().min(index);
 					entry.data.resize(new_rec_len, 0);
 				}
 			} else {
@@ -665,8 +679,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				if index > 0 {
 					let entry = self.get(d, offset_bound).await?;
 					let mut entry = entry.get_mut().await?;
-					old_rec_len = entry.data.len();
-					new_rec_len = entry.data.len().min(index);
+					let new_rec_len = entry.data.len().min(index);
 					entry.data.resize(new_rec_len, 0);
 				}
 			}
@@ -743,7 +756,9 @@ impl<'a, D: Dev> Tree<'a, D> {
 			Ok(self.cache.object_list())
 		} else {
 			let mut record = Record::default();
-			self.cache.read_object_table(self.id, record.as_mut()).await?;
+			self.cache
+				.read_object_table(self.id, record.as_mut())
+				.await?;
 			Ok(record)
 		}
 	}

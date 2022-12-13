@@ -280,13 +280,29 @@ fn grow_grow() {
 }
 
 #[test]
-fn grow_write_shrink_many() {
+fn grow_write_shrink_flush_many() {
 	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
 		let obj = s.create().await.unwrap();
 
-		for i in 0..10 {
+		for _ in 0..200 {
+			obj.resize(1 << 60).await.unwrap();
+			obj.write(0, &[1]).await.unwrap();
+			obj.resize(0).await.unwrap();
+			clear(&s).await;
+		}
+	})
+}
+
+#[test]
+fn grow_write_flush_shrink_flush_many() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+
+		for _ in 0..200 {
 			obj.resize(1 << 60).await.unwrap();
 			obj.write(0, &[1]).await.unwrap();
 			clear(&s).await;

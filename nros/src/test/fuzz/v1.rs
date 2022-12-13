@@ -422,3 +422,43 @@ fn tree_write_shrink() {
 	)
 	.run()
 }
+
+#[test]
+fn tree_write_resize_0_double_free() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 18390793239351867851 },
+			Write { idx: 0, offset: 18373873072982296662, amount: 65279 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_write_resize_1_double_free() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 18390793239351867851 },
+			Write { idx: 0, offset: 18373873072982296662, amount: 65279 },
+			Resize { idx: 0, size: 1 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_write_shrink_double_free() {
+	Test::new(
+		1 << 16,
+		[
+			Create { size: 18446462598732840961 },
+			Write { idx: 0, offset: 18390793471280101717, amount: 65535 },
+			Resize { idx: 0, size: 18388299555398483947 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}

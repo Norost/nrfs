@@ -7,9 +7,11 @@ use {
 	crate::{BlockSize, Dev, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{Ref, RefCell, RefMut},
-		fmt, future, mem,
-		task::{Poll, Waker},
+		fmt,
+		future::{self, Future},
+		mem,
 		ops::{Deref, DerefMut},
+		task::{Poll, Waker},
 	},
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
@@ -30,6 +32,72 @@ struct TreeData {
 	/// The index in the array is correlated with depth.
 	/// The key is correlated with offset.
 	data: Box<[FxHashMap<u64, Entry>]>,
+	/// Lock on the data of this tree.
+	///
+	/// This is to prevent race conditions with concurrent writes, flushing ...
+	lock: TreeDataLock,
+	/// Wakers for tasks attempting to operate on this tree.
+	wakers: Vec<Waker>,
+}
+
+#[derive(Debug, Default)]
+enum TreeDataLock {
+	/// No lock is active.
+	#[default]
+	None,
+	/// Read lock, with amount of readers.
+	///
+	/// Prevents writes.
+	Read { readers: u32 },
+	/// Pending write lock, with amount of readers.
+	///
+	/// Used to signal that a writer is waiting.
+	/// Prevents reads & writes.
+	PendingWrite { readers: u32 },
+	/// Prevent reads and writes.
+	Write,
+	/// Prevent flushing.
+	Flush,
+}
+
+struct FlushLock<'a> {
+	data: &'a RefCell<CacheData>,
+	id: u64,
+}
+
+impl<'a> FlushLock<'a> {
+	// Attempt to acquire a flush lock
+	fn new(data: &'a RefCell<CacheData>, id: u64) -> impl Future<Output = FlushLock<'a>> + 'a {
+		future::poll_fn(move |cx| {
+			let mut d = data.borrow_mut();
+			let tree = d.data.get_mut(&id).expect("cache entry by id not present");
+			match &tree.lock {
+				TreeDataLock::None => {
+					tree.lock = TreeDataLock::Flush;
+					Poll::Ready(Self { data, id })
+				}
+				_ => {
+					tree.wakers.push(cx.waker().clone());
+					Poll::Pending
+				}
+			}
+		})
+	}
+}
+
+impl Drop for FlushLock<'_> {
+	fn drop(&mut self) {
+		let mut data = self.data.borrow_mut();
+		let tree = data
+			.data
+			.get_mut(&self.id)
+			.expect("cache entry by id not present");
+		tree.lock = TreeDataLock::None;
+		// Take so we free the allocated memory too.
+		mem::take(&mut tree.wakers)
+			.into_iter()
+			.for_each(|w| w.wake());
+	}
 }
 
 /// Formatter for [`TreeData`].
@@ -97,6 +165,8 @@ impl fmt::Debug for FmtTreeData<'_> {
 		f.debug_struct(stringify!(TreeData))
 			.field("length", &self.data.length)
 			.field("data", &FmtData(self))
+			.field("lock", &self.data.lock)
+			.field("wakers", &self.data.wakers)
 			.finish()
 	}
 }
@@ -160,6 +230,24 @@ struct Lrus {
 	/// This is not used for eviction but ensures an excessive amount of writes does not hold up
 	/// reads.
 	dirty: Lru,
+}
+
+impl Lrus {
+	/// Adjust cache usage based on manually removed entry.
+	fn adjust_cache_removed_entry(&mut self, entry: &Entry) {
+		self.global.lru.remove(entry.global_index);
+		self.global.cache_size -= entry.data.len();
+		// The entry *must* be dirty as otherwise it either:
+		// - wouldn't exist
+		// - have a parent node, in which case it was already destroyed in a previous
+		//   iteration.
+		// ... except if d == cur_depth. Meh
+		if let Some(idx) = entry.write_index {
+			//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
+			self.dirty.lru.remove(idx);
+			self.dirty.cache_size -= entry.data.len();
+		}
+	}
 }
 
 /// Cache LRU queue, with tracking per byte used.
@@ -359,12 +447,16 @@ impl<D: Dev> Cache<D> {
 			let obj = data.data.remove(&from).expect("object not present");
 			for level in obj.data.iter() {
 				for entry in level.values() {
-					data.lrus.global.lru
+					data.lrus
+						.global
+						.lru
 						.get_mut(entry.global_index)
 						.expect("invalid global LRU index")
 						.0 = to;
 					if let Some(idx) = entry.write_index {
-						data.lrus.dirty.lru
+						data.lrus
+							.dirty
+							.lru
 							.get_mut(idx)
 							.expect("invalid write LRU index")
 							.0 = to;
@@ -603,8 +695,8 @@ impl<D: Dev> Cache<D> {
 				.get_mut(&id)
 				.expect("cache entry by id does not exist")
 				.data[usize::from(depth)]
-				.get_mut(&offset)
-				.expect("cache entry by offset does not exist");
+			.get_mut(&offset)
+			.expect("cache entry by offset does not exist");
 			(entry, &mut data.lrus)
 		});
 
@@ -648,10 +740,19 @@ impl<D: Dev> Cache<D> {
 
 		while data.lrus.dirty.cache_size > data.lrus.dirty.cache_max {
 			// Remove last written to entry.
-			let (id, depth, offset) = data
-				.lrus.dirty.lru
-				.remove_last()
+			let &(id, depth, offset) = data
+				.lrus
+				.dirty
+				.lru
+				.last()
 				.expect("no nodes despite non-zero write cache size");
+
+			if let TreeDataLock::Flush = data.data.get(&id).expect("invalid object").lock {
+				break; // TODO continue with another record or object.
+			}
+
+			data.lrus.dirty.lru.remove_last().unwrap();
+
 			drop(data);
 			let mut entry = self.get_entry_mut_no_mark(id, depth, offset);
 
@@ -676,9 +777,14 @@ impl<D: Dev> Cache<D> {
 			// Remove last written to entry.
 			let &(id, depth, offset) = data
 				.lrus
-				.global.lru
+				.global
+				.lru
 				.last()
 				.expect("no nodes despite non-zero write cache size");
+
+			if let TreeDataLock::Flush = data.data.get(&id).expect("invalid object").lock {
+				break; // TODO continue with another record or object.
+			}
 
 			if data.locked_records.contains_key(&(id, depth, offset)) {
 				break; // TODO meh
@@ -727,7 +833,10 @@ impl<D: Dev> Cache<D> {
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();
-		CacheStatus { global_usage: data.lrus.global.cache_size, dirty_usage: data.lrus.dirty.cache_size }
+		CacheStatus {
+			global_usage: data.lrus.global.cache_size,
+			dirty_usage: data.lrus.dirty.cache_size,
+		}
 	}
 
 	/// Check if cache size matches real usage
@@ -928,7 +1037,11 @@ impl Drop for EntryRefMut<'_> {
 			self.lrus.dirty.cache_size += self.entry.data.len();
 			self.lrus.dirty.cache_size -= self.original_len;
 		} else {
-			let idx = self.lrus.dirty.lru.insert((self.id, self.depth, self.offset));
+			let idx = self
+				.lrus
+				.dirty
+				.lru
+				.insert((self.id, self.depth, self.offset));
 			self.lrus.dirty.cache_size += self.entry.data.len();
 			self.entry.write_index = Some(idx);
 		}
