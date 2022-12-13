@@ -767,11 +767,10 @@ impl<'a, D: Dev> Tree<'a, D> {
 		// Find the first parent or leaf entry that is present starting from a leaf
 		// and work back downwards.
 
-		let cache_depth = depth(self.max_record_size(), len);
-		let dev_depth = depth(self.max_record_size(), root.total_length.into());
+		let obj_depth = depth(self.max_record_size(), len);
 
 		debug_assert!(
-			target_depth < cache_depth,
+			target_depth < obj_depth,
 			"target depth exceeds object depth"
 		);
 
@@ -780,7 +779,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 		// Go up
 		// TODO has_entry doesn't check if an entry is already being fetched.
-		while cur_depth < cache_depth
+		while cur_depth < obj_depth
 			&& !self
 				.cache
 				.has_entry(self.id, cur_depth, offset >> depth_offset_shift(cur_depth))
@@ -790,8 +789,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 		if cur_depth == target_depth {
 			// The entry we need is already present
-			// *or* the entry is newly created from a grow and zeroed.
-			// TODO verify the latter statement.
 			return self
 				.cache
 				.fetch_entry(self.id, cur_depth, offset, &Record::default())
@@ -801,34 +798,12 @@ impl<'a, D: Dev> Tree<'a, D> {
 		// Get first record to fetch.
 		let mut record;
 		// Check if we found any cached record at all.
-		if cur_depth == cache_depth {
-			// Check if the record we're trying to fetch is within the newly added region from
-			// growing the tree or within the old region.
-			//
-			// If is in the new region, add a zero record and return immediately.
-			//
-			// If not, update cur_depth to match the old depth and fetch as normal.
-
-			let shift = rec_size + (rec_size - RECORD_SIZE_P2) * target_depth;
-			// The shift may be 64 or larger if we're close to the root.
-			// With large offsets this may overflow, so use u128.
-			let offset_byte = u128::from(offset) << shift;
-
-			if offset_byte >= u128::from(u64::from(root.total_length)) || target_depth >= dev_depth
-			{
-				// Just insert a zeroed record and return that.
-				return self
-					.cache
-					.fetch_entry(self.id, target_depth, offset, &Record::default())
-					.await;
-			}
-
-			// Start iterating on on-dev records.
+		if cur_depth == obj_depth {
+			// Start from the root.
 			record = root;
-			cur_depth = dev_depth;
-
-			cur_depth -= 1;
+			cur_depth = obj_depth - 1;
 		} else {
+			// Start from a parent record.
 			let offt = offset >> depth_offset_shift(cur_depth);
 			let data = self.cache.get_entry(self.id, cur_depth, offt);
 
