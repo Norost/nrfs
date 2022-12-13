@@ -25,9 +25,8 @@ async fn new_cap(
 		BlockSize::K1,
 		max_record_size,
 		Compression::None,
-		// Don't evict cache for tests with small amounts of data, effectively.
-		4 * 1024,
-		4 * 1024,
+		read_cache_size,
+		write_cache_size,
 	)
 	.await
 	.unwrap()
@@ -38,12 +37,11 @@ async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev> {
 }
 
 /// Create new object store and poll future ad infinitum.
-fn run<F, R, Fut>(f: F) -> R
+fn run<F, R>(f: F) -> R
 where
-	F: FnOnce() -> Fut,
-	Fut: Future<Output = R>,
+	F: Future<Output = R>,
 {
-	let mut fut = core::pin::pin!(f());
+	let mut fut = core::pin::pin!(f);
 	let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
 	loop {
 		if let Poll::Ready(r) = fut.as_mut().poll(&mut cx) {
@@ -54,14 +52,14 @@ where
 
 #[test]
 fn create_fs() {
-	run(|| async {
+	run(async {
 		new(MaxRecordSize::K1).await;
 	})
 }
 
 #[test]
 fn resize_object() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1024).await.unwrap();
@@ -73,7 +71,7 @@ fn resize_object() {
 
 #[test]
 fn write() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
@@ -83,7 +81,7 @@ fn write() {
 
 #[test]
 fn finish_transaction() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
@@ -94,7 +92,7 @@ fn finish_transaction() {
 
 #[test]
 fn read_before_tx_offset_0() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 
@@ -112,7 +110,7 @@ fn read_before_tx_offset_0() {
 
 #[test]
 fn read_before_tx_offset_1000() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 
@@ -133,7 +131,7 @@ fn read_before_tx_offset_1000() {
 
 #[test]
 fn read_before_tx_offset_1023_short() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
 		let obj = s.create().await.unwrap();
@@ -148,7 +146,7 @@ fn read_before_tx_offset_1023_short() {
 
 #[test]
 fn read_before_tx_offset_10p6() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 
@@ -169,7 +167,7 @@ fn read_before_tx_offset_10p6() {
 
 #[test]
 fn read_before_tx_offset_1000_short() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
@@ -182,7 +180,7 @@ fn read_before_tx_offset_1000_short() {
 
 #[test]
 fn read_after_tx() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(2000).await.unwrap();
@@ -198,7 +196,7 @@ fn read_after_tx() {
 
 #[test]
 fn read_before_tx_1024() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1024).await.unwrap();
@@ -211,7 +209,7 @@ fn read_before_tx_1024() {
 
 #[test]
 fn replace_object() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
 		let obj_1 = s.create().await.unwrap();

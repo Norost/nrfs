@@ -46,7 +46,13 @@ where
 		let lba = u64::from(record.lba);
 		let len = record.length.into();
 
-		let count = self.calc_block_count(len) << self.block_size();
+		let blocks = self.calc_block_count(len);
+		#[cfg(debug_assertions)]
+		self.allocator
+			.borrow()
+			.assert_alloc(lba, blocks.try_into().unwrap());
+
+		let count = blocks << self.block_size();
 		let data = self
 			.devices
 			.read(lba.try_into().unwrap(), count, Default::default())

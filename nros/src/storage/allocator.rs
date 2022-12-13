@@ -16,11 +16,11 @@ struct Entry {
 
 raw!(Entry);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Allocator {
 	/// Map of *allocated* blocks.
 	///
-	/// These can be freely used.
+	/// Gaps can be freely used.
 	alloc_map: RangeSet<u64>,
 	/// Map of blocks previously allocated but now freed.
 	///
@@ -35,6 +35,18 @@ pub struct Allocator {
 	///
 	/// Should be freed on log rewrite.
 	stack: Vec<Record>,
+}
+
+impl Default for Allocator {
+	fn default() -> Self {
+		Self {
+			// Pretend everything is allocated for `load` and `assert_alloc`
+			alloc_map: [(0..u64::MAX)].into_iter().collect(),
+			free_map: Default::default(),
+			dirty_map: Default::default(),
+			stack: Default::default(),
+		}
+	}
 }
 
 impl Allocator {
@@ -59,8 +71,10 @@ impl Allocator {
 			let end = usize::try_from(size).unwrap();
 
 			// Add record itself
-			alloc_map.insert(lba..lba + size);
-			ignore.insert(lba..lba + size);
+			let record_blocks =
+				u64::try_from(store.calc_block_count(record.length.into())).unwrap();
+			alloc_map.insert(lba..lba + record_blocks);
+			ignore.insert(lba..lba + record_blocks);
 
 			// Add entries
 			let entry_mask = mem::size_of::<Entry>() - 1;
@@ -106,6 +120,7 @@ impl Allocator {
 		if blocks == 0 {
 			return Some(0);
 		}
+		trace!("alloc {}", blocks);
 		for r in self.alloc_map.gaps(&(0..block_count)) {
 			if r.end - r.start >= blocks {
 				self.alloc_map.insert(r.start..r.start + blocks);
@@ -122,14 +137,29 @@ impl Allocator {
 		if blocks == 0 {
 			return;
 		}
+		trace!("free {}, len {}", start, blocks);
 		// FIXME really stupid
 		for i in start..start + blocks {
-			if self.dirty_map.contains(&i) {
+			debug_assert!(self.alloc_map.contains(&i), "double free (lba: {})", i);
+			debug_assert!(!self.free_map.contains(&i), "double free (lba: {})", i);
+			if !cfg!(feature = "never-overwrite-in-transaction") && self.dirty_map.contains(&i) {
 				self.dirty_map.remove(i..i + 1);
 				self.alloc_map.remove(i..i + 1);
 			} else {
 				self.free_map.insert(i..i + 1);
 			}
+		}
+	}
+
+	/// Ensure all blocks in a range are allocated.
+	///
+	/// Used to detect use-after-frees.
+	#[cfg(debug_assertions)]
+	pub fn assert_alloc(&self, start: u64, blocks: u64) {
+		// FIXME really stupid
+		for i in start..start + blocks {
+			debug_assert!(self.alloc_map.contains(&i), "use-after-free (lba: {})", i);
+			debug_assert!(!self.free_map.contains(&i), "use-after-free (lba: {})", i);
 		}
 	}
 

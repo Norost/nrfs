@@ -4,7 +4,7 @@ use super::*;
 /// And also whether loading works.
 #[test]
 fn write_remount_read() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1).await.unwrap();
@@ -27,7 +27,7 @@ fn write_remount_read() {
 /// And also whether loading works.
 #[test]
 fn write_remount_write_read() {
-	run(|| async {
+	run(async {
 		let s = new(MaxRecordSize::K1).await;
 		let obj = s.create().await.unwrap();
 		obj.resize(1).await.unwrap();

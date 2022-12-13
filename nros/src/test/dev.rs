@@ -9,7 +9,7 @@ use {
 /// Write to & read from a [`MemDev`].
 #[test]
 fn memdev_read_write() {
-	run(|| async {
+	run(async {
 		let dev = MemDev::new(16, BlockSize::B512);
 
 		let mut buf1k = dev.allocator().alloc(2 * 512).await.unwrap();
@@ -35,7 +35,7 @@ fn memdev_read_write() {
 /// Create [`DevSet`] with one device.
 #[test]
 fn devset_1_create() {
-	run(|| async {
+	run(async {
 		let dev = MemDev::new(16, BlockSize::B512);
 		let _ = DevSet::new(
 			[[dev]],
@@ -51,7 +51,7 @@ fn devset_1_create() {
 /// Write to & read from a [`DevSet`] with one device.
 #[test]
 fn devset_1_read_write() {
-	run(|| async {
+	run(async {
 		let dev = MemDev::new(16, BlockSize::B512);
 		let set = DevSet::new(
 			[[dev]],

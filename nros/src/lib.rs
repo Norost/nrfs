@@ -1,5 +1,6 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
+#![feature(hash_drain_filter)]
 #![feature(int_roundings)]
 #![feature(iterator_try_collect)]
 #![feature(nonzero_min_max)]
@@ -63,6 +64,15 @@ macro_rules! n2e {
 		n2e!(@INTERNAL Shl::shl usize $name);
 		n2e!(@INTERNAL Shr::shr usize $name);
 	};
+}
+
+/// Tracing in debug mode only.
+macro_rules! trace {
+	($($arg:tt)*) => {{
+		let _f = format_args!($($arg)*);
+		#[cfg(feature = "trace")]
+		eprintln!("[DEBUG] {}", _f);
+	}};
 }
 
 mod cache;
@@ -139,12 +149,29 @@ impl<D: Dev> Nros<D> {
 		self.store.create_pair().await
 	}
 
+	/// Increment the reference count to an object.
+	///
+	/// This operation returns `false` if the reference count would overflow.
+	///
+	/// This function *must not* be used on invalid objects!
+	///
+	/// # Panics
+	///
+	/// If the object is invalid.
+	pub async fn increase_reference_count(&self, id: u64) -> Result<bool, Error<D>> {
+		self.store.increase_refcount(id).await
+	}
+
 	/// Decrement the reference count to an object.
 	///
 	/// If this count reaches zero the object is automatically freed.
 	///
 	/// This function *must not* be used on invalid objects!
-	pub async fn decr_ref(&self, id: u64) -> Result<(), Error<D>> {
+	///
+	/// # Panics
+	///
+	/// If the object is invalid.
+	pub async fn decrease_reference_count(&self, id: u64) -> Result<(), Error<D>> {
 		self.store.decrease_refcount(id).await
 	}
 

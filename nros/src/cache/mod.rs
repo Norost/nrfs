@@ -1,100 +1,32 @@
 mod lru;
 mod tree;
+mod tree_data;
 
 pub use tree::Tree;
 
 use {
-	crate::{BlockSize, Dev, Error, MaxRecordSize, Record, Store},
+	crate::{util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{Ref, RefCell, RefMut},
-		fmt, future, mem,
+		fmt,
+		future,
+		mem,
+		ops::{Deref, DerefMut},
 		task::{Poll, Waker},
 	},
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
 	std::collections::hash_map,
+	tree_data::{ReadWriteLock, ResizeLock, FmtTreeData, TreeData},
 };
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
 const OBJECT_LIST_ID: u64 = u64::MAX;
 
-/// A single cached record tree.
-struct TreeData {
-	/// The current length of the tree.
-	///
-	/// This may not match the length stored in the root if the tree was resized.
-	length: u64,
-	/// Cached records.
-	///
-	/// The index in the array is correlated with depth.
-	/// The key is correlated with offset.
-	data: Box<[FxHashMap<u64, Entry>]>,
-}
-
-/// Formatter for [`TreeData`].
+/// Estimated fixed cost for every cached entry.
 ///
-/// The output is more compact than that of `derive(Debug)`, especially for large amounts of data.
-struct FmtTreeData<'a> {
-	data: &'a TreeData,
-	id: u64,
-}
-
-impl fmt::Debug for FmtTreeData<'_> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		struct FmtRecord<'a>(&'a Entry);
-
-		impl fmt::Debug for FmtRecord<'_> {
-			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-				let mut f = f.debug_list();
-				let mut i = 0;
-				while i < self.0.data.len() {
-					let mut rec = Record::default();
-					let l = (self.0.data.len() - i).min(mem::size_of::<Record>());
-					rec.as_mut()[..l].copy_from_slice(&self.0.data[i..][..l]);
-					f.entry(&rec);
-					i += l;
-				}
-				f.finish()
-			}
-		}
-
-		struct FmtRecordMap<'a>(&'a FxHashMap<u64, Entry>);
-
-		impl fmt::Debug for FmtRecordMap<'_> {
-			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-				let mut f = f.debug_map();
-				for (k, v) in self.0.iter() {
-					f.entry(k, &FmtRecord(v));
-				}
-				f.finish()
-			}
-		}
-
-		struct FmtData<'a>(&'a FmtTreeData<'a>);
-
-		impl fmt::Debug for FmtData<'_> {
-			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-				let mut f = f.debug_map();
-				let mut depths = self.0.data.data.iter().enumerate();
-				// Format like data
-				if self.0.id != OBJECT_LIST_ID {
-					let Some((i, l)) = depths.next() else { return f.finish() };
-					f.entry(&i, l);
-				}
-				// Format like records
-				for (i, l) in depths {
-					f.entry(&i, &FmtRecordMap(l));
-				}
-				f.finish()
-			}
-		}
-
-		f.debug_struct(stringify!(TreeData))
-			.field("length", &self.data.length)
-			.field("data", &FmtData(self))
-			.finish()
-	}
-}
+/// This is in addition to the amount of data stored by the entry.
+const CACHE_ENTRY_FIXED_COST: usize = mem::size_of::<Entry>();
 
 /// Cache data.
 pub(crate) struct CacheData {
@@ -103,23 +35,8 @@ pub(crate) struct CacheData {
 	/// The key, in order, is `(id, depth, offset)`.
 	/// Using separate hashmaps allows using only a prefix of the key.
 	data: FxHashMap<u64, TreeData>,
-	/// Linked list for global LRU evictions.
-	global_lru: lru::LruList<(u64, u8, u64)>,
-	/// Linked list for flushing dirty records.
-	///
-	/// This is not used for eviction but ensures an excessive amount of writes does not hold up
-	/// reads.
-	// TODO consider adding a sort of dirty map so records are grouped by object & sorted,
-	// which may improve read performance.
-	write_lru: lru::LruList<(u64, u8, u64)>,
-	/// The maximum amount of total bytes to keep cache.
-	global_cache_max: usize,
-	/// The maximum amount of dirty bytes to keep.
-	write_cache_max: usize,
-	/// The total amount of cached bytes.
-	global_cache_size: usize,
-	/// The total amount of dirty cached bytes.
-	write_cache_size: usize,
+	/// LRUs to manage cache size.
+	lrus: Lrus,
 	/// Object entries that are currently in use and must not be evicted.
 	locked_objects: FxHashMap<u64, usize>,
 	/// Record entries that are currently in use and must not be evicted.
@@ -150,12 +67,7 @@ impl fmt::Debug for CacheData {
 
 		f.debug_struct(stringify!(CacheData))
 			.field("data", &FmtData(&self.data))
-			.field("global_lru", &self.global_lru)
-			.field("write_lru", &self.write_lru)
-			.field("global_cache_max", &self.global_cache_max)
-			.field("write_cache_max", &self.write_cache_max)
-			.field("global_cache_size", &self.global_cache_size)
-			.field("write_cache_size", &self.write_cache_size)
+			.field("lrus", &self.lrus)
 			.field("locked_objects", &self.locked_objects)
 			.field("locked_records", &self.locked_records)
 			.field("fetching", &self.fetching)
@@ -163,6 +75,47 @@ impl fmt::Debug for CacheData {
 			.field("is_flushing", &self.is_flushing)
 			.finish()
 	}
+}
+
+/// Cache LRU queues, with tracking per byte used.
+#[derive(Debug)]
+struct Lrus {
+	/// LRU list for global evictions.
+	global: Lru,
+	/// LRU list for flushing dirty records.
+	///
+	/// This is not used for eviction but ensures an excessive amount of writes does not hold up
+	/// reads.
+	dirty: Lru,
+}
+
+impl Lrus {
+	/// Adjust cache usage based on manually removed entry.
+	fn adjust_cache_removed_entry(&mut self, entry: &Entry) {
+		self.global.lru.remove(entry.global_index);
+		self.global.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
+		// The entry *must* be dirty as otherwise it either:
+		// - wouldn't exist
+		// - have a parent node, in which case it was already destroyed in a previous
+		//   iteration.
+		// ... except if d == cur_depth. Meh
+		if let Some(idx) = entry.write_index {
+			//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
+			self.dirty.lru.remove(idx);
+			self.dirty.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
+		}
+	}
+}
+
+/// Cache LRU queue, with tracking per byte used.
+#[derive(Debug)]
+struct Lru {
+	/// Linked list for LRU entries
+	lru: lru::LruList<(u64, u8, u64)>,
+	/// The maximum amount of total bytes to keep cached.
+	cache_max: usize,
+	/// The amount of cached bytes.
+	cache_size: usize,
 }
 
 /// Cache algorithm.
@@ -179,16 +132,16 @@ impl<D: Dev> Cache<D> {
 	///
 	/// # Panics
 	///
-	/// If `global_cache_max` is smaller than `write_cache_max`.
+	/// If `global_cache_max` is smaller than `dirty_cache_max`.
 	///
-	/// If `write_cache_max` is smaller than the maximum record size.
-	pub fn new(store: Store<D>, global_cache_max: usize, write_cache_max: usize) -> Self {
+	/// If `dirty_cache_max` is smaller than the maximum record size.
+	pub fn new(store: Store<D>, global_cache_max: usize, dirty_cache_max: usize) -> Self {
 		assert!(
-			global_cache_max >= write_cache_max,
+			global_cache_max >= dirty_cache_max,
 			"global cache size is smaller than write cache"
 		);
 		assert!(
-			write_cache_max >= 1 << store.max_record_size().to_raw(),
+			dirty_cache_max >= 1 << store.max_record_size().to_raw(),
 			"write cache size is smaller than the maximum record size"
 		);
 
@@ -209,12 +162,18 @@ impl<D: Dev> Cache<D> {
 			store,
 			data: RefCell::new(CacheData {
 				data: Default::default(),
-				global_lru: Default::default(),
-				write_lru: Default::default(),
-				global_cache_max,
-				write_cache_max,
-				global_cache_size: 0,
-				write_cache_size: 0,
+				lrus: Lrus {
+					global: Lru {
+						lru: Default::default(),
+						cache_max: global_cache_max,
+						cache_size: 0,
+					},
+					dirty: Lru {
+						lru: Default::default(),
+						cache_max: dirty_cache_max,
+						cache_size: 0,
+					},
+				},
 				locked_objects: Default::default(),
 				locked_records: Default::default(),
 				fetching: Default::default(),
@@ -241,6 +200,34 @@ impl<D: Dev> Cache<D> {
 		let mut slf = self.data.borrow_mut();
 		debug_assert!(slf.used_objects_ids.contains(&id), "double free");
 		slf.used_objects_ids.remove(id..id + 1);
+	}
+
+	/// Get an existing root,
+	async fn get_object_root(&self, id: u64) -> Result<Record, Error<D>> {
+		if id == OBJECT_LIST_ID {
+			Ok(self.store.object_list())
+		} else {
+			let offset = id * (mem::size_of::<Record>() as u64);
+			let list = Tree::new_object_list(self).await?;
+			let mut root = Record::default();
+			let l = list.read(offset, root.as_mut()).await?;
+			debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully read");
+			Ok(root)
+		}
+	}
+
+	/// Update an existing root,
+	/// i.e. without resizing the object list.
+	async fn set_object_root(&self, id: u64, root: &Record) -> Result<(), Error<D>> {
+		if id == OBJECT_LIST_ID {
+			self.store.set_object_list(*root);
+		} else {
+			let offset = id * (mem::size_of::<Record>() as u64);
+			let list = Tree::new_object_list(self).await?;
+			let l = list.write(offset, root.as_ref()).await?;
+			debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully written");
+		}
+		Ok(())
 	}
 
 	async fn write_object_table(&self, id: u64, data: &[u8]) -> Result<usize, Error<D>> {
@@ -293,11 +280,13 @@ impl<D: Dev> Cache<D> {
 	}
 
 	/// Destroy a record and it's associated cache entry, if any.
-	fn destroy(&self, id: u64, depth: u8, offset: u64, record: &Record) {
-		let _ = self.remove_entry(id, depth, offset);
+	fn destroy(&self, id: u64, depth: u8, offset: u64, record: &Record) -> Vec<u8> {
+		let entry = self.remove_entry(id, depth, offset).expect("invalid entry");
 
 		// Free blocks referenced by record.
-		self.store.destroy(record)
+		self.store.destroy(record);
+
+		entry.data
 	}
 
 	/// Remove an entry from the cache.
@@ -307,19 +296,7 @@ impl<D: Dev> Cache<D> {
 		let data = { &mut *self.data.borrow_mut() };
 		let obj = data.data.get_mut(&id)?;
 		let entry = obj.data[usize::from(depth)].remove(&offset)?;
-
-		// Remove entry from LRUs
-		let len = entry.data.len(); // TODO len() or capacity()?;
-		data.global_lru.remove(entry.global_index);
-		data.global_cache_size -= len;
-		if let Some(idx) = entry.write_index {
-			data.write_lru.remove(idx);
-			data.write_cache_size -= len;
-		}
-
-		// TODO remove the object at an appropriate time.
-		// i.e. right after the root has been saved and there are no remaining cached records.
-
+		data.lrus.adjust_cache_removed_entry(&entry);
 		Some(entry)
 	}
 
@@ -327,25 +304,51 @@ impl<D: Dev> Cache<D> {
 	///
 	/// The old object is destroyed.
 	pub async fn move_object(&self, from: u64, to: u64) -> Result<(), Error<D>> {
-		let mut rec = Record::default();
-		// Free allocations
-		self.get(to).await?.resize(0).await?;
-		// Copy
-		let l = self.read_object_table(from, rec.as_mut()).await?;
-		assert!(l > 0, "ID out of range");
-		let l = self.write_object_table(to, rec.as_ref()).await?;
-		assert!(l > 0, "ID out of range");
-
-		// Move object data.
-		{
-			let data = { &mut self.data.borrow_mut().data };
-			let obj = data.remove(&from).expect("object not present");
-			data.insert(to, obj);
+		if from == to {
+			return Ok(()); // Don't even bother.
 		}
 
-		// Destroy original object.
-		self.write_object_table(from, Record::default().as_ref())
-			.await?;
+		// Free allocations
+		self.get(to).await?.resize(0).await?;
+
+		// NOTE There is a brief period where the lock is not acquired.
+		// However, as long as the API is singlethreaded this should not be an issue
+		// as there is no await point in between the period the lock is released.
+
+		// Move
+		{
+			let _locks_from = ResizeLock::new(&self.data, from).await;
+			let _locks_to = ResizeLock::new(&self.data, to).await;
+			let rec = self.get_object_root(from).await?;
+			self.set_object_root(to, &rec).await?;
+			self.set_object_root(from, &Default::default()).await?;
+		}
+
+		// Move object data & fix LRU entries.
+		{
+			let data = { &mut *self.data.borrow_mut() };
+
+			let obj = data.data.remove(&from).expect("object not present");
+			for level in obj.data.iter() {
+				for entry in level.values() {
+					data.lrus
+						.global
+						.lru
+						.get_mut(entry.global_index)
+						.expect("invalid global LRU index")
+						.0 = to;
+					if let Some(idx) = entry.write_index {
+						data.lrus
+							.dirty
+							.lru
+							.get_mut(idx)
+							.expect("invalid write LRU index")
+							.0 = to;
+					}
+				}
+			}
+			data.data.insert(to, obj);
+		}
 
 		self.dealloc_id(from);
 		Ok(())
@@ -354,28 +357,45 @@ impl<D: Dev> Cache<D> {
 	/// Increase the reference count of an object.
 	///
 	/// This may fail if the reference count is already [`u16::MAX`].
-	pub async fn increase_refcount(&self, id: u64) -> Result<(), Error<D>> {
-		let mut rec = Record::default();
-		self.read_object_table(id, rec.as_mut()).await?;
-		if rec.references == u16::MAX {
-			todo!("too many refs");
+	/// On failure, the returned value is `false`, otherwise `true`.
+	pub async fn increase_refcount(&self, id: u64) -> Result<bool, Error<D>> {
+		// Ensure the root doesn't get modified while we're working with it.
+		let _lock = ResizeLock::new(&self.data, id).await;
+
+		let mut root = self.get_object_root(id).await?;
+		assert!(root.references != 0, "invalid object");
+		if root.references == u16::MAX {
+			return Ok(false);
 		}
-		rec.references += 1;
-		self.write_object_table(id, rec.as_ref()).await?;
-		Ok(())
+		root.references += 1;
+		self.set_object_root(id, &root).await?;
+
+		Ok(true)
 	}
 
 	/// Decrease the reference count of an object.
 	///
 	/// If the reference count reaches 0 the object is destroyed.
+	///
+	/// # Panics
+	///
+	/// If the object isn't valid, i.e. reference count is already 0.
 	pub async fn decrease_refcount(&self, id: u64) -> Result<(), Error<D>> {
-		let mut rec = Record::default();
-		self.read_object_table(id, rec.as_mut()).await?;
-		if rec.references == 0 {
-			todo!("invalid object");
+		// Ensure the root doesn't get modified while we're working with it.
+		let lock = ResizeLock::new(&self.data, id).await;
+
+		let mut root = self.get_object_root(id).await?;
+		assert!(root.references != 0, "invalid object");
+		root.references -= 1;
+		self.set_object_root(id, &root).await?;
+
+		drop(lock);
+
+		if root.references == 0 {
+			// Free space.
+			self.get(id).await?.resize(0).await?;
 		}
-		rec.references -= 1;
-		self.write_object_table(id, rec.as_ref()).await?;
+
 		Ok(())
 	}
 
@@ -440,12 +460,12 @@ impl<D: Dev> Cache<D> {
 					offset,
 					Entry {
 						data: d,
-						global_index: data.global_lru.insert((id, depth, offset)),
+						global_index: data.lrus.global.lru.insert((id, depth, offset)),
 						write_index: None,
 					},
 				);
 				debug_assert!(prev.is_none(), "entry was already present");
-				data.global_cache_size += len;
+				data.lrus.global.cache_size += len + CACHE_ENTRY_FIXED_COST;
 
 				// Wake other tasks waiting for this entry.
 				data.fetching
@@ -496,6 +516,21 @@ impl<D: Dev> Cache<D> {
 			.is_some()
 	}
 
+	/// Get a mutable reference to an object's data.
+	///
+	/// # Panics
+	///
+	/// If another borrow is alive.
+	///
+	/// If the object is not present.
+	fn get_object_entry_mut(&self, id: u64) -> RefMut<TreeData> {
+		RefMut::map(self.data.borrow_mut(), |data| {
+			data.data
+				.get_mut(&id)
+				.expect("cache entry by id does not exist")
+		})
+	}
+
 	/// Get a cached entry.
 	///
 	/// # Panics
@@ -525,20 +560,17 @@ impl<D: Dev> Cache<D> {
 	///
 	/// If the entry is not present.
 	fn get_entry_mut_no_mark(&self, id: u64, depth: u8, offset: u64) -> RefMut<Entry> {
-		RefMut::map(self.data.borrow_mut(), |data| {
-			data.data
-				.get_mut(&id)
-				.expect("cache entry by id does not exist")
-				.data[usize::from(depth)]
-			.get_mut(&offset)
-			.expect("cache entry by offset does not exist")
+		RefMut::map(self.get_object_entry_mut(id), |obj| {
+			obj.data[usize::from(depth)]
+				.get_mut(&offset)
+				.expect("cache entry by offset does not exist")
 		})
 	}
 
 	/// Get a cached entry.
 	///
-	/// This will mark the entry as dirty, which in turn may trigger a flush of other dirty
-	/// entries.
+	/// When the [`EntryRefMut`] is dropped the entry will be marked as dirty.
+	/// This may later trigger a flush.
 	///
 	/// # Panics
 	///
@@ -550,8 +582,11 @@ impl<D: Dev> Cache<D> {
 		id: u64,
 		depth: u8,
 		offset: u64,
-	) -> Result<RefMut<Entry>, Error<D>> {
-		let entry = RefMut::map(self.data.borrow_mut(), |data| {
+	) -> Result<EntryRefMut, Error<D>> {
+		// Flush since we may be exceeding write cache limits.
+		self.flush().await?;
+
+		let (entry, lrus) = RefMut::map_split(self.data.borrow_mut(), |data| {
 			let entry = data
 				.data
 				.get_mut(&id)
@@ -559,31 +594,10 @@ impl<D: Dev> Cache<D> {
 				.data[usize::from(depth)]
 			.get_mut(&offset)
 			.expect("cache entry by offset does not exist");
-
-			if let Some(idx) = entry.write_index {
-				// Already dirty, bump to front
-				data.write_lru.promote(idx);
-			} else {
-				// Not dirty yet, add to list.
-				let key = *data
-					.global_lru
-					.get(entry.global_index)
-					.expect("entry not in global LRU");
-				entry.write_index = Some(data.write_lru.insert(key));
-
-				// TODO should we use len() or capacity()?
-				// Maybe shrink data too from time to time?
-				data.write_cache_size += entry.data.len();
-			}
-
-			entry
+			(entry, &mut data.lrus)
 		});
 
-		// Flush since we may be exceeding write cache limits.
-		// TODO figure out how to flush and still make the borrow stuff work.
-		//self.clone().flush().await?;
-
-		Ok(entry)
+		Ok(EntryRefMut { original_len: entry.data.len(), entry, lrus, id, depth, offset })
 	}
 
 	/// Get the root record of the object list.
@@ -605,22 +619,8 @@ impl<D: Dev> Cache<D> {
 		);
 		{
 			let mut data = { &mut *self.data.borrow_mut() };
-			data.global_cache_max = global_max;
-			data.write_cache_max = write_max;
-		}
-		self.flush().await
-	}
-
-	/// Recalculate total cache usage from resizing a record and flush if necessary.
-	///
-	/// This adjusts both read and write cache.
-	async fn adjust_cache_use_both(&self, old_len: usize, new_len: usize) -> Result<(), Error<D>> {
-		{
-			let data = { &mut *self.data.borrow_mut() };
-			data.global_cache_size += new_len;
-			data.global_cache_size -= old_len;
-			data.write_cache_size += new_len;
-			data.write_cache_size -= old_len;
+			data.lrus.global.cache_max = global_max;
+			data.lrus.dirty.cache_max = write_max;
 		}
 		self.flush().await
 	}
@@ -635,12 +635,27 @@ impl<D: Dev> Cache<D> {
 		}
 		data.is_flushing = true;
 
-		while data.write_cache_size > data.write_cache_max {
+		while data.lrus.dirty.cache_size > data.lrus.dirty.cache_max {
 			// Remove last written to entry.
-			let (id, depth, offset) = data
-				.write_lru
-				.remove_last()
+			let &(id, depth, offset) = data
+				.lrus
+				.dirty
+				.lru
+				.last()
 				.expect("no nodes despite non-zero write cache size");
+
+			// Avoid flushing during a resize, as it can mess up the reference to the root record.
+			if data
+				.data
+				.get(&id)
+				.expect("invalid object")
+				.is_resize_locked()
+			{
+				break; // TODO continue with another record or object.
+			}
+
+			data.lrus.dirty.lru.remove_last().unwrap();
+
 			drop(data);
 			let mut entry = self.get_entry_mut_no_mark(id, depth, offset);
 
@@ -652,21 +667,37 @@ impl<D: Dev> Cache<D> {
 			entry.write_index = None;
 			let len = entry.data.len();
 			drop(entry);
-			self.data.borrow_mut().write_cache_size -= len;
+			self.data.borrow_mut().lrus.dirty.cache_size -= len + CACHE_ENTRY_FIXED_COST;
 
 			// Store the record in the appropriate place.
-			let obj = Tree::new(self.clone(), id).await?;
+			let obj = Tree::new(self, id).await?;
 			obj.update_record(depth, offset, rec).await?;
 			drop(obj);
 			data = self.data.borrow_mut();
 		}
 
-		while data.global_cache_size > data.global_cache_max {
+		while data.lrus.global.cache_size > data.lrus.global.cache_max {
 			// Remove last written to entry.
 			let &(id, depth, offset) = data
-				.global_lru
+				.lrus
+				.global
+				.lru
 				.last()
 				.expect("no nodes despite non-zero write cache size");
+
+			if data
+				.data
+				.get(&id)
+				.expect("invalid object")
+				.is_resize_locked()
+			{
+				break; // TODO continue with another record or object.
+			}
+
+			if data.locked_records.contains_key(&(id, depth, offset)) {
+				break; // TODO meh
+			}
+
 			drop(data);
 			let entry = self
 				.remove_entry(id, depth, offset)
@@ -678,7 +709,7 @@ impl<D: Dev> Cache<D> {
 				let rec = self.store.write(&entry.data).await?;
 
 				// Store the record in the appropriate place.
-				let obj = Tree::new(self.clone(), id).await?;
+				let obj = Tree::new(self, id).await?;
 				obj.update_record(depth, offset, rec).await?;
 			}
 
@@ -693,7 +724,8 @@ impl<D: Dev> Cache<D> {
 	///
 	/// The cache is flushed before returning the underlying [`Store`].
 	pub async fn unmount(self) -> Result<Store<D>, Error<D>> {
-		let global_max = self.data.borrow().global_cache_max;
+		trace!("unmount");
+		let global_max = self.data.borrow().lrus.global.cache_max;
 		self.resize_cache(global_max, 0).await?;
 		debug_assert_eq!(
 			self.cache_status().dirty_usage,
@@ -709,7 +741,10 @@ impl<D: Dev> Cache<D> {
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();
-		CacheStatus { global_usage: data.global_cache_size, dirty_usage: data.write_cache_size }
+		CacheStatus {
+			global_usage: data.lrus.global.cache_size,
+			dirty_usage: data.lrus.dirty.cache_size,
+		}
 	}
 
 	/// Check if cache size matches real usage
@@ -722,10 +757,10 @@ impl<D: Dev> Cache<D> {
 			.values()
 			.flat_map(|o| o.data.iter())
 			.flat_map(|m| m.values())
-			.map(|v| v.data.len())
+			.map(|v| v.data.len() + CACHE_ENTRY_FIXED_COST)
 			.sum::<usize>();
 		assert_eq!(
-			real_global_usage, data.global_cache_size,
+			real_global_usage, data.lrus.global.cache_size,
 			"global cache size mismatch"
 		);
 	}
@@ -774,7 +809,7 @@ impl<'a, D: Dev> CacheRef<'a, D> {
 	/// # Panics
 	///
 	/// If something is already borrowing the underlying [`TreeData`].
-	async fn get_mut(&self) -> Result<RefMut<Entry>, Error<D>> {
+	async fn get_mut(&self) -> Result<EntryRefMut, Error<D>> {
 		self.cache
 			.get_entry_mut(self.id, self.depth, self.offset)
 			.await
@@ -791,6 +826,18 @@ impl<'a, D: Dev> CacheRef<'a, D> {
 	/// If something is already borrowing the underlying [`TreeData`].
 	fn get(&self) -> Ref<Entry> {
 		self.cache.get_entry(self.id, self.depth, self.offset)
+	}
+
+	/// Destroy the record associated with this entry.
+	///
+	/// # Panics
+	///
+	/// If something is already borrowing the underlying [`TreeData`].
+	fn destroy(self, record: &Record) -> Vec<u8> {
+		let cache = self.cache.clone();
+		let &CacheRef { id, depth, offset, .. } = &self;
+		drop(self);
+		cache.destroy(id, depth, offset, record)
 	}
 }
 
@@ -849,4 +896,58 @@ pub struct CacheStatus {
 	pub global_usage: usize,
 	/// Total amount of memory used by dirty record data.
 	pub dirty_usage: usize,
+}
+
+/// Mutable reference to a cache entry.
+///
+/// This will mark the entry as dirty when it is dropped.
+struct EntryRefMut<'a> {
+	/// The length of the entry at the time of borrowing.
+	original_len: usize,
+
+	id: u64,
+	depth: u8,
+	offset: u64,
+	entry: RefMut<'a, Entry>,
+	lrus: RefMut<'a, Lrus>,
+}
+
+impl Deref for EntryRefMut<'_> {
+	type Target = Entry;
+
+	fn deref(&self) -> &Entry {
+		&self.entry
+	}
+}
+
+impl DerefMut for EntryRefMut<'_> {
+	fn deref_mut(&mut self) -> &mut Entry {
+		&mut self.entry
+	}
+}
+
+// TODO async drop would be nice.
+impl Drop for EntryRefMut<'_> {
+	fn drop(&mut self) {
+		// Trim zeros, which we always want to do.
+		trim_zeros_end(&mut self.entry.data);
+
+		// Check if we still need to mark the entry as dirty.
+		// Otherwise promote.
+		if let Some(idx) = self.entry.write_index {
+			self.lrus.dirty.lru.promote(idx);
+			self.lrus.dirty.cache_size += self.entry.data.len();
+			self.lrus.dirty.cache_size -= self.original_len;
+		} else {
+			let idx = self
+				.lrus
+				.dirty
+				.lru
+				.insert((self.id, self.depth, self.offset));
+			self.lrus.dirty.cache_size += self.entry.data.len() + CACHE_ENTRY_FIXED_COST;
+			self.entry.write_index = Some(idx);
+		}
+		self.lrus.global.cache_size += self.entry.data.len();
+		self.lrus.global.cache_size -= self.original_len;
+	}
 }
