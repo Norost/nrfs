@@ -8,16 +8,14 @@ use {
 	crate::{util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{Ref, RefCell, RefMut},
-		fmt,
-		future,
-		mem,
+		fmt, future, mem,
 		ops::{Deref, DerefMut},
 		task::{Poll, Waker},
 	},
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
 	std::collections::hash_map,
-	tree_data::{ReadWriteLock, ResizeLock, FmtTreeData, TreeData},
+	tree_data::{FmtTreeData, ReadWriteLock, ResizeLock, TreeData},
 };
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.

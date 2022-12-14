@@ -69,9 +69,8 @@ macro_rules! n2e {
 /// Tracing in debug mode only.
 macro_rules! trace {
 	($($arg:tt)*) => {{
-		let _f = format_args!($($arg)*);
 		#[cfg(feature = "trace")]
-		eprintln!("[DEBUG] {}", _f);
+		eprintln!("[DEBUG] {}", format_args!($($arg)*));
 	}};
 }
 

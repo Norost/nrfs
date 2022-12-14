@@ -1,6 +1,7 @@
 mod compression;
 
 use {
+	crate::BlockSize,
 	alloc::vec::Vec,
 	core::fmt,
 	endian::{u16le, u32le, u64le},
@@ -24,8 +25,13 @@ pub struct Record {
 raw!(Record);
 
 impl Record {
-	pub fn pack(data: &[u8], buf: &mut [u8], compression: Compression) -> Record {
-		let (compression, length) = compression.compress(data, buf);
+	pub fn pack(
+		data: &[u8],
+		buf: &mut [u8],
+		compression: Compression,
+		block_size: BlockSize,
+	) -> Record {
+		let (compression, length) = compression.compress(data, buf, block_size);
 		Self {
 			length: length.into(),
 			compression: compression.to_raw(),

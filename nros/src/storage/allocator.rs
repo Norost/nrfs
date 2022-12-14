@@ -233,7 +233,7 @@ impl Allocator {
 			// as it is possible all memory is used up by the current writes.
 			let mut b = store.devices.alloc(len).await?;
 
-			prev = Record::pack(&buf, b.get_mut(), store.compression());
+			prev = Record::pack(&buf, b.get_mut(), store.compression(), store.block_size());
 			let len = store.round_block_size(prev.length.into());
 			b.shrink(len);
 
