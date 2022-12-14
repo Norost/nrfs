@@ -54,6 +54,8 @@ impl Allocator {
 	where
 		D: Dev,
 	{
+		trace!("load");
+
 		let mut alloc_map = RangeSet::new();
 		let mut stack = Vec::new();
 
@@ -67,7 +69,7 @@ impl Allocator {
 			// Get record data
 			let data = store.read(&record).await?;
 			let lba = u64::from(record.lba);
-			let size = u64::from(u32::from(record.length));
+			let size = u64::try_from(data.len()).unwrap();
 			let end = usize::try_from(size).unwrap();
 
 			// Add record itself
@@ -107,6 +109,8 @@ impl Allocator {
 			// Next record
 			record = util::get_record(&data, 0);
 		}
+
+		trace!("    ==>  {:?}", &alloc_map);
 
 		Ok(Self {
 			alloc_map,
@@ -168,12 +172,19 @@ impl Allocator {
 	where
 		D: Dev,
 	{
+		trace!("save");
+		trace!("  alloc  {:?}", &self.alloc_map);
+		trace!("  dirty  {:?}", &self.dirty_map);
+		trace!("  free   {:?}", &self.free_map);
+
 		// Update map
 		// TODO it would be nice if we could avoid a Clone.
 		let mut alloc_map = self.alloc_map.clone();
 		for r in self.free_map.iter() {
 			alloc_map.remove(r.clone());
 		}
+
+		trace!("    -->  {:?}", &alloc_map);
 
 		// Save map
 		// TODO avoid writing the entire log every time.
@@ -254,6 +265,8 @@ impl Allocator {
 		self.alloc_map = alloc_map;
 		self.free_map = Default::default();
 		self.dirty_map = Default::default();
+
+		trace!("    ==>  {:?}", &self.alloc_map);
 
 		Ok(())
 	}
