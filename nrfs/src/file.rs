@@ -148,7 +148,7 @@ impl<'a, 'b, D: Dev> File<'a, 'b, D> {
 	pub async fn resize(&mut self, new_len: u64) -> Result<(), Error<D>> {
 		match &mut self.inner {
 			Inner::Object { index, id } if new_len == 0 => {
-				self.dir.fs.storage.decr_ref(*id).await?;
+				self.dir.fs.storage.decrease_reference_count(*id).await?;
 				self.inner = Inner::Embed { index: *index, offset: 0, length: 0 };
 				Ok(())
 			}

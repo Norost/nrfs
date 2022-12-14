@@ -3,6 +3,9 @@ name = "nrfs"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+trace = ["nros/trace"]
+
 [dependencies.endian]
 package = "nora_endian"
 version = "0.1"

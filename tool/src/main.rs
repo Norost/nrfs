@@ -1,10 +1,20 @@
+#![forbid(unused_must_use)]
+#![feature(pin_macro)]
+
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use {
 	clap::Parser,
+	core::{
+		future::Future,
+		pin::{pin, Pin},
+		ptr,
+		task::{Context, RawWaker, RawWakerVTable, Waker},
+	},
+	nrfs::{dev::FileDev, BlockSize, Nrfs},
 	std::{
 		fs::{self, File, OpenOptions},
-		io::{self, Read as _, Seek as _, SeekFrom, Write as _},
+		io::{Read as _, Seek as _, SeekFrom},
 		path::{Path, PathBuf},
 	},
 };
@@ -60,14 +70,24 @@ struct Dump {
 	path: String,
 }
 
+// https://github.com/rust-lang/rust/pull/96875/files
+const VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RAW, |_| {}, |_| {}, |_| {});
+const RAW: RawWaker = RawWaker::new(ptr::null(), &VTABLE);
+
 fn main() {
-	match Command::parse() {
-		Command::Make(args) => make(args),
-		Command::Dump(args) => dump(args),
-	}
+	let fut = async {
+		match Command::parse() {
+			Command::Make(args) => make(args).await,
+			Command::Dump(args) => dump(args).await,
+		}
+	};
+	let mut fut = pin!(fut);
+	let waker = unsafe { Waker::from_raw(RAW) };
+	let mut cx = Context::from_waker(&waker);
+	while fut.as_mut().poll(&mut cx).is_pending() {}
 }
 
-fn make(args: Make) {
+async fn make(args: Make) {
 	let f = OpenOptions::new()
 		.truncate(false)
 		.read(true)
@@ -75,7 +95,7 @@ fn make(args: Make) {
 		.open(&args.path)
 		.unwrap();
 
-	let block_size_p2 = if let Some(v) = args.block_size_p2 {
+	let block_size = if let Some(v) = args.block_size_p2 {
 		v
 	} else {
 		#[cfg(target_family = "unix")]
@@ -84,6 +104,7 @@ fn make(args: Make) {
 		let bs = 12;
 		bs
 	};
+	let block_size = BlockSize::from_raw(block_size).unwrap();
 
 	let mut extensions = nrfs::dir::EnableExtensions::default();
 	extensions.add_unix();
@@ -94,17 +115,32 @@ fn make(args: Make) {
 		Compression::None => nrfs::Compression::None,
 		Compression::Lz4 => nrfs::Compression::Lz4,
 	};
-	let s = S::new(f, block_size_p2);
-	let mut nrfs = nrfs::Nrfs::new(s, rec_size, &opt, compr, 32).unwrap();
+
+	let global_cache_size = 1 << 20;
+	let dirty_cache_size = 1 << 20;
+
+	let s = FileDev::new(f, block_size);
+	let mut nrfs = Nrfs::new(
+		[[s]],
+		block_size,
+		rec_size,
+		&opt,
+		compr,
+		global_cache_size,
+		dirty_cache_size,
+	)
+	.await
+	.unwrap();
 
 	if let Some(d) = &args.directory {
-		let mut root = nrfs.root_dir().unwrap();
-		add_files(&mut root, d, &args, extensions);
+		let mut root = nrfs.root_dir().await.unwrap();
+		add_files(&mut root, d, &args, extensions).await;
 	}
-	nrfs.finish_transaction().unwrap();
+	//nrfs.finish_transaction().await.unwrap();
+	nrfs.unmount().await.unwrap();
 
-	fn add_files(
-		root: &mut nrfs::Dir<'_, S>,
+	async fn add_files(
+		root: &mut nrfs::Dir<'_, FileDev>,
 		from: &Path,
 		args: &Make,
 		extensions: nrfs::dir::EnableExtensions,
@@ -141,16 +177,21 @@ fn make(args: Make) {
 
 			if m.is_file() || (m.is_symlink() && args.follow) {
 				let c = fs::read(f.path()).unwrap();
-				let mut f = root.create_file(n, &ext).unwrap().unwrap();
-				f.write_grow(0, &c).unwrap();
+				let mut f = root.create_file(n, &ext).await.unwrap().unwrap();
+				f.write_grow(0, &c).await.unwrap();
 			} else if m.is_dir() {
 				let opt = nrfs::DirOptions { extensions, ..Default::default() };
-				let mut d = root.create_dir(n, &opt, &ext).unwrap().unwrap();
-				add_files(&mut d, &f.path(), args, extensions)
+				let mut d = root.create_dir(n, &opt, &ext).await.unwrap().unwrap();
+				let path = f.path();
+				let fut: Pin<Box<dyn Future<Output = ()>>> =
+					Box::pin(add_files(&mut d, &path, args, extensions));
+				fut.await
 			} else if m.is_symlink() {
 				let c = fs::read_link(f.path()).unwrap();
-				let mut f = root.create_sym(n, &ext).unwrap().unwrap();
-				f.write_grow(0, c.to_str().unwrap().as_bytes()).unwrap();
+				let mut f = root.create_sym(n, &ext).await.unwrap().unwrap();
+				f.write_grow(0, c.to_str().unwrap().as_bytes())
+					.await
+					.unwrap();
 			} else {
 				todo!()
 			}
@@ -158,20 +199,37 @@ fn make(args: Make) {
 	}
 }
 
-fn dump(args: Dump) {
-	let mut f = File::open(args.path).unwrap();
-	let mut block_size_p2 = [0];
-	f.seek(SeekFrom::Start(23)).unwrap();
-	f.read_exact(&mut block_size_p2).unwrap();
-	let s = S::new(f, block_size_p2[0]);
-	let mut nrfs = nrfs::Nrfs::load(s, 32).unwrap();
-	let mut root = nrfs.root_dir().unwrap();
-	println!("block size: 2**{}", block_size_p2[0]);
-	list_files(&mut root, 0);
+async fn dump(args: Dump) {
+	let global_cache_size = 1 << 20;
+	let dirty_cache_size = 1 << 20;
 
-	fn list_files(root: &mut nrfs::Dir<'_, S>, indent: usize) {
+	let mut f = File::open(args.path).unwrap();
+
+	// FIXME block size shouldn't matter.
+	let mut block_size_p2 = [0];
+	f.seek(SeekFrom::Start(20)).unwrap();
+	f.read_exact(&mut block_size_p2).unwrap();
+
+	let s = FileDev::new(f, BlockSize::from_raw(block_size_p2[0]).unwrap());
+	let mut nrfs = Nrfs::load([s].into(), global_cache_size, dirty_cache_size)
+		.await
+		.unwrap();
+
+	let mut root = nrfs.root_dir().await.unwrap();
+	println!("block size: 2**{}", block_size_p2[0]);
+	list_files(&mut root, 0).await;
+
+	async fn list_files(root: &mut nrfs::Dir<'_, FileDev>, indent: usize) {
 		let mut i = Some(0);
-		while let Some((mut e, next_i)) = i.and_then(|i| root.next_from(i).unwrap()) {
+		while let Some((mut e, next_i)) = async {
+			if let Some(i) = i {
+				root.next_from(i).await.unwrap()
+			} else {
+				None
+			}
+		}
+		.await
+		{
 			if let Some(u) = e.ext_unix() {
 				let mut s = [0; 9];
 				for (i, (c, l)) in s.iter_mut().zip(b"rwxrwxrwx").rev().enumerate() {
@@ -198,14 +256,14 @@ fn dump(args: Dump) {
 				let mut f = e.as_file().unwrap();
 				println!(
 					"{:>8}  {:>indent$}{}f {}",
-					f.len().unwrap(),
+					f.len().await.unwrap(),
 					"",
 					[' ', 'e'][usize::from(e.is_embedded())],
 					name,
 					indent = indent
 				);
 			} else if e.is_dir() {
-				let mut d = e.as_dir().unwrap().unwrap();
+				let mut d = e.as_dir().await.unwrap().unwrap();
 				println!(
 					"{:>8}  {:>indent$} d {}",
 					d.len(),
@@ -213,12 +271,14 @@ fn dump(args: Dump) {
 					name,
 					indent = indent
 				);
-				list_files(&mut d, indent + 2);
+				let fut: Pin<Box<dyn Future<Output = _>>> =
+					Box::pin(list_files(&mut d, indent + 2));
+				fut.await;
 			} else if e.is_sym() {
 				let mut f = e.as_sym().unwrap();
-				let len = f.len().unwrap();
+				let len = f.len().await.unwrap();
 				let mut buf = vec![0; len as _];
-				f.read_exact(0, &mut buf).unwrap();
+				f.read_exact(0, &mut buf).await.unwrap();
 				let link = String::from_utf8_lossy(&buf);
 				println!(
 					"{:>indent$}{}s {} -> {}",
@@ -231,88 +291,5 @@ fn dump(args: Dump) {
 			}
 			i = next_i
 		}
-	}
-}
-
-#[derive(Debug)]
-struct S {
-	file: File,
-	block_count: u64,
-	block_size_p2: u8,
-}
-
-impl S {
-	fn new(mut file: File, block_size_p2: u8) -> Self {
-		let l = file.seek(SeekFrom::End(0)).unwrap();
-		let block_count = l >> block_size_p2;
-		Self { block_count, file, block_size_p2 }
-	}
-}
-
-impl nrfs::Storage for S {
-	type Error = io::Error;
-
-	fn block_size_p2(&self) -> u8 {
-		self.block_size_p2
-	}
-
-	fn block_count(&self) -> u64 {
-		self.block_count
-	}
-
-	fn read(&mut self, lba: u64, blocks: usize) -> Result<Box<dyn nrfs::Read + '_>, Self::Error> {
-		self.file
-			.seek(SeekFrom::Start(lba << self.block_size_p2()))?;
-		let mut buf = vec![0; blocks << self.block_size_p2()];
-		self.file.read_exact(&mut buf)?;
-		Ok(Box::new(R { buf }))
-	}
-
-	fn write(
-		&mut self,
-		blocks: usize,
-	) -> Result<Box<dyn nrfs::Write<Error = Self::Error> + '_>, Self::Error> {
-		let bsp2 = self.block_size_p2();
-		let buf = vec![0; blocks << bsp2];
-		Ok(Box::new(W { s: self, offset: u64::MAX, buf }))
-	}
-
-	fn fence(&mut self) -> Result<(), Self::Error> {
-		Ok(())
-	}
-}
-
-struct R {
-	buf: Vec<u8>,
-}
-
-impl nrfs::Read for R {
-	fn get(&self) -> &[u8] {
-		&self.buf
-	}
-}
-
-struct W<'a> {
-	s: &'a mut S,
-	offset: u64,
-	buf: Vec<u8>,
-}
-
-impl<'a> nrfs::Write for W<'a> {
-	type Error = io::Error;
-
-	fn get_mut(&mut self) -> &mut [u8] {
-		&mut self.buf
-	}
-
-	fn set_region(&mut self, lba: u64, blocks: usize) -> Result<(), Self::Error> {
-		self.offset = lba << self.s.block_size_p2;
-		self.buf.resize(blocks << self.s.block_size_p2, 0);
-		Ok(())
-	}
-
-	fn finish(self: Box<Self>) -> Result<(), Self::Error> {
-		self.s.file.seek(SeekFrom::Start(self.offset))?;
-		self.s.file.write_all(&self.buf)
 	}
 }

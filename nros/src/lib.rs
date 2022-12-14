@@ -47,14 +47,14 @@ macro_rules! n2e {
 		}
 
 		impl $name {
-			pub(crate) fn from_raw(n: u8) -> Option<Self> {
+			pub fn from_raw(n: u8) -> Option<Self> {
 				Some(match n {
 					$($v => Self::$k,)*
 					_ => return None,
 				})
 			}
 
-			pub(crate) fn to_raw(self) -> u8 {
+			pub fn to_raw(self) -> u8 {
 				self as _
 			}
 		}
@@ -85,10 +85,7 @@ mod util;
 pub use {
 	cache::{CacheStatus, Tree},
 	record::{Compression, MaxRecordSize},
-	storage::{
-		dev::{Allocator, Buf, MemDev, MemDevError},
-		Dev, Store,
-	},
+	storage::{dev, Dev, Store},
 };
 
 use {cache::Cache, core::fmt, record::Record, storage::DevSet};

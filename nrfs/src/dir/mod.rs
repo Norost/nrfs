@@ -339,12 +339,12 @@ impl<'a, D: Dev> Dir<'a, D> {
 		match ty {
 			Type::File { id } | Type::Sym { id } => {
 				// Dereference object.
-				self.fs.storage.decr_ref(id).await?;
+				self.fs.storage.decrease_reference_count(id).await?;
 			}
 			Type::Dir { id } => {
 				// Dereference map and heap.
-				self.fs.storage.decr_ref(id).await?;
-				self.fs.storage.decr_ref(id + 1).await?;
+				self.fs.storage.decrease_reference_count(id).await?;
+				self.fs.storage.decrease_reference_count(id + 1).await?;
 			}
 			Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
 				self.dealloc(offset, length.into()).await?;

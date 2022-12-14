@@ -7,9 +7,13 @@
 //! Instead, a separate object is used which may provide buffers for multiple
 //! devices at once.
 
+#[cfg(not(feature = "no-std"))]
+mod fs;
 mod mem;
 mod set;
 
+#[cfg(not(feature = "no-std"))]
+pub use fs::{FileDev, FileDevError};
 pub use {
 	mem::{MemDev, MemDevError},
 	set::DevSet,

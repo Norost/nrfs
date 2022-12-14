@@ -12,7 +12,7 @@ pub use {
 	dir::{Dir, DirOptions},
 	file::File,
 	name::Name,
-	nros::{BlockSize, Compression, Dev, MaxRecordSize},
+	nros::{dev, BlockSize, Compression, Dev, MaxRecordSize},
 };
 
 use core::fmt;

@@ -6,7 +6,7 @@ mod dev;
 mod record;
 
 use {
-	crate::*,
+	crate::{dev::*, *},
 	core::{
 		future::Future,
 		task::{Context, Poll},

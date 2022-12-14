@@ -5,7 +5,7 @@ use {
 		pin::pin,
 		task::{Context, Poll},
 	},
-	nros::MemDev,
+	nros::dev::MemDev,
 };
 
 fn run<F, R>(fut: F) -> R
