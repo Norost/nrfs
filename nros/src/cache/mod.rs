@@ -5,7 +5,7 @@ mod tree_data;
 pub use tree::Tree;
 
 use {
-	crate::{util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
+	crate::{storage, util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{Ref, RefCell, RefMut},
 		fmt, future, mem,
@@ -726,20 +726,21 @@ impl<D: Dev> Cache<D> {
 		let global_max = self.data.borrow().lrus.global.cache_max;
 		self.resize_cache(global_max, 0).await?;
 		debug_assert_eq!(
-			self.cache_status().dirty_usage,
+			self.statistics().dirty_usage,
 			0,
 			"not all data has been flushed"
 		);
 		Ok(self.store)
 	}
 
-	/// Get cache status
-	pub fn cache_status(&self) -> CacheStatus {
+	/// Get statistics for this sesion.
+	pub fn statistics(&self) -> Statistics {
 		#[cfg(test)]
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();
-		CacheStatus {
+		Statistics {
+			storage: self.store.statistics(),
 			global_usage: data.lrus.global.cache_size,
 			dirty_usage: data.lrus.dirty.cache_size,
 		}
@@ -885,17 +886,6 @@ impl fmt::Debug for Entry {
 	}
 }
 
-/// Summary of [`Cache`] status.
-///
-/// Returned by [`Cache::cache_status`].
-#[derive(Debug)]
-pub struct CacheStatus {
-	/// Total amount of memory used by record data, including dirty data.
-	pub global_usage: usize,
-	/// Total amount of memory used by dirty record data.
-	pub dirty_usage: usize,
-}
-
 /// Mutable reference to a cache entry.
 ///
 /// This will mark the entry as dirty when it is dropped.
@@ -948,4 +938,17 @@ impl Drop for EntryRefMut<'_> {
 		self.lrus.global.cache_size += self.entry.data.len();
 		self.lrus.global.cache_size -= self.original_len;
 	}
+}
+
+/// Statistics for this session.
+///
+/// Used for debugging.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Statistics {
+	/// Storage statistics.
+	pub storage: storage::Statistics,
+	/// Total amount of memory used by record data, including dirty data.
+	pub global_usage: usize,
+	/// Total amount of memory used by dirty record data.
+	pub dirty_usage: usize,
 }

@@ -130,6 +130,11 @@ impl<D: Dev> Nrfs<D> {
 	pub fn block_size(&self) -> BlockSize {
 		self.storage.block_size()
 	}
+
+	/// Get statistics for this session.
+	pub fn statistics(&self) -> Statistics {
+		Statistics { object_store: self.storage.statistics() }
+	}
 }
 
 pub enum Error<D>
@@ -163,4 +168,13 @@ impl<D: Dev> From<nros::Error<D>> for Error<D> {
 	fn from(err: nros::Error<D>) -> Self {
 		Self::Nros(err)
 	}
+}
+
+/// Statistics for this session.
+///
+/// Used for debugging.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Statistics {
+	/// Object store statistics.
+	pub object_store: nros::Statistics,
 }

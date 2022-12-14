@@ -1,11 +1,11 @@
-mod allocator;
+pub mod allocator;
 pub mod dev;
 
 use {
 	crate::{BlockSize, Compression, Error, MaxRecordSize, Record},
 	alloc::vec::Vec,
 	allocator::Allocator,
-	core::cell::RefCell,
+	core::cell::{Cell, RefCell},
 };
 
 pub use dev::{Dev, DevSet};
@@ -25,6 +25,17 @@ where
 {
 	devices: DevSet<D>,
 	allocator: RefCell<Allocator>,
+
+	/// Packed bytes read.
+	packed_bytes_read: Cell<u64>,
+	/// Packed bytes written.
+	packed_bytes_written: Cell<u64>,
+	/// Packed bytes destroyed.
+	packed_bytes_destroyed: Cell<u64>,
+	/// Unpacked bytes read.
+	unpacked_bytes_read: Cell<u64>,
+	/// Unpacked bytes written.
+	unpacked_bytes_written: Cell<u64>,
 }
 
 impl<D> Store<D>
@@ -32,7 +43,15 @@ where
 	D: Dev,
 {
 	pub async fn new(devices: DevSet<D>) -> Result<Self, Error<D>> {
-		let mut slf = Self { allocator: Default::default(), devices };
+		let mut slf = Self {
+			allocator: Default::default(),
+			devices,
+			packed_bytes_read: Default::default(),
+			packed_bytes_written: Default::default(),
+			packed_bytes_destroyed: Default::default(),
+			unpacked_bytes_read: Default::default(),
+			unpacked_bytes_written: Default::default(),
+		};
 		slf.allocator = Allocator::load(&slf).await?.into();
 		Ok(slf)
 	}
@@ -61,6 +80,12 @@ where
 		record
 			.unpack(&data.get()[..len as _], &mut v, self.max_record_size())
 			.map_err(Error::RecordUnpack)?;
+
+		self.packed_bytes_read
+			.update(|x| x + u64::from(u32::from(record.length)));
+		self.unpacked_bytes_read
+			.update(|x| x + u64::try_from(v.len()).unwrap());
+
 		Ok(v)
 	}
 
@@ -98,6 +123,11 @@ where
 		rec.lba = lba.into();
 		self.devices.write(lba.try_into().unwrap(), buf).await?;
 
+		self.packed_bytes_written
+			.update(|x| x + u64::from(u32::from(rec.length)));
+		self.unpacked_bytes_written
+			.update(|x| x + u64::try_from(data.len()).unwrap());
+
 		// Presto!
 		Ok(rec)
 	}
@@ -107,7 +137,9 @@ where
 		self.allocator.borrow_mut().free(
 			record.lba.into(),
 			self.calc_block_count(record.length.into()) as _,
-		)
+		);
+		self.packed_bytes_destroyed
+			.update(|x| x + u64::from(u32::from(record.length)));
 	}
 
 	/// Finish the current transaction.
@@ -158,10 +190,41 @@ where
 	pub fn set_object_list(&self, root: Record) {
 		self.devices.object_list.set(root)
 	}
+
+	/// Get statistics for this session.
+	pub fn statistics(&self) -> Statistics {
+		Statistics {
+			allocation: self.allocator.borrow().statistics,
+			packed_bytes_read: self.packed_bytes_read.get(),
+			packed_bytes_written: self.packed_bytes_written.get(),
+			packed_bytes_destroyed: self.packed_bytes_destroyed.get(),
+			unpacked_bytes_read: self.unpacked_bytes_read.get(),
+			unpacked_bytes_written: self.unpacked_bytes_written.get(),
+		}
+	}
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct AllocLog {
 	pub lba: u64,
 	pub len: u64,
+}
+
+/// Statistics for this session.
+///
+/// Used for debugging.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Statistics {
+	/// Allocation statistics.
+	pub allocation: allocator::Statistics,
+	/// Packed bytes read.
+	pub packed_bytes_read: u64,
+	/// Packed bytes written.
+	pub packed_bytes_written: u64,
+	/// Packed bytes destroyed.
+	pub packed_bytes_destroyed: u64,
+	/// Unpacked bytes read.
+	pub unpacked_bytes_read: u64,
+	/// Unpacked bytes written.
+	pub unpacked_bytes_written: u64,
 }

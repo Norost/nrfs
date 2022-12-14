@@ -17,7 +17,7 @@ struct Entry {
 raw!(Entry);
 
 #[derive(Debug)]
-pub struct Allocator {
+pub(super) struct Allocator {
 	/// Map of *allocated* blocks.
 	///
 	/// Gaps can be freely used.
@@ -35,6 +35,25 @@ pub struct Allocator {
 	///
 	/// Should be freed on log rewrite.
 	stack: Vec<Record>,
+	/// Allocator statistics.
+	///
+	/// Used for debugging.
+	pub(super) statistics: Statistics,
+}
+
+/// Statistics for this session.
+///
+/// Used for debugging.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Statistics {
+	/// Total amount of allocations in this session.
+	pub allocations: u64,
+	/// Total amount of deallocations in this session.
+	pub deallocations: u64,
+	/// Total amount of blocks allocated in this session.
+	pub allocated_blocks: u64,
+	/// Total amount of blocks deallocated in this session.
+	pub deallocated_blocks: u64,
 }
 
 impl Default for Allocator {
@@ -45,6 +64,7 @@ impl Default for Allocator {
 			free_map: Default::default(),
 			dirty_map: Default::default(),
 			stack: Default::default(),
+			statistics: Default::default(),
 		}
 	}
 }
@@ -117,6 +137,7 @@ impl Allocator {
 			free_map: Default::default(),
 			dirty_map: Default::default(),
 			stack,
+			statistics: Default::default(),
 		})
 	}
 
@@ -129,6 +150,8 @@ impl Allocator {
 			if r.end - r.start >= blocks {
 				self.alloc_map.insert(r.start..r.start + blocks);
 				self.dirty_map.insert(r.start..r.start + blocks);
+				self.statistics.allocations += 1;
+				self.statistics.allocated_blocks += blocks;
 				return Some(r.start);
 			}
 		}
@@ -153,6 +176,8 @@ impl Allocator {
 				self.free_map.insert(i..i + 1);
 			}
 		}
+		self.statistics.deallocations += 1;
+		self.statistics.deallocated_blocks += blocks;
 	}
 
 	/// Ensure all blocks in a range are allocated.

@@ -1,5 +1,6 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
+#![feature(cell_update)]
 #![feature(hash_drain_filter)]
 #![feature(int_roundings)]
 #![feature(iterator_try_collect)]
@@ -83,7 +84,7 @@ pub mod test;
 mod util;
 
 pub use {
-	cache::{CacheStatus, Tree},
+	cache::{Statistics, Tree},
 	record::{Compression, MaxRecordSize},
 	storage::{dev, Dev, Store},
 };
@@ -195,9 +196,9 @@ impl<D: Dev> Nros<D> {
 		self.store.resize_cache(global_max, write_max).await
 	}
 
-	/// Get cache status.
-	pub fn cache_status(&self) -> CacheStatus {
-		self.store.cache_status()
+	/// Get statistics for current session.
+	pub fn statistics(&self) -> Statistics {
+		self.store.statistics()
 	}
 
 	/// Unmount the object store.
