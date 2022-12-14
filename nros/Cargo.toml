@@ -32,6 +32,20 @@ version = "1.0"
 [dependencies.lz4_flex]
 version = "0.9"
 default-features = false
+# safe-encode is slightly faster (9.2s -> 9.0s), go figure.
+#
+# perf stat without safe-encode:
+#       39061490751      cycles                    #    4.208 GHz                      (83.33%)
+#        1030151269      stalled-cycles-frontend   #    2.64% frontend cycles idle     (83.33%)
+#        9810163765      stalled-cycles-backend    #   25.11% backend cycles idle      (83.33%)
+#       60764910794      instructions              #    1.56  insn per cycle
+#
+# perf stat with safe-encode:
+#       37424902119      cycles                    #    4.190 GHz                      (83.32%)
+#        1005844054      stalled-cycles-frontend   #    2.69% frontend cycles idle     (83.34%)
+#       14472855443      stalled-cycles-backend    #   38.67% backend cycles idle      (83.34%)
+#       80920467032      instructions              #    2.16  insn per cycle
+features = ["checked-decode", "safe-encode"]
 
 [dependencies.rustc-hash]
 version = "1.1"

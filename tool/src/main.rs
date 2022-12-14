@@ -55,6 +55,10 @@ struct Make {
 	block_size_p2: Option<u8>,
 	#[clap(short, long, value_enum, default_value_t = Compression::Lz4, help = "The compression to use")]
 	compression: Compression,
+	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the global cache size")]
+	global_cache_size: usize,
+	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the dirty cache size")]
+	dirty_cache_size: usize,
 }
 
 #[derive(Clone, Debug, clap::ArgEnum)]
@@ -68,6 +72,10 @@ enum Compression {
 struct Dump {
 	#[clap(help = "The path to the filesystem image")]
 	path: String,
+	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the global cache size")]
+	global_cache_size: usize,
+	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the dirty cache size")]
+	dirty_cache_size: usize,
 }
 
 // https://github.com/rust-lang/rust/pull/96875/files
@@ -116,9 +124,6 @@ async fn make(args: Make) {
 		Compression::Lz4 => nrfs::Compression::Lz4,
 	};
 
-	let global_cache_size = 1 << 20;
-	let dirty_cache_size = 1 << 20;
-
 	let s = FileDev::new(f, block_size);
 	let mut nrfs = Nrfs::new(
 		[[s]],
@@ -126,8 +131,8 @@ async fn make(args: Make) {
 		rec_size,
 		&opt,
 		compr,
-		global_cache_size,
-		dirty_cache_size,
+		args.global_cache_size,
+		args.dirty_cache_size,
 	)
 	.await
 	.unwrap();
@@ -136,7 +141,7 @@ async fn make(args: Make) {
 		let mut root = nrfs.root_dir().await.unwrap();
 		add_files(&mut root, d, &args, extensions).await;
 	}
-	//nrfs.finish_transaction().await.unwrap();
+	dbg!(nrfs.statistics());
 	nrfs.unmount().await.unwrap();
 
 	async fn add_files(
@@ -200,9 +205,6 @@ async fn make(args: Make) {
 }
 
 async fn dump(args: Dump) {
-	let global_cache_size = 1 << 20;
-	let dirty_cache_size = 1 << 20;
-
 	let mut f = File::open(args.path).unwrap();
 
 	// FIXME block size shouldn't matter.
@@ -211,7 +213,7 @@ async fn dump(args: Dump) {
 	f.read_exact(&mut block_size_p2).unwrap();
 
 	let s = FileDev::new(f, BlockSize::from_raw(block_size_p2[0]).unwrap());
-	let mut nrfs = Nrfs::load([s].into(), global_cache_size, dirty_cache_size)
+	let mut nrfs = Nrfs::load([s].into(), args.global_cache_size, args.dirty_cache_size)
 		.await
 		.unwrap();
 

@@ -7,8 +7,10 @@ members = [
 ]
 
 [profile.release]
-lto = "fat"
+debug = true # for flamegraph
+#lto = "fat"
 opt-level = 3
+codegen-units = 1
 
 [profile.grcov]
 inherits = "dev"
