@@ -211,7 +211,7 @@ impl<D: Dev> DevSet<D> {
 			devices,
 
 			block_size: BlockSize::from_raw(header.block_length_p2).expect("todo"),
-			max_record_size: MaxRecordSize::from_raw(header.block_length_p2).expect("todo"),
+			max_record_size: MaxRecordSize::from_raw(header.max_record_length_p2).expect("todo"),
 			compression: Compression::from_raw(header.compression).expect("todo"),
 			uid: header.uid,
 			block_count: header.block_count.into(),
