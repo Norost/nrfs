@@ -182,6 +182,10 @@ impl<D: Dev> Nros<D> {
 
 	/// Return an owned reference to an object.
 	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
+		assert!(
+			id != u64::MAX,
+			"ID u64::MAX is reserved for the object list"
+		);
 		self.store.get(id).await
 	}
 

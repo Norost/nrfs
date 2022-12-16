@@ -1,5 +1,6 @@
 //#![cfg_attr(not(test), no_std)]
-#![deny(elided_lifetimes_in_paths)]
+#![forbid(unused_must_use)]
+#![forbid(elided_lifetimes_in_paths)]
 #![feature(pin_macro)]
 
 pub mod dir;
@@ -9,17 +10,54 @@ mod name;
 mod test;
 
 pub use {
-	dir::{Dir, DirOptions},
-	file::File,
+	dir::DirOptions,
 	name::Name,
 	nros::{dev, BlockSize, Compression, Dev, MaxRecordSize},
 };
 
-use core::fmt;
+use {
+	core::{
+		cell::{RefCell, RefMut},
+		fmt,
+	},
+	dir::{Child, DirData},
+	file::FileData,
+	rustc_hash::FxHashMap,
+	std::collections::hash_map,
+};
 
+/// Index used for arenas with file data.
+type Idx = arena::Handle<u8>;
+
+/// [`Nrfs`] shared mutable data.
+#[derive(Debug, Default)]
+struct NrfsData {
+	/// Files with live references.
+	///
+	/// Since filess may be embedded at any time using IDs is not practical.
+	files: arena::Arena<FileData, u8>,
+	/// Directories with live references.
+	///
+	/// Indexed by ID.
+	directories: FxHashMap<u64, DirData>,
+	/// Entries that were destroyed but still have live references.
+	///
+	/// The value indicates the amount of references remaining.
+	destroyed: FxHashMap<Child, usize>,
+}
+
+impl NrfsData {
+	/// Remove a reference to a parent.
+	fn remove_parent_reference(&mut self) {}
+}
+
+/// NRFS filesystem manager.
 #[derive(Debug)]
 pub struct Nrfs<D: Dev> {
+	/// Object storage.
 	storage: nros::Nros<D>,
+	/// Data of objects with live references.
+	data: RefCell<NrfsData>,
 }
 
 impl<D: Dev> Nrfs<D> {
@@ -45,8 +83,8 @@ impl<D: Dev> Nrfs<D> {
 			dirty_cache_size,
 		)
 		.await?;
-		let mut s = Self { storage };
-		Dir::new(&mut s, dir).await?;
+		let mut s = Self { storage, data: Default::default() };
+		DirRef::new(&mut s, u64::MAX, u32::MAX, dir).await?;
 		Ok(s)
 	}
 
@@ -57,22 +95,19 @@ impl<D: Dev> Nrfs<D> {
 	) -> Result<Self, Error<D>> {
 		Ok(Self {
 			storage: nros::Nros::load(devices, global_cache_size, dirty_cache_size).await?,
+			data: Default::default(),
 		})
 	}
 
-	pub async fn root_dir(&mut self) -> Result<Dir<'_, D>, Error<D>> {
-		Dir::load(self, 0).await
+	pub async fn root_dir(&self) -> Result<DirRef<'_, D>, Error<D>> {
+		DirRef::load(self, u64::MAX, u32::MAX, 0).await
 	}
 
-	pub async fn finish_transaction(&mut self) -> Result<(), Error<D>> {
+	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
 		self.storage.finish_transaction().await.map_err(Error::Nros)
 	}
 
-	pub async fn get_dir(&mut self, id: u64) -> Result<Dir<'_, D>, Error<D>> {
-		Dir::load(self, id).await
-	}
-
-	async fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
+	async fn read(&self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
 		self.storage
 			.get(id)
 			.await?
@@ -81,13 +116,13 @@ impl<D: Dev> Nrfs<D> {
 			.map_err(Error::Nros)
 	}
 
-	async fn read_exact(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
+	async fn read_exact(&self, id: u64, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
 		self.read(id, offset, buf)
 			.await
 			.and_then(|l| (l == buf.len()).then_some(()).ok_or(Error::Truncated))
 	}
 
-	async fn write(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<usize, Error<D>> {
+	async fn write(&self, id: u64, offset: u64, data: &[u8]) -> Result<usize, Error<D>> {
 		self.storage
 			.get(id)
 			.await?
@@ -96,21 +131,21 @@ impl<D: Dev> Nrfs<D> {
 			.map_err(Error::Nros)
 	}
 
-	async fn write_all(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
+	async fn write_all(&self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
 		self.write(id, offset, data)
 			.await
 			.and_then(|l| (l == data.len()).then_some(()).ok_or(Error::Truncated))
 	}
 
 	/// This function automatically grows the object if it can't contain the data.
-	async fn write_grow(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
+	async fn write_grow(&self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
 		if self.length(id).await? < offset + data.len() as u64 {
 			self.resize(id, offset + data.len() as u64).await?;
 		}
 		self.write_all(id, offset, data).await
 	}
 
-	async fn resize(&mut self, id: u64, len: u64) -> Result<(), Error<D>> {
+	async fn resize(&self, id: u64, len: u64) -> Result<(), Error<D>> {
 		self.storage
 			.get(id)
 			.await?
@@ -119,7 +154,8 @@ impl<D: Dev> Nrfs<D> {
 			.map_err(Error::Nros)
 	}
 
-	async fn length(&mut self, id: u64) -> Result<u64, Error<D>> {
+	/// Get the length of an object.
+	async fn length(&self, id: u64) -> Result<u64, Error<D>> {
 		self.storage.get(id).await?.len().await.map_err(Error::Nros)
 	}
 
@@ -134,6 +170,180 @@ impl<D: Dev> Nrfs<D> {
 	/// Get statistics for this session.
 	pub fn statistics(&self) -> Statistics {
 		Statistics { object_store: self.storage.statistics() }
+	}
+
+	/// Get a reference to a [`FileData`] structure.
+	fn file_data(&self, idx: Idx) -> RefMut<'_, FileData> {
+		RefMut::map(self.data.borrow_mut(), |fs| &mut fs.files[idx])
+	}
+
+	/// Get a reference to a [`DirData`] structure.
+	fn dir_data(&self, id: u64) -> RefMut<'_, DirData> {
+		RefMut::map(self.data.borrow_mut(), |fs| {
+			fs.directories.get_mut(&id).expect("no DirData with id")
+		})
+	}
+}
+
+/// Reference to a directory object.
+#[derive(Debug)]
+pub struct DirRef<'a, D: Dev> {
+	/// Filesystem object containing the directory.
+	fs: &'a Nrfs<D>,
+	/// ID of the directory object.
+	id: u64,
+}
+
+/// Raw [`DirRef`] data.
+///
+/// This is more compact than [`DirRef`] and better suited for storing in a container.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RawDirRef {
+	/// ID of the directory object.
+	id: u64,
+}
+
+impl<'a, D: Dev> DirRef<'a, D> {
+	/// Turn this reference into raw components.
+	fn into_raw(self) -> RawDirRef {
+		let Self { fs: _, id } = self;
+		RawDirRef { id }
+	}
+
+	/// Create a reference from raw components.
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawDirRef) -> Self {
+		let RawDirRef { id } = raw;
+		DirRef { fs, id }
+	}
+}
+
+impl<'a, D: Dev> Clone for DirRef<'a, D> {
+	fn clone(&self) -> Self {
+		self.fs.dir_data(self.id).reference_count += 1;
+		Self { fs: self.fs, id: self.id }
+	}
+}
+
+impl<D: Dev> Drop for DirRef<'_, D> {
+	fn drop(&mut self) {
+		let mut fs = self.fs.data.borrow_mut();
+		let hash_map::Entry::Occupied(mut data) = fs.directories.entry(self.id) else {
+			unreachable!()
+		};
+		data.get_mut().reference_count -= 1;
+		if data.get_mut().reference_count == 0 {
+			data.remove();
+		}
+	}
+}
+
+/// Reference to a file object.
+#[derive(Debug)]
+pub struct FileRef<'a, D: Dev> {
+	/// Filesystem object containing the directory.
+	fs: &'a Nrfs<D>,
+	/// Handle pointing to the corresponding [`FileData`].
+	idx: Idx,
+}
+
+/// Raw [`FileRef`] data.
+///
+/// This is more compact than [`FileRef`] and better suited for storing in a container.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RawFileRef {
+	/// Handle pointing to the corresponding [`FileData`].
+	idx: Idx,
+}
+
+impl<'a, D: Dev> FileRef<'a, D> {
+	/// Turn this reference into raw components.
+	fn into_raw(self) -> RawFileRef {
+		let Self { fs: _, idx } = self;
+		RawFileRef { idx }
+	}
+
+	/// Create a reference from raw components.
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawFileRef) -> Self {
+		let RawFileRef { idx } = raw;
+		FileRef { fs, idx }
+	}
+}
+
+impl<'a, D: Dev> Clone for FileRef<'a, D> {
+	fn clone(&self) -> Self {
+		self.fs.file_data(self.idx).reference_count += 1;
+		Self { fs: self.fs, idx: self.idx }
+	}
+}
+
+impl<D: Dev> Drop for FileRef<'_, D> {
+	fn drop(&mut self) {
+		let fs = { &mut *self.fs.data.borrow_mut() };
+		let mut data = fs
+			.files
+			.get_mut(self.idx)
+			.expect("filedata should be present");
+		data.reference_count -= 1;
+		if data.reference_count == 0 {
+			// Remove itself from parent directory.
+			let dir = fs
+				.directories
+				.get_mut(&data.parent_id)
+				.expect("parent dir is not loaded");
+			let _r = dir.children.remove(&data.parent_index);
+			debug_assert!(matches!(_r, Some(Child::File(idx)) if idx == self.idx));
+			// Remove filedata.
+			let data = fs
+				.files
+				.remove(self.idx)
+				.expect("filedata should be present");
+			// Reconstruct DirRef to adjust reference count of dir appropriately.
+			drop(DirRef { fs: self.fs, id: data.parent_id });
+		}
+	}
+}
+
+/// Reference to a file object representing a symbolic link.
+#[derive(Clone, Debug)]
+pub struct SymRef<'a, D: Dev>(FileRef<'a, D>);
+
+/// Raw [`SymRef`] data.
+///
+/// This is more compact than [`SymRef`] and better suited for storing in a container.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RawSymRef(RawFileRef);
+
+impl<'a, D: Dev> SymRef<'a, D> {
+	/// Turn this reference into raw components.
+	fn into_raw(self) -> RawSymRef {
+		RawSymRef(self.0.into_raw())
+	}
+
+	/// Create a reference from raw components.
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawSymRef) -> Self {
+		SymRef(FileRef::from_raw(fs, raw.0))
+	}
+}
+
+/// Reference to an entry with an unrecognized type.
+#[derive(Clone, Debug)]
+pub struct UnknownRef<'a, D: Dev>(FileRef<'a, D>);
+
+/// Raw [`UnknownRef`] data.
+///
+/// This is more compact than [`UnknownRef`] and better suited for storing in a container.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RawUnknownRef(RawFileRef);
+
+impl<'a, D: Dev> UnknownRef<'a, D> {
+	/// Turn this reference into raw components.
+	fn into_raw(self) -> RawUnknownRef {
+		RawUnknownRef(self.0.into_raw())
+	}
+
+	/// Create a reference from raw components.
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawUnknownRef) -> Self {
+		UnknownRef(FileRef::from_raw(fs, raw.0))
 	}
 }
 
@@ -177,4 +387,28 @@ impl<D: Dev> From<nros::Error<D>> for Error<D> {
 pub struct Statistics {
 	/// Object store statistics.
 	pub object_store: nros::Statistics,
+}
+
+/// Write an exact amount of data.
+///
+/// Fails if not all data could be written.
+async fn write_all<'a, D: Dev>(
+	obj: &nros::Tree<'a, D>,
+	offset: u64,
+	data: &[u8],
+) -> Result<(), Error<D>> {
+	let l = obj.write(offset, data).await?;
+	(l == data.len()).then_some(()).ok_or(Error::Truncated)
+}
+
+/// Read an exact amount of data.
+///
+/// Fails if the buffer could not be filled.
+async fn read_exact<'a, D: Dev>(
+	obj: &nros::Tree<'a, D>,
+	offset: u64,
+	buf: &mut [u8],
+) -> Result<(), Error<D>> {
+	let l = obj.read(offset, buf).await?;
+	(l == buf.len()).then_some(()).ok_or(Error::Truncated)
 }

@@ -6,6 +6,9 @@ edition = "2021"
 [features]
 trace = ["nros/trace"]
 
+[dependencies.arena]
+git = "https://git.sr.ht/~demindiro/arena"
+
 [dependencies.endian]
 package = "nora_endian"
 version = "0.1"
@@ -16,9 +19,11 @@ path = "../nros"
 [dependencies.rangemap]
 version = "1.0"
 
+[dependencies.rustc-hash]
+version = "1.1"
+
 [dependencies.siphasher]
 version = "0.3"
 
 [dev-dependencies.futures-util]
 version = "0.3"
-
