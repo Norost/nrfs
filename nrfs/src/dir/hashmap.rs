@@ -32,6 +32,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 	pub async fn remove_at(&self, mut index: u32) -> Result<(), Error<D>> {
 		let hash_algorithm = self.fs.dir_data(self.dir_id).hash_algorithm;
+
 		match hash_algorithm {
 			// shift entries if using Robin Hood hashing
 			HashAlgorithm::SipHasher13 => {
@@ -44,8 +45,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 					if e.ty == 0 || calc_psl(index + 1, e.hash) == 0 {
 						break;
 					}
-					let e = self.get_ext((index + 1) & mask, e).await?;
-					self.set_ext(index, &e).await?;
+					self.set(&e).await?;
 					index += 1;
 					index &= mask;
 				}
@@ -53,7 +53,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		}
 
 		// Mark entry as empty
-		let offt = self.get_offset(index);
+		let offt = self.fs.dir_data(self.dir_id).get_offset(index);
 		write_all(&self.map, offt + 7, &[TY_NONE]).await?;
 
 		Ok(())
@@ -92,51 +92,57 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	///
 	/// If the index is out of range.
 	pub async fn get(&self, index: u32) -> Result<RawEntry, Error<D>> {
-		let offt = self.get_offset(index);
-		let mut buf = [0; 24];
+		// Get data necessary to extract entry.
+		let data = self.fs.dir_data(self.dir_id);
+		let offt = data.get_offset(index);
+		let len = data.entry_size();
+		let unix_offset = data.unix_offset;
+		let mtime_offset = data.mtime_offset;
+		drop(data);
+
+		// Read entry.
+		let mut buf = vec![0; len.into()];
 		read_exact(&self.map, offt, &mut buf).await?;
-		let [a, b, c, d, e, f, key_len, ty, buf @ ..] = buf;
+
+		// Get ty, key len, key offset
+		let &[ty, key_len, a, b, c, d, e, f, ref buf @ ..] = &buf[..] else { todo!() };
 		let key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
-		let [id @ .., a, b, c, d, _, _, _, _] = buf;
+
+		// Get hash, padding
+		let &[a, b, c, d, e, f, g, h, ref buf @ ..] = buf else { todo!() };
 		let hash = u32::from_le_bytes([a, b, c, d]);
-		let id_or_offset = u64::from_le_bytes(id);
-		Ok(RawEntry { key_offset, key_len, id_or_offset, ty, hash, index })
-	}
+		let padding = [e, f, g, h];
 
-	/// Get an entry with extension data.
-	///
-	/// This does not check if the entry is empty or not.
-	///
-	/// # Panics
-	///
-	/// If the index is out of range.
-	pub async fn get_ext(&self, index: u32, entry: RawEntry) -> Result<RawEntryExt, Error<D>> {
-		let offt = self.get_offset(index);
+		// Get ID or (offset, len)
+		let &[a, b, c, d, e, f, g, h, ref buf @ ..] = buf else { todo!() };
+		let id_or_offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
 
-		let (unix_offset, mtime_offset) = {
-			let data = self.fs.dir_data(self.dir_id);
-			(data.unix_offset, data.mtime_offset)
-		};
+		// Get extensions
 
 		// Get unix info
-		let unix = if let Some(o) = unix_offset {
-			let mut buf = [0; 8];
-			read_exact(&self.map, offt + u64::from(o), &mut buf).await?;
-			Some(ext::unix::Entry::from_raw(buf))
-		} else {
-			None
-		};
+		let ext_unix = unix_offset
+			.map(usize::from)
+			.map(|o| ext::unix::Entry::from_raw(buf[o..o + 8].try_into().unwrap()));
 
 		// Get mtime info
-		let mtime = if let Some(o) = mtime_offset {
-			let mut buf = [0; 8];
-			read_exact(&self.map, offt + u64::from(o), &mut buf).await?;
-			Some(ext::mtime::Entry::from_raw(buf))
-		} else {
-			None
-		};
+		let ext_mtime = mtime_offset
+			.map(usize::from)
+			.map(|o| ext::mtime::Entry::from_raw(buf[o..o + 8].try_into().unwrap()));
 
-		Ok(RawEntryExt { entry, unix, mtime })
+		Ok(RawEntry {
+			ty,
+			key_len,
+			key_offset,
+			hash,
+			padding,
+
+			id_or_offset,
+
+			ext_unix,
+			ext_mtime,
+
+			index,
+		})
 	}
 
 	/// Set the raw standard info for an entry.
@@ -146,95 +152,89 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	/// # Panics
 	///
 	/// If the index is out of range.
-	pub async fn set(&self, index: u32, entry: &RawEntry) -> Result<u64, Error<D>> {
-		let offt = self.get_offset(index);
-		let mut buf = [0; 24];
+	pub async fn set(&self, entry: &RawEntry) -> Result<(), Error<D>> {
+		// Get data necessary to write entry.
+		let data = self.fs.dir_data(self.dir_id);
+		let offt = data.get_offset(entry.index);
+		let len = data.entry_size();
+		let unix_offset = data.unix_offset;
+		let mtime_offset = data.mtime_offset;
+		drop(data);
+
+		// Serialize entry.
+		let mut buf = vec![0; len.into()];
+
+		// Set ty, key len, key offset
 		buf[..8].copy_from_slice(&entry.key_offset.to_le_bytes());
-		buf[6] = entry.key_len;
-		buf[7] = entry.ty;
-		buf[8..16].copy_from_slice(&entry.id_or_offset.to_le_bytes());
-		buf[16..20].copy_from_slice(&entry.hash.to_le_bytes());
-		write_all(&self.map, offt, &buf).await?;
-		Ok(offt)
-	}
+		buf[0] = entry.key_len;
+		buf[1] = entry.ty;
 
-	/// Set an entry with key and extension data.
-	///
-	/// This does not check if the entry is empty or not.
-	///
-	/// # Panics
-	///
-	/// If the index is out of range.
-	pub async fn set_ext(&self, index: u32, entry: &RawEntryExt) -> Result<(), Error<D>> {
-		let offt = self.set(index, &entry.entry).await?;
+		// Set hash, padding
+		buf[8..12].copy_from_slice(&entry.hash.to_le_bytes());
+		buf[12..16].copy_from_slice(&entry.padding);
 
-		let (unix_offset, mtime_offset) = {
-			let data = self.fs.dir_data(self.dir_id);
-			(data.unix_offset, data.mtime_offset)
-		};
+		// Set ID or (offset, len)
+		buf[16..24].copy_from_slice(&entry.id_or_offset.to_le_bytes());
+
+		// Set extensions
 
 		// Set unix info
-		if let Some(o) = unix_offset {
-			let u = entry.unix.map_or([0; 8], |u| u.into_raw());
-			write_all(&self.map, offt + u64::from(o), &u).await?;
-		}
+		let ext_unix = unix_offset
+			.map(usize::from)
+			.and_then(|o| entry.ext_unix.map(|e| (o, e)))
+			.map(|(o, e)| buf[o..o + 8].copy_from_slice(&e.into_raw()));
 
-		// Set mtime info
-		if let Some(o) = mtime_offset {
-			let u = entry.mtime.map_or([0; 8], |u| u.into_raw());
-			write_all(&self.map, offt + u64::from(o), &u).await?;
-		}
+		// Get mtime info
+		let ext_mtime = mtime_offset
+			.map(usize::from)
+			.and_then(|o| entry.ext_unix.map(|e| (o, e)))
+			.map(|(o, e)| buf[o..o + 8].copy_from_slice(&e.into_raw()));
 
-		Ok(())
+		// Write out entry.
+		write_all(&self.map, offt, &buf).await
 	}
 
 	/// Set arbitrary data.
 	pub async fn set_raw(&self, index: u32, offset: u16, data: &[u8]) -> Result<(), Error<D>> {
-		let o = self.get_offset(index) + u64::from(offset);
-		write_all(&self.map, o, data).await
-	}
-
-	/// Determine the offset of an entry.
-	///
-	/// This does *not* check if the index is in range.
-	fn get_offset(&self, index: u32) -> u64 {
-		let data = self.fs.dir_data(self.dir_id);
-		debug_assert!(index <= self.mask, "{} <= {}", index, self.mask);
-		data.hashmap_base() + u64::from(index) * data.entry_size()
+		let offt = self.fs.dir_data(self.dir_id).get_offset(index) + u64::from(offset);
+		write_all(&self.map, offt, data).await
 	}
 
 	pub async fn insert(
 		&self,
-		mut entry: RawEntryExt,
+		mut entry: RawEntry,
 		name: Option<&Name>,
 	) -> Result<Option<u32>, Error<D>> {
 		let data = self.fs.dir_data(self.dir_id);
 
-		let mask = self.mask;
-		name.map(|n| entry.entry.hash = data.hash(n));
-		let mut index = entry.entry.hash & mask;
+		name.map(|n| entry.hash = data.hash(n));
+		let mut index = entry.hash & self.mask;
 		let mut psl = 0u32;
 		let mut entry_index = None;
 
-		let calc_psl = |i: u32, h| i.wrapping_sub(h) & mask;
+		let calc_psl = |i: u32, h| i.wrapping_sub(h) & self.mask;
 
 		async fn insert_entry<'a, D: Dev>(
 			slf: &HashMap<'a, D>,
 			entry_index: &mut Option<u32>,
 			name: Option<&Name>,
 			i: u32,
-			e: &mut RawEntryExt,
+			e: &mut RawEntry,
 		) -> Result<(), Error<D>> {
 			if let Some(name) = entry_index.is_none().then(|| name).flatten() {
 				// Store name
 				let dir = Dir::new(slf.fs, slf.dir_id);
-				e.entry.key_offset = dir.alloc(name.len_u8().into()).await?;
-				e.entry.key_len = name.len_u8();
-				dir.write_heap(e.entry.key_offset, name).await?;
+				if name.len_u8() <= 14 {
+					todo!("embed");
+				} else {
+					e.key_offset = dir.alloc(name.len_u8().into()).await?;
+					e.key_len = name.len_u8();
+					dir.write_heap(e.key_offset, name).await?;
+				}
 			}
 
-			e.entry.index = i;
-			slf.set_ext(i, e).await?;
+			e.index = i;
+			slf.set(&e).await?;
 
 			if entry_index.is_none() {
 				*entry_index = Some(i);
@@ -267,13 +267,12 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				// Check if the PSL (Probe Sequence Length) is lower than that of ours
 				// If yes, swap with it.
 				if psl > calc_psl(index, e.hash) {
-					let e = self.get_ext(index, e).await?;
 					insert_entry(self, &mut entry_index, name, index, &mut entry).await?;
 					entry = e;
 				}
 
 				index += 1;
-				index &= mask;
+				index &= self.mask;
 				psl += 1;
 			},
 		}
@@ -281,14 +280,43 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	}
 }
 
+/// Raw entry data.
 #[derive(Debug)]
 pub(super) struct RawEntry {
-	pub key_offset: u64,
-	pub key_len: u8,
-	pub id_or_offset: u64,
-	pub index: u32,
+	// Header
+	/// Entry type.
 	pub ty: u8,
+	/// Key length.
+	///
+	/// If the length is `<= 14`, the key is embedded,
+	/// i.e. it must be extracted from [`Self::key_offset`], [`Self::hash`] and [`Self::padding`].
+	/// Otherwise it must be fetched from the heap.
+	pub key_len: u8,
+	/// The offset of the key, unless [`Self::key_len`] is `<= 14`.
+	pub key_offset: u64,
+	/// The hash of the key, unless [`Self::key_len`] is `<= 14`.
+	///
+	/// Used to avoid heap fetches when moving entries.
 	pub hash: u32,
+	/// Unused padding, unless [`Self::key_len`] is `<= 14`.
+	pub padding: [u8; 4],
+
+	// Regular data
+	/// Entry regular data.
+	///
+	/// The meaning of the value depends on entry type.
+	/// Use [`Self::ty`] to determine.
+	pub id_or_offset: u64,
+
+	// Extension data
+	/// `unix` extension data.
+	pub ext_unix: Option<ext::unix::Entry>,
+	/// `mtime` extension data.
+	pub ext_mtime: Option<ext::mtime::Entry>,
+
+	// Other
+	/// The index of the entry.
+	pub index: u32,
 }
 
 impl RawEntry {
@@ -308,13 +336,38 @@ impl RawEntry {
 			n => Err(n),
 		}
 	}
+
+	/// Get the key.
+	///
+	/// This may be embedded, giving the key directly,
+	/// or it may be on the heap in which case another fetch is necessary.
+	pub fn key(&self) -> RawEntryKey {
+		if self.key_len <= 14 {
+			let mut data = [0; 14];
+			data[..6].copy_from_slice(&self.key_offset.to_le_bytes()[..6]);
+			data[6..10].copy_from_slice(&self.hash.to_le_bytes());
+			data[10..].copy_from_slice(&self.padding);
+			RawEntryKey::Embed { data, len: self.key_len }
+		} else {
+			RawEntryKey::Heap { offset: self.key_offset, len: self.key_len }
+		}
+	}
+
+	/// Embed key data.
+	fn embed_key(&mut self, data: [u8; 14]) {
+		let [a, b, c, d, e, f, data @ ..] = data;
+		self.key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
+		let [a, b, c, d, padding @ ..] = data;
+		self.hash = u32::from_le_bytes([a, b, c, d]);
+		self.padding = padding;
+	}
 }
 
+/// Entry key, which may be embedded or on the heap.
 #[derive(Debug)]
-pub(super) struct RawEntryExt {
-	pub entry: RawEntry,
-	pub unix: Option<ext::unix::Entry>,
-	pub mtime: Option<ext::mtime::Entry>,
+pub(super) enum RawEntryKey {
+	Embed { data: [u8; 14], len: u8 },
+	Heap { offset: u64, len: u8 },
 }
 
 #[derive(Clone, Copy, Default, Debug)]

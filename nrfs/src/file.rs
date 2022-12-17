@@ -1,17 +1,17 @@
-use crate::{
-	dir::{Child, Dir, Type},
-	Dev, Error, FileRef, Idx, Nrfs, SymRef, UnknownRef,
+use {
+	crate::{
+		dir::{Child, Dir, Type},
+		DataHeader, Dev, Error, FileRef, Idx, Nrfs, SymRef, UnknownRef,
+	},
+	core::cell::RefMut,
+	std::collections::hash_map,
 };
 
 /// [`File`] shared mutable data.
 #[derive(Debug)]
 pub struct FileData {
-	/// The amount of live [`FileRef`]s pointing to this file.
-	pub(crate) reference_count: usize,
-	/// The ID of the parent directory.
-	pub(crate) parent_id: u64,
-	/// The index of the entry in the parent directory.
-	pub(crate) parent_index: u32,
+	/// Data header.
+	pub(crate) header: DataHeader,
 	/// Reference to file data, which may be a separate object or embedded on a directory's heap.
 	inner: Inner,
 }
@@ -61,7 +61,7 @@ const EMBED_FACTOR: u64 = 4;
 
 /// Helper structure for working with files.
 #[derive(Debug)]
-struct File<'a, D: Dev> {
+pub(crate) struct File<'a, D: Dev> {
 	/// The filesystem containing the file's data.
 	fs: &'a Nrfs<D>,
 	/// The index of this file.
@@ -81,7 +81,7 @@ enum Ty {
 
 impl<'a, D: Dev> File<'a, D> {
 	/// Create a [`File`] helper structure.
-	pub(crate) fn new(fs: &'a Nrfs<D>, idx: Idx, ty: Ty) -> Self {
+	fn new(fs: &'a Nrfs<D>, idx: Idx, ty: Ty) -> Self {
 		Self { fs, idx, ty }
 	}
 
@@ -93,7 +93,7 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.parent_id);
+		let dir = Dir::new(self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
@@ -125,7 +125,7 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(());
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.parent_id);
+		let dir = Dir::new(self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
@@ -157,7 +157,7 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.parent_id);
+		let dir = Dir::new(self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
@@ -184,7 +184,7 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(());
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.parent_id);
+		let dir = Dir::new(self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
@@ -210,7 +210,7 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(());
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.parent_id);
+		let dir = Dir::new(self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
@@ -253,7 +253,7 @@ impl<'a, D: Dev> File<'a, D> {
 				data_f.inner = new_inner;
 
 				// Update directory entry
-				let (index, ty) = (data_f.parent_index, data_f.ty(self.ty));
+				let (index, ty) = (data_f.header.parent_index, data_f.ty(self.ty));
 				drop(data_f);
 				dir.set_ty(index, ty).await
 			}
@@ -263,13 +263,13 @@ impl<'a, D: Dev> File<'a, D> {
 	/// Resize the file.
 	async fn resize(&self, new_len: u64) -> Result<(), Error<D>> {
 		let mut data = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data.parent_id);
+		let dir = Dir::new(self.fs, data.header.parent_id);
 
 		match &data.inner {
 			&Inner::Object { id } if new_len == 0 => {
 				// Just destroy the object and mark ourselves as embedded aain.
 				data.inner = Inner::Embed { offset: 0, length: 0 };
-				let (index, ty) = (data.parent_index, data.ty(self.ty));
+				let (index, ty) = (data.header.parent_index, data.ty(self.ty));
 				drop(data);
 				dir.set_ty(index, ty).await?;
 				self.fs.storage.decrease_reference_count(id).await?;
@@ -310,7 +310,7 @@ impl<'a, D: Dev> File<'a, D> {
 				data.inner = new_inner;
 
 				// Update directory entry
-				let (index, ty) = (data.parent_index, data.ty(self.ty));
+				let (index, ty) = (data.header.parent_index, data.ty(self.ty));
 				drop(data);
 				dir.set_ty(index, ty).await
 			}
@@ -397,7 +397,7 @@ macro_rules! impl_common {
 		}
 
 		/// Construct a helper [`File`]
-		fn file(&self) -> File<'a, D> {
+		pub(crate) fn file(&self) -> File<'a, D> {
 			let $s = self;
 			let s = &$self;
 			File::new(s.fs, s.idx, $ty)
@@ -418,19 +418,31 @@ impl<'a, D: Dev> FileRef<'a, D> {
 
 	/// Create a new [`FileRef`].
 	fn new_ref(dir: &Dir<'a, D>, inner: Inner, index: u32) -> Self {
-		// FIXME check if entry is already present.
-		let idx = dir.fs.data.borrow_mut().files.insert(FileData {
-			reference_count: 1,
-			parent_id: dir.id,
-			parent_index: index,
-			inner,
+		// Split RefMut so we don't need to drop and reborrow the annoying way.
+		let (mut dirs, mut files) = RefMut::map_split(dir.fs.data.borrow_mut(), |data| {
+			(&mut data.directories, &mut data.files)
 		});
-		let _r = dir
-			.fs
-			.dir_data(dir.id)
-			.children
-			.insert(index, Child::File(idx));
-		debug_assert!(_r.is_none(), "dangling index");
+
+		let idx = match dirs.get_mut(&dir.id).unwrap().children.entry(index) {
+			hash_map::Entry::Occupied(e) => match e.get() {
+				&Child::Dir(_) => unreachable!(),
+				&Child::File(idx) => {
+					files[idx].header.reference_count += 1;
+					idx
+				}
+			},
+			hash_map::Entry::Vacant(e) => {
+				// FIXME check if entry is already present.
+				let idx = dir.fs
+					.data
+					.borrow_mut()
+					.files
+					.insert(FileData { header: DataHeader::new(dir.id, index), inner });
+				e.insert(Child::File(idx));
+				idx
+			}
+		};
+
 		Self { fs: dir.fs, idx }
 	}
 

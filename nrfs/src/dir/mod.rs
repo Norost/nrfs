@@ -4,7 +4,7 @@ mod hashmap;
 
 use {
 	crate::{
-		read_exact, write_all, Dev, DirRef, Error, FileRef, Idx, Name, Nrfs, SymRef,
+		read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Idx, Name, Nrfs, SymRef,
 		UnknownRef,
 	},
 	core::{cell::RefMut, hash::Hasher},
@@ -31,22 +31,12 @@ const TY_EMBED_SYM: u8 = 5;
 /// The heap is located at ID + 1.
 #[derive(Debug)]
 pub struct DirData {
-	/// The amount of live [`DirRef`]s to this directory.
-	pub(crate) reference_count: usize,
+	/// Data header.
+	pub(crate) header: DataHeader,
 	/// Live [`FileRef`] and [`DirRef`]s that point to files which are a child of this directory.
 	///
 	/// Indexed by the index of the file on the on-disk hashmap.
 	pub(crate) children: FxHashMap<u32, Child>,
-	/// ID of the parent directory.
-	///
-	/// Not applicable if the ID of this directory is 0,
-	/// i.e. it is the root directory.
-	pub(crate) parent_id: u64,
-	/// Index in the parent directory.
-	///
-	/// Not applicable if the ID of this directory is 0,
-	/// i.e. it is the root directory.
-	pub(crate) parent_index: u32,
 	/// The length of the header, in multiples of 8 bytes.
 	header_len8: u8,
 	/// The length of a single entry, in multiples of 8 bytes.
@@ -81,12 +71,12 @@ impl DirData {
 
 	/// The base address of the allocation log.
 	fn alloc_log_base(&self) -> u64 {
-		self.hashmap_base() + self.entry_size() * self.capacity()
+		self.hashmap_base() + u64::from(self.entry_size()) * self.capacity()
 	}
 
 	/// The size of a single entry.
-	fn entry_size(&self) -> u64 {
-		u64::from(self.entry_len8) * 8
+	fn entry_size(&self) -> u16 {
+		u16::from(self.entry_len8) * 8
 	}
 
 	/// Check if the hashmap should grow.
@@ -122,6 +112,13 @@ impl DirData {
 				h.finish() as _
 			}
 		}
+	}
+
+	/// Determine the offset of an entry.
+	///
+	/// This does *not* check if the index is in range.
+	fn get_offset(&self, index: u32) -> u64 {
+		self.hashmap_base() + u64::from(index) * u64::from(self.entry_size())
 	}
 }
 
@@ -181,7 +178,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let header_len = usize::from(data.header_len8) * 8;
 		drop(data);
 		object
-			.resize(hashmap_base + (entry_size << map_size_p2))
+			.resize(hashmap_base + (u64::from(entry_size) << map_size_p2))
 			.await?;
 		object.write(0, &buf[..header_len]).await?;
 
@@ -207,7 +204,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		debug_assert!(e.ty != 0);
 		e.ty = ty.to_ty();
 		e.id_or_offset = ty.to_data();
-		map.set(index, &e).await.map(|_: u64| ())
+		map.set(&e).await
 	}
 
 	/// Read a heap value.
@@ -319,7 +316,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 	async fn rename(&self, from: &Name, to: &Name) -> Result<bool, Error<D>> {
 		let map = self.hashmap().await?;
 		if let Some((i, e)) = map.find_index(from).await? {
-			let e = map.get_ext(i, e).await?;
 			// Resizing is not necessary as there is guaranteed to be a free spot
 			// and we'll free another spot if the insert succeeds.
 			let r = map.insert(e, Some(to)).await;
@@ -348,7 +344,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 		// Find the entry to transfer.
 		let Some((i, e)) = from_map.find_index(name).await? else { return Ok(false) };
-		let e = from_map.get_ext(i, e).await?;
 
 		// Check if the destination directory has enough capacity.
 		// If not, grow it first.
@@ -405,7 +400,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 			if e.ty == 0 {
 				continue;
 			}
-			let e = cur_map.get_ext(index, e).await?;
 			new_map.insert(e, None).await?;
 		}
 
@@ -447,17 +441,19 @@ impl<'a, D: Dev> Dir<'a, D> {
 		}
 
 		let name = Some(entry.name);
-		let entry = RawEntryExt {
-			entry: RawEntry {
-				key_len: u8::MAX,
-				key_offset: u64::MAX,
-				ty: entry.ty.to_ty(),
-				id_or_offset: entry.ty.to_data(),
-				index: u32::MAX,
-				hash: 0,
-			},
-			unix: ext.unix,
-			mtime: ext.mtime,
+		let entry = RawEntry {
+			key_len: u8::MAX,
+			key_offset: u64::MAX,
+			ty: entry.ty.to_ty(),
+			hash: 0,
+			padding: [0; 4],
+
+			id_or_offset: entry.ty.to_data(),
+
+			ext_unix: ext.unix,
+			ext_mtime: ext.mtime,
+
+			index: u32::MAX,
 		};
 
 		let r = self.hashmap().await?.insert(entry, name).await?;
@@ -554,10 +550,8 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			o
 		});
 		let mut data = DirData {
-			reference_count: 1,
+			header: DataHeader::new(parent_id, parent_index),
 			children: Default::default(),
-			parent_id,
-			parent_index,
 			header_len8: ((header_len + 7) / 8).try_into().unwrap(),
 			entry_len8: ((entry_len + 7) / 8).try_into().unwrap(),
 			hashmap_size_p2: options.capacity_p2,
@@ -594,7 +588,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		//
 		// If so, just reference that and return.
 		if let Some(dir) = fs.data.borrow_mut().directories.get_mut(&id) {
-			dir.reference_count += 1;
+			dir.header.reference_count += 1;
 			return Ok(DirRef { fs, id });
 		}
 
@@ -634,10 +628,8 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		}
 
 		let data = DirData {
-			reference_count: 1,
+			header: DataHeader::new(parent_id, parent_index),
 			children: Default::default(),
-			parent_id,
-			parent_index,
 			header_len8,
 			entry_len8,
 			hashmap_size_p2,
@@ -776,6 +768,33 @@ impl<'a, D: Dev> Entry<'a, D> {
 		})
 	}
 
+	/// Get entry data, i.e. data in the entry itself, excluding heap data.
+	pub async fn data(&self) -> Result<EntryData, Error<D>> {
+		let fs = self.fs();
+		let DataHeader { parent_index, parent_id, .. } = *self.data_header();
+		let dir = Dir::new(fs, parent_id);
+		let map = dir.hashmap().await?;
+		let entry = map.get(parent_index).await?;
+		Ok(EntryData { key: entry.key(), ext_unix: entry.ext_unix, ext_mtime: entry.ext_mtime })
+	}
+
+	/// Get the key,
+	pub async fn key(&self, data: &EntryData) -> Result<Box<Name>, Error<D>> {
+		match &data.key {
+			&RawEntryKey::Embed { data, len } => {
+				Ok(<&Name>::try_from(&data[..usize::from(len)]).unwrap().into())
+			}
+			&RawEntryKey::Heap { offset, len } => {
+				// Heap is located at parent ID + 1
+				let DataHeader { parent_id, .. } = *self.data_header();
+				let heap = self.fs().storage.get(parent_id + 1).await?;
+				let mut name = vec![0; usize::from(len)];
+				read_exact(&heap, offset, &mut name).await?;
+				Ok(Box::<Name>::try_from(name.into_boxed_slice()).unwrap())
+			}
+		}
+	}
+
 	/// Destroy this entry and the data it points to.
 	///
 	/// If the type is [`Self::Unknown`],
@@ -789,19 +808,38 @@ impl<'a, D: Dev> Entry<'a, D> {
 		}?;
 		Ok(true)
 	}
+
+	/// Get a reference to the filesystem containing this entry's data.
+	fn fs(&self) -> &'a Nrfs<D> {
+		match self {
+			Self::Dir(e) => e.fs,
+			Self::File(e) => e.fs,
+			Self::Sym(e) => e.0.fs,
+			Self::Unknown(e) => e.0.fs,
+		}
+	}
+
+	/// Get a reference to the [`DataHeader`] of this entry.
+	fn data_header(&self) -> RefMut<'a, DataHeader> {
+		match self {
+			Self::Dir(e) => RefMut::map(e.fs.dir_data(e.id), |d| &mut d.header),
+			Self::File(e) => RefMut::map(e.fs.file_data(e.idx), |d| &mut d.header),
+			Self::Sym(e) => RefMut::map(e.0.fs.file_data(e.0.idx), |d| &mut d.header),
+			Self::Unknown(e) => RefMut::map(e.0.fs.file_data(e.0.idx), |d| &mut d.header),
+		}
+	}
 }
 
 /// Get entry data.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct EntryData {
 	/// The key of this entry.
-	pub key: Box<Name>,
-	/// The type of this entry.
-	pub ty: (), // FIXME
+	key: RawEntryKey,
 	/// `unix` extension data, if present.
 	pub ext_unix: Option<ext::unix::Entry>,
 	/// `mtime` extension data, if present.
-	pub ext_mtime: Option<ext::unix::Entry>,
+	pub ext_mtime: Option<ext::mtime::Entry>,
 }
 
 #[derive(Debug)]

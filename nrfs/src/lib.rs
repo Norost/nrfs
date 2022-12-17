@@ -219,7 +219,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 
 impl<'a, D: Dev> Clone for DirRef<'a, D> {
 	fn clone(&self) -> Self {
-		self.fs.dir_data(self.id).reference_count += 1;
+		self.fs.dir_data(self.id).header.reference_count += 1;
 		Self { fs: self.fs, id: self.id }
 	}
 }
@@ -230,8 +230,8 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 		let hash_map::Entry::Occupied(mut data) = fs.directories.entry(self.id) else {
 			unreachable!()
 		};
-		data.get_mut().reference_count -= 1;
-		if data.get_mut().reference_count == 0 {
+		data.get_mut().header.reference_count -= 1;
+		if data.get_mut().header.reference_count == 0 {
 			data.remove();
 		}
 	}
@@ -271,7 +271,7 @@ impl<'a, D: Dev> FileRef<'a, D> {
 
 impl<'a, D: Dev> Clone for FileRef<'a, D> {
 	fn clone(&self) -> Self {
-		self.fs.file_data(self.idx).reference_count += 1;
+		self.fs.file_data(self.idx).header.reference_count += 1;
 		Self { fs: self.fs, idx: self.idx }
 	}
 }
@@ -283,14 +283,14 @@ impl<D: Dev> Drop for FileRef<'_, D> {
 			.files
 			.get_mut(self.idx)
 			.expect("filedata should be present");
-		data.reference_count -= 1;
-		if data.reference_count == 0 {
+		data.header.reference_count -= 1;
+		if data.header.reference_count == 0 {
 			// Remove itself from parent directory.
 			let dir = fs
 				.directories
-				.get_mut(&data.parent_id)
+				.get_mut(&data.header.parent_id)
 				.expect("parent dir is not loaded");
-			let _r = dir.children.remove(&data.parent_index);
+			let _r = dir.children.remove(&data.header.parent_index);
 			debug_assert!(matches!(_r, Some(Child::File(idx)) if idx == self.idx));
 			// Remove filedata.
 			let data = fs
@@ -298,7 +298,7 @@ impl<D: Dev> Drop for FileRef<'_, D> {
 				.remove(self.idx)
 				.expect("filedata should be present");
 			// Reconstruct DirRef to adjust reference count of dir appropriately.
-			drop(DirRef { fs: self.fs, id: data.parent_id });
+			drop(DirRef { fs: self.fs, id: data.header.parent_id });
 		}
 	}
 }
@@ -411,4 +411,28 @@ async fn read_exact<'a, D: Dev>(
 ) -> Result<(), Error<D>> {
 	let l = obj.read(offset, buf).await?;
 	(l == buf.len()).then_some(()).ok_or(Error::Truncated)
+}
+
+/// Data header, shared by [`DirData`] and [`FileData`].
+#[derive(Debug)]
+struct DataHeader {
+	/// The amount of live [`DirRef`]s to this directory.
+	reference_count: usize,
+	/// ID of the parent directory.
+	///
+	/// Not applicable if the ID of the object is 0,
+	/// i.e. it is the root directory.
+	parent_id: u64,
+	/// Index in the parent directory.
+	///
+	/// Not applicable if the ID of the object is 0,
+	/// i.e. it is the root directory.
+	parent_index: u32,
+}
+
+impl DataHeader {
+	/// Create a new header.
+	fn new(parent_id: u64, parent_index: u32) -> Self {
+		Self { reference_count: 1, parent_id, parent_index }
+	}
 }

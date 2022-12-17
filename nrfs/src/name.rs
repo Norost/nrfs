@@ -50,6 +50,17 @@ impl<'a> TryFrom<&'a str> for &'a Name {
 	}
 }
 
+impl TryFrom<Box<[u8]>> for Box<Name> {
+	type Error = TooLong;
+
+	fn try_from(s: Box<[u8]>) -> Result<Self, Self::Error> {
+		// SAFETY: Name is repr(transparent)
+		(s.len() < 256)
+			.then(|| unsafe { Box::from_raw(Box::into_raw(s) as *mut Name) })
+			.ok_or(TooLong)
+	}
+}
+
 // CGE pls
 macro_rules! from {
 	{ $($n:literal)* } => {
