@@ -433,7 +433,8 @@ impl<'a, D: Dev> FileRef<'a, D> {
 			},
 			hash_map::Entry::Vacant(e) => {
 				// FIXME check if entry is already present.
-				let idx = dir.fs
+				let idx = dir
+					.fs
 					.data
 					.borrow_mut()
 					.files

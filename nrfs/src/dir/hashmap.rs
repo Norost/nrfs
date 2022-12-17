@@ -30,6 +30,9 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		Self { fs, dir_id, map, mask: 1u32.wrapping_shl(size_p2.into()).wrapping_sub(1) }
 	}
 
+	/// Remove an entry.
+	///
+	/// This does not free heap data!
 	pub async fn remove_at(&self, mut index: u32) -> Result<(), Error<D>> {
 		let hash_algorithm = self.fs.dir_data(self.dir_id).hash_algorithm;
 
@@ -60,11 +63,10 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	}
 
 	/// Find an entry with the given name.
-	///
-	/// Returns the index and info located in the entry itself.
-	pub async fn find_index(&self, name: &Name) -> Result<Option<(u32, RawEntry)>, Error<D>> {
+	pub async fn find_index(&self, name: &Name) -> Result<Option<RawEntry>, Error<D>> {
 		let data = self.fs.dir_data(self.dir_id);
-		let mut index = data.hash(name) & self.mask;
+		let hash = data.hash(name);
+		let mut index = hash & self.mask;
 		let hash_algorithm = data.hash_algorithm;
 		let dir = Dir::new(self.fs, self.dir_id);
 		drop(data);
@@ -75,8 +77,8 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				if e.ty == 0 {
 					return Ok(None);
 				}
-				if dir.compare_names((e.key_len, e.key_offset), name).await? {
-					break Ok(Some((index, e)));
+				if dir.compare_names(&e, name, hash).await? {
+					break Ok(Some(e));
 				}
 				index += 1;
 				index &= self.mask;
@@ -207,9 +209,13 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	) -> Result<Option<u32>, Error<D>> {
 		let data = self.fs.dir_data(self.dir_id);
 
+		// Update hash if a name was specified.
 		name.map(|n| entry.hash = data.hash(n));
-		let mut index = entry.hash & self.mask;
+		entry.index = entry.hash & self.mask;
 		let mut psl = 0u32;
+
+		// If entry_index is None, we're still working with the to-be inserted entry.
+		// If it is Some, the entry has already been inserted and we're only shifting entries.
 		let mut entry_index = None;
 
 		let calc_psl = |i: u32, h| i.wrapping_sub(h) & self.mask;
@@ -218,14 +224,13 @@ impl<'a, D: Dev> HashMap<'a, D> {
 			slf: &HashMap<'a, D>,
 			entry_index: &mut Option<u32>,
 			name: Option<&Name>,
-			i: u32,
 			e: &mut RawEntry,
-		) -> Result<(), Error<D>> {
+		) -> Result<u32, Error<D>> {
+			// Store name if we're inserting the original entry.
 			if let Some(name) = entry_index.is_none().then(|| name).flatten() {
-				// Store name
 				let dir = Dir::new(slf.fs, slf.dir_id);
 				if name.len_u8() <= 14 {
-					todo!("embed");
+					e.embed_key(name.as_ref());
 				} else {
 					e.key_offset = dir.alloc(name.len_u8().into()).await?;
 					e.key_len = name.len_u8();
@@ -233,14 +238,12 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				}
 			}
 
-			e.index = i;
+			// Store entry data at index.
 			slf.set(&e).await?;
 
-			if entry_index.is_none() {
-				*entry_index = Some(i);
-			}
-
-			Ok(())
+			// Save the index of the original entry,
+			// otherwise just return the index of original entry.
+			Ok(*entry_index.get_or_insert(e.index))
 		}
 
 		let hash_algorithm = data.hash_algorithm;
@@ -249,34 +252,40 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 		match hash_algorithm {
 			HashAlgorithm::SipHasher13 => loop {
-				let e = self.get(index).await?;
+				// Insert with robin-hood hashing,
+				// i.e. keep shifting entries until we find an empty one.
+
+				// Note we're updating entry.index, so entry != e
+				let e = self.get(entry.index).await?;
 
 				// We found a free slot.
 				if e.ty == 0 {
-					insert_entry(self, &mut entry_index, name, index, &mut entry).await?;
-					break;
+					let entry_index = insert_entry(self, &mut entry_index, name, &mut entry).await?;
+					// Return the index of the entry we were supposed to insert.
+					return Ok(Some(entry_index))
 				}
 
 				// If the entry has the same name as us, exit.
-				if let Some(n) = name {
-					if dir.compare_names((e.key_len, e.key_offset), n).await? {
-						break;
+				if let Some(name) = name {
+					// If entry_index is Some, we're shifting existing entries which should not
+					// have conflicting names, so skip in that case.
+					if entry_index.is_none() && dir.compare_names(&e, name, entry.hash).await? {
+						return Ok(None);
 					}
 				}
 
 				// Check if the PSL (Probe Sequence Length) is lower than that of ours
 				// If yes, swap with it.
-				if psl > calc_psl(index, e.hash) {
-					insert_entry(self, &mut entry_index, name, index, &mut entry).await?;
+				if psl > calc_psl(entry.index, e.hash) {
+					insert_entry(self, &mut entry_index, name, &mut entry).await?;
 					entry = e;
 				}
 
-				index += 1;
-				index &= self.mask;
+				entry.index += 1;
+				entry.index &= self.mask;
 				psl += 1;
 			},
 		}
-		Ok(entry_index)
 	}
 }
 
@@ -354,7 +363,9 @@ impl RawEntry {
 	}
 
 	/// Embed key data.
-	fn embed_key(&mut self, data: [u8; 14]) {
+	fn embed_key(&mut self, key: &[u8]) {
+		let mut data = [0; 14];
+		data[..key.len()].copy_from_slice(key);
 		let [a, b, c, d, e, f, data @ ..] = data;
 		self.key_offset = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
 		let [a, b, c, d, padding @ ..] = data;

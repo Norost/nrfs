@@ -253,41 +253,61 @@ impl<'a, D: Dev> Dir<'a, D> {
 		Ok(())
 	}
 
-	/// Compare a stored name with the given name.
-	async fn compare_names(&self, x: (u8, u64), y: &[u8]) -> Result<bool, Error<D>> {
-		if usize::from(x.0) != y.len() {
-			return Ok(false);
+	/// Compare an entry's key with the given name.
+	///
+	/// `hash` is used to avoid redundant heap reads.
+	async fn compare_names(
+		&self,
+		entry: &RawEntry,
+		name: &[u8],
+		hash: u32,
+	) -> Result<bool, Error<D>> {
+		match entry.key() {
+			RawEntryKey::Embed { data, len } => Ok(&data[..len.into()] == name),
+			RawEntryKey::Heap { offset, len } => {
+				if entry.hash != hash || usize::from(len) != name.len() {
+					return Ok(false);
+				}
+				let mut buf = vec![0; len.into()];
+				self.fs.read_exact(self.id + 1, offset, &mut buf).await?;
+				Ok(&buf == name)
+			}
 		}
-		let mut buf = [0; 255];
-		self.fs
-			.read_exact(self.id + 1, x.1, &mut buf[..y.len()])
-			.await?;
-		Ok(&buf[..y.len()] == y)
 	}
 
 	/// Remove the entry with the given name.
+	///
+	/// Returns `true` if successful.
+	/// It will fail if no entry with the given name could be found.
+	/// It will also fail if the type is unknown to avoid space leaks.
 	///
 	/// # Note
 	///
 	/// While it does check if the entry is a directory, it does not check whether it's empty.
 	/// It is up to the user to ensure the directory is empty.
 	pub async fn remove(&self, name: &Name) -> Result<bool, Error<D>> {
-		if let Some((i, e)) = self.hashmap().await?.find_index(name).await? {
-			self.remove_at(i, (e.key_offset, e.key_len), e.ty().unwrap())
-				.await
-				.map(|()| true)
+		if let Some(e) = self.hashmap().await?.find_index(name).await? {
+			self.remove_at(&e).await
 		} else {
 			Ok(false)
 		}
 	}
 
-	/// Remove an entry at a specific index.
-	async fn remove_at(&self, index: u32, key: (u64, u8), ty: Type) -> Result<(), Error<D>> {
-		self.update_entry_count(|x| x - 1).await?;
-		self.hashmap().await?.remove_at(index).await?;
+	/// Remove a specific entry.
+	///
+	/// Returns `true` if successful.
+	/// It will fail for entries whose type is unknown to avoid space leaks.
+	async fn remove_at(&self, entry: &RawEntry) -> Result<bool, Error<D>> {
+		let Ok(ty) = entry.ty() else { return Ok(false) };
 
-		// Deallocate string
-		self.dealloc(key.0, key.1.into()).await?;
+		self.update_entry_count(|x| x - 1).await?;
+		self.hashmap().await?.remove_at(entry.index).await?;
+
+		// Deallocate key if stored on heap
+		match entry.key() {
+			RawEntryKey::Embed { .. } => {}
+			RawEntryKey::Heap { offset, len } => self.dealloc(offset, len.into()).await?,
+		}
 
 		match ty {
 			Type::File { id } | Type::Sym { id } => {
@@ -309,18 +329,19 @@ impl<'a, D: Dev> Dir<'a, D> {
 		if self.fs.dir_data(self.id).should_shrink() {
 			self.shrink().await?;
 		}
-		Ok(())
+		Ok(true)
 	}
 
 	/// Rename an entry.
 	async fn rename(&self, from: &Name, to: &Name) -> Result<bool, Error<D>> {
 		let map = self.hashmap().await?;
-		if let Some((i, e)) = map.find_index(from).await? {
+		if let Some(e) = map.find_index(from).await? {
 			// Resizing is not necessary as there is guaranteed to be a free spot
 			// and we'll free another spot if the insert succeeds.
+			let from_index = e.index;
 			let r = map.insert(e, Some(to)).await;
 			if r?.is_some() {
-				map.remove_at(i).await?;
+				map.remove_at(from_index).await?;
 				return Ok(true);
 			}
 		}
@@ -343,7 +364,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let from_map = self.hashmap().await?;
 
 		// Find the entry to transfer.
-		let Some((i, e)) = from_map.find_index(name).await? else { return Ok(false) };
+		let Some(e) = from_map.find_index(name).await? else { return Ok(false) };
 
 		// Check if the destination directory has enough capacity.
 		// If not, grow it first.
@@ -352,13 +373,13 @@ impl<'a, D: Dev> Dir<'a, D> {
 		}
 		let to_map = to_dir.hashmap().await?;
 
+		// Remove the entry from the current directory.
+		from_map.remove_at(e.index).await?;
+		self.update_entry_count(|x| x - 1).await?;
+
 		// Insert the entry in the destination directory.
 		let Some(_) = to_map.insert(e, Some(to_name)).await? else { return Ok(false) };
 		to_dir.update_entry_count(|x| x + 1).await?;
-
-		// Remove the entry from the current directory.
-		from_map.remove_at(i).await?;
-		self.update_entry_count(|x| x - 1).await?;
 
 		Ok(true)
 	}
@@ -710,7 +731,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			}
 
 			// Get extension info
-			let entry = Entry::new(&self.dir(), index, &entry).await?;
+			let entry = Entry::new(&self.dir(), &entry).await?;
 			return Ok(Some((entry, index.checked_add(1))));
 		}
 		Ok(None)
@@ -719,8 +740,8 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	/// Find an entry with the given name.
 	pub async fn find(&self, name: &Name) -> Result<Option<Entry<'a, D>>, Error<D>> {
 		let dir = self.dir();
-		if let Some((index, entry)) = dir.hashmap().await?.find_index(name).await? {
-			Ok(Some(Entry::new(&dir, index, &entry).await?))
+		if let Some(entry) = dir.hashmap().await?.find_index(name).await? {
+			Ok(Some(Entry::new(&dir, &entry).await?))
 		} else {
 			Ok(None)
 		}
@@ -753,18 +774,18 @@ pub enum Entry<'a, D: Dev> {
 
 impl<'a, D: Dev> Entry<'a, D> {
 	/// Construct an entry from raw entry data and the corresponding directory.
-	async fn new(dir: &Dir<'a, D>, index: u32, entry: &RawEntry) -> Result<Entry<'a, D>, Error<D>> {
+	async fn new(dir: &Dir<'a, D>, entry: &RawEntry) -> Result<Entry<'a, D>, Error<D>> {
 		Ok(match entry.ty() {
-			Ok(Type::File { id }) => Self::File(FileRef::from_obj(dir, id, index)),
-			Ok(Type::Sym { id }) => Self::Sym(SymRef::from_obj(dir, id, index)),
+			Ok(Type::File { id }) => Self::File(FileRef::from_obj(dir, id, entry.index)),
+			Ok(Type::Sym { id }) => Self::Sym(SymRef::from_obj(dir, id, entry.index)),
 			Ok(Type::EmbedFile { offset, length }) => {
-				Self::File(FileRef::from_embed(dir, offset, length, index))
+				Self::File(FileRef::from_embed(dir, offset, length, entry.index))
 			}
 			Ok(Type::EmbedSym { offset, length }) => {
-				Self::Sym(SymRef::from_embed(dir, offset, length, index))
+				Self::Sym(SymRef::from_embed(dir, offset, length, entry.index))
 			}
-			Ok(Type::Dir { id }) => Self::Dir(DirRef::load(dir.fs, dir.id, index, id).await?),
-			Err(_) => Self::Unknown(UnknownRef::new(dir, index)),
+			Ok(Type::Dir { id }) => Self::Dir(DirRef::load(dir.fs, dir.id, entry.index, id).await?),
+			Err(_) => Self::Unknown(UnknownRef::new(dir, entry.index)),
 		})
 	}
 
