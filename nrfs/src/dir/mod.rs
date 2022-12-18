@@ -290,12 +290,12 @@ impl<'a, D: Dev> Dir<'a, D> {
 		match ty {
 			Type::File { id } | Type::Sym { id } => {
 				// Dereference object.
-				self.fs.storage.decrease_reference_count(id).await?;
+				self.fs.storage.get(id).await?.decrease_reference_count().await?;
 			}
 			Type::Dir { id } => {
 				// Dereference map and heap.
-				self.fs.storage.decrease_reference_count(id).await?;
-				self.fs.storage.decrease_reference_count(id + 1).await?;
+				self.fs.storage.get(id + 0).await?.decrease_reference_count().await?;
+				self.fs.storage.get(id + 1).await?.decrease_reference_count().await?;
 			}
 			Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
 				// Free heap space.

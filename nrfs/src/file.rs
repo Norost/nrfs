@@ -279,7 +279,7 @@ impl<'a, D: Dev> File<'a, D> {
 				let (index, ty) = (data.header.parent_index, data.ty(self.ty));
 				drop(data);
 				dir.set_ty(index, ty).await?;
-				self.fs.storage.decrease_reference_count(id).await?;
+				self.fs.storage.get(id).await?.decrease_reference_count().await?;
 				Ok(())
 			}
 			&Inner::Object { id } => {
