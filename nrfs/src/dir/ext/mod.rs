@@ -7,10 +7,11 @@ use {
 };
 
 impl<'a, D: Dev> Dir<'a, D> {
+	/// Set `unix` extension data.
 	pub(super) async fn ext_set_unix(
 		&self,
 		index: u32,
-		unix: unix::Entry,
+		unix: &unix::Entry,
 	) -> Result<bool, Error<D>> {
 		let unix_offset = self.fs.dir_data(self.id).unix_offset;
 		if let Some(o) = unix_offset {
@@ -24,10 +25,11 @@ impl<'a, D: Dev> Dir<'a, D> {
 		}
 	}
 
+	/// Set `mtime` extension data.
 	pub(super) async fn ext_set_mtime(
 		&self,
 		index: u32,
-		mtime: mtime::Entry,
+		mtime: &mtime::Entry,
 	) -> Result<bool, Error<D>> {
 		let mtime_offset = self.fs.dir_data(self.id).mtime_offset;
 		if let Some(o) = mtime_offset {

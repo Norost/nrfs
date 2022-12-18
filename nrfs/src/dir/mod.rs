@@ -11,6 +11,7 @@ use {
 	hashmap::*,
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
+	std::collections::hash_map,
 };
 
 // TODO determine a good load factor.
@@ -795,6 +796,24 @@ impl<'a, D: Dev> Entry<'a, D> {
 		Ok(EntryData { key: entry.key, ext_unix: entry.ext_unix, ext_mtime: entry.ext_mtime })
 	}
 
+	/// Set `unix` extension data.
+	///
+	/// Returns `false` if the extension is not enabled for the parent directory.
+	pub async fn set_ext_unix(&self, data: &ext::unix::Entry) -> Result<bool, Error<D>> {
+		self.parent_dir()
+			.ext_set_unix(self.data_header().parent_index, data)
+			.await
+	}
+
+	/// Set `mtime` extension data.
+	///
+	/// Returns `false` if the extension is not enabled for the parent directory.
+	pub async fn set_ext_mtime(&self, data: &ext::mtime::Entry) -> Result<bool, Error<D>> {
+		self.parent_dir()
+			.ext_set_mtime(self.data_header().parent_index, data)
+			.await
+	}
+
 	/// Get the key,
 	pub async fn key(&self, data: &EntryData) -> Result<Box<Name>, Error<D>> {
 		match &data.key {
@@ -844,6 +863,11 @@ impl<'a, D: Dev> Entry<'a, D> {
 			Self::Sym(e) => RefMut::map(e.0.fs.file_data(e.0.idx), |d| &mut d.header),
 			Self::Unknown(e) => RefMut::map(e.0.fs.file_data(e.0.idx), |d| &mut d.header),
 		}
+	}
+
+	/// Create a parent dir helper.
+	fn parent_dir(&self) -> Dir<'a, D> {
+		Dir::new(self.fs(), self.data_header().parent_id)
 	}
 }
 
