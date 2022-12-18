@@ -275,6 +275,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 	/// Returns `true` if successful.
 	/// It will fail for entries whose type is unknown to avoid space leaks.
 	async fn remove_at(&self, entry: &RawEntry) -> Result<bool, Error<D>> {
+		trace!("remove_at {:?}", (entry.index, &entry.key));
 		let Ok(ty) = entry.ty() else { return Ok(false) };
 
 		self.update_entry_count(|x| x - 1).await?;

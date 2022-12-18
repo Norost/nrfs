@@ -125,3 +125,65 @@ fn get_file_long_name() {
 		assert!(matches!(file, Entry::File(_)));
 	})
 }
+
+#[test]
+fn remove_file() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+		root.create_file(b"file".into(), &Default::default())
+			.await
+			.unwrap();
+
+		assert!(root.remove(b"file".into()).await.unwrap());
+	})
+}
+
+#[test]
+fn remove_dir() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+		root.create_dir(
+			b"dir".into(),
+			&DirOptions::new(&[0; 16]),
+			&Default::default(),
+		)
+		.await
+		.unwrap();
+
+		assert!(root.remove(b"dir".into()).await.unwrap());
+	})
+}
+
+#[test]
+fn remove_sym() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+		root.create_sym(b"sym".into(), &Default::default())
+			.await
+			.unwrap();
+
+		assert!(root.remove(b"sym".into()).await.unwrap());
+	})
+}
+
+#[test]
+fn remove_file_long_name() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+		root.create_file(
+			b"This is a string with len >= 14".into(),
+			&Default::default(),
+		)
+		.await
+		.unwrap();
+
+		assert!(root
+			.remove(b"This is a string with len >= 14".into())
+			.await
+			.unwrap());
+	})
+}
