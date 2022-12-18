@@ -1,5 +1,10 @@
+mod dir;
+
 use {
-	crate::*,
+	crate::{
+		dir::{ext, EnableExtensions, Extensions},
+		*,
+	},
 	core::{
 		future::Future,
 		pin::pin,
@@ -42,7 +47,7 @@ async fn new_ext() -> Nrfs<MemDev> {
 		BlockSize::K1,
 		MaxRecordSize::K1,
 		&DirOptions {
-			extensions: *dir::EnableExtensions::default().add_unix().add_mtime(),
+			extensions: *EnableExtensions::default().add_unix().add_mtime(),
 			..DirOptions::new(&[0; 16])
 		},
 		Compression::None,
@@ -64,8 +69,7 @@ fn drop_borrow() {
 	run(async {
 		let fs = new().await;
 		let dir = fs.root_dir().await.unwrap();
-		let file = dir
-			.create_file(b"test.txt".into(), &Default::default())
+		dir.create_file(b"test.txt".into(), &Default::default())
 			.await
 			.unwrap()
 			.unwrap();
@@ -75,10 +79,10 @@ fn drop_borrow() {
 #[test]
 fn create_file() {
 	run(async {
-		let mut fs = new().await;
+		let fs = new().await;
 
-		let mut d = fs.root_dir().await.unwrap();
-		let mut f = d
+		let d = fs.root_dir().await.unwrap();
+		let f = d
 			.create_file(b"test.txt".into(), &Default::default())
 			.await
 			.unwrap()
@@ -87,7 +91,7 @@ fn create_file() {
 
 		assert!(d.find(b"I do not exist".into()).await.unwrap().is_none());
 
-		let mut file = d.find(b"test.txt".into()).await.unwrap().unwrap();
+		let file = d.find(b"test.txt".into()).await.unwrap().unwrap();
 		let data = file.data().await.unwrap();
 		assert!(data.ext_unix.is_none());
 		assert!(data.ext_mtime.is_none());
@@ -102,22 +106,22 @@ fn create_file() {
 #[test]
 fn create_many_files() {
 	run(async {
-		let mut fs = new().await;
+		let fs = new().await;
 
 		// Create & read
 		for i in 0..100 {
 			let name = format!("{}.txt", i);
 			let contents = format!("This is file #{}", i);
 
-			let mut d = fs.root_dir().await.unwrap();
-			let mut f = d
+			let d = fs.root_dir().await.unwrap();
+			let f = d
 				.create_file((&*name).try_into().unwrap(), &Default::default())
 				.await
 				.unwrap()
 				.unwrap();
 			f.write_grow(0, contents.as_bytes()).await.unwrap();
 
-			let mut file = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
+			let file = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
 
 			let mut buf = [0; 32];
 			let Entry::File(file) = file else { panic!("expected file") };
@@ -128,7 +132,7 @@ fn create_many_files() {
 		}
 
 		// Test iteration
-		let mut d = fs.root_dir().await.unwrap();
+		let d = fs.root_dir().await.unwrap();
 		let mut i = 0;
 		let mut count = 0;
 		while let Some((_, ni)) = d.next_from(i).await.unwrap() {
@@ -142,9 +146,9 @@ fn create_many_files() {
 			let name = format!("{}.txt", i);
 			let contents = format!("This is file #{}", i);
 
-			let mut d = fs.root_dir().await.unwrap();
+			let d = fs.root_dir().await.unwrap();
 
-			let mut file = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
+			let file = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
 
 			let mut buf = [0; 32];
 			let Entry::File(file) = file else { panic!("expected file") };
@@ -162,15 +166,15 @@ fn create_many_files() {
 #[test]
 fn create_file_ext() {
 	run(async {
-		let mut fs = new_ext().await;
+		let fs = new_ext().await;
 
-		let mut d = fs.root_dir().await.unwrap();
-		let mut f = d
+		let d = fs.root_dir().await.unwrap();
+		let f = d
 			.create_file(
 				b"test.txt".into(),
-				&dir::Extensions {
-					unix: Some(dir::ext::unix::Entry { permissions: 0o640, uid: 1000, gid: 1001 }),
-					mtime: Some(dir::ext::mtime::Entry { mtime: 0xdead }),
+				&Extensions {
+					unix: Some(ext::unix::Entry { permissions: 0o640, uid: 1000, gid: 1001 }),
+					mtime: Some(ext::mtime::Entry { mtime: 0xdead }),
 				},
 			)
 			.await
@@ -180,7 +184,7 @@ fn create_file_ext() {
 
 		assert!(d.find(b"I do not exist".into()).await.unwrap().is_none());
 
-		let mut file = d.find(b"test.txt".into()).await.unwrap().unwrap();
+		let file = d.find(b"test.txt".into()).await.unwrap().unwrap();
 		let data = file.data().await.unwrap();
 		assert_eq!(data.ext_unix.unwrap().permissions, 0o640);
 		assert_eq!(data.ext_unix.unwrap().uid, 1000);
@@ -197,9 +201,9 @@ fn create_file_ext() {
 #[test]
 fn remove_file() {
 	run(async {
-		let mut fs = new().await;
+		let fs = new().await;
 
-		let mut d = fs.root_dir().await.unwrap();
+		let d = fs.root_dir().await.unwrap();
 		assert_eq!(d.len().await.unwrap(), 0);
 
 		d.create_file(b"hello".into(), &Default::default())
@@ -239,8 +243,8 @@ fn remove_file() {
 #[test]
 fn shrink() {
 	run(async {
-		let mut fs = new().await;
-		let mut d = fs.root_dir().await.unwrap();
+		let fs = new().await;
+		let d = fs.root_dir().await.unwrap();
 		assert_eq!(d.len().await.unwrap(), 0);
 		d.create_file(b"hello".into(), &Default::default())
 			.await
@@ -279,8 +283,8 @@ fn shrink() {
 #[test]
 fn find_colllision() {
 	run(async {
-		let mut fs = new().await;
-		let mut d = fs.root_dir().await.unwrap();
+		let fs = new().await;
+		let d = fs.root_dir().await.unwrap();
 		// NOTE: hash must be SipHash13 and key must be 0
 		// Insert files to avoid shrinking below 8
 		for i in 0..5 {
@@ -308,8 +312,8 @@ fn find_colllision() {
 #[test]
 fn remove_collision() {
 	run(async {
-		let mut fs = new().await;
-		let mut d = fs.root_dir().await.unwrap();
+		let fs = new().await;
+		let d = fs.root_dir().await.unwrap();
 		// NOTE: hash must be SipHash13 and key must be 0
 		// Insert files to avoid shrinking below 8
 		for i in 0..5 {
@@ -333,8 +337,8 @@ fn remove_collision() {
 #[test]
 fn real_case_find_000_minified() {
 	run(async {
-		let mut fs = new().await;
-		let mut d = fs.root_dir().await.unwrap();
+		let fs = new().await;
+		let d = fs.root_dir().await.unwrap();
 		d.create_dir(b"d".into(), &DirOptions::new(&[0; 16]), &Default::default())
 			.await
 			.unwrap();
@@ -351,7 +355,7 @@ fn real_case_find_000_minified() {
 			d.len().await.unwrap(),
 			fs.root_dir().await.unwrap().len().await.unwrap()
 		);
-		let mut d = fs.root_dir().await.unwrap();
+		let d = fs.root_dir().await.unwrap();
 		d.find(b".rustc_info.json".into()).await.unwrap().unwrap();
 	})
 }

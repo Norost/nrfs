@@ -297,7 +297,6 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 					.get_mut(&parent_id)
 					.expect("parent dir is not loaded");
 				let _r = dir.children.remove(&parent_index);
-				dbg!(&_r, &dir);
 				debug_assert!(
 					matches!(_r, Some(Child::Dir(id)) if id == self.id),
 					"child not present in parent"
