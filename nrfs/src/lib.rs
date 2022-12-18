@@ -1,7 +1,58 @@
 //#![cfg_attr(not(test), no_std)]
 #![forbid(unused_must_use)]
 #![forbid(elided_lifetimes_in_paths)]
+#![feature(cell_update)]
 #![feature(pin_macro)]
+#![feature(split_array)]
+
+/// Tracing in debug mode only.
+macro_rules! trace {
+	($($arg:tt)*) => {
+		#[cfg(feature = "trace")]
+		$crate::trace::print_debug(&format_args!($($arg)*));
+		let _t = $crate::trace::Trace::new();
+	};
+}
+
+#[cfg(not(feature = "trace"))]
+mod trace {
+	pub struct Trace;
+
+	impl Trace {
+		#[inline(always)]
+		pub fn new() {}
+	}
+}
+
+#[cfg(feature = "trace")]
+mod trace {
+	use core::{cell::Cell, fmt::Arguments};
+
+	thread_local! {
+		static DEPTH: Cell<usize> = Cell::new(0);
+	}
+
+	pub fn print_debug(args: &Arguments<'_>) {
+		DEPTH.with(|depth| {
+			eprintln!("[nrfs]{:>pad$} {}", "", args, pad = depth.get() * 2);
+		})
+	}
+
+	pub struct Trace;
+
+	impl Trace {
+		pub fn new() -> Self {
+			DEPTH.with(|depth| { depth.update(|x| x + 1) });
+			Self
+		}
+	}
+
+	impl Drop for Trace {
+		fn drop(&mut self) {
+			DEPTH.with(|depth| { depth.update(|x| x - 1) });
+		}
+	}
+}
 
 pub mod dir;
 mod file;
@@ -20,7 +71,7 @@ use {
 		cell::{RefCell, RefMut},
 		fmt,
 	},
-	dir::{Child, DirData},
+	dir::{Child, DirData, Entry},
 	file::FileData,
 	rustc_hash::FxHashMap,
 	std::collections::hash_map,
@@ -278,11 +329,14 @@ impl<'a, D: Dev> Clone for FileRef<'a, D> {
 
 impl<D: Dev> Drop for FileRef<'_, D> {
 	fn drop(&mut self) {
-		let fs = { &mut *self.fs.data.borrow_mut() };
+		let mut fs_ref = self.fs.data.borrow_mut();
+		let fs = &mut *fs_ref; // borrow errors ahoy!
+
 		let mut data = fs
 			.files
 			.get_mut(self.idx)
 			.expect("filedata should be present");
+
 		data.header.reference_count -= 1;
 		if data.header.reference_count == 0 {
 			// Remove itself from parent directory.
@@ -292,12 +346,15 @@ impl<D: Dev> Drop for FileRef<'_, D> {
 				.expect("parent dir is not loaded");
 			let _r = dir.children.remove(&data.header.parent_index);
 			debug_assert!(matches!(_r, Some(Child::File(idx)) if idx == self.idx));
+
 			// Remove filedata.
 			let data = fs
 				.files
 				.remove(self.idx)
 				.expect("filedata should be present");
+
 			// Reconstruct DirRef to adjust reference count of dir appropriately.
+			drop(fs_ref);
 			drop(DirRef { fs: self.fs, id: data.header.parent_id });
 		}
 	}
@@ -354,7 +411,6 @@ where
 	Nros(nros::Error<D>),
 	Truncated,
 	CorruptExtension,
-	UnknownHashAlgorithm(u8),
 }
 
 impl<D> fmt::Debug for Error<D>
@@ -367,9 +423,6 @@ where
 			Self::Nros(e) => f.debug_tuple("Nros").field(e).finish(),
 			Self::Truncated => f.debug_tuple("Truncated").finish(),
 			Self::CorruptExtension => f.debug_tuple("CorruptExtension").finish(),
-			Self::UnknownHashAlgorithm(n) => {
-				f.debug_tuple("UnknownHashAlgorithm").field(&n).finish()
-			}
 		}
 	}
 }

@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-trace = ["nros/trace"]
+trace-all = ["trace", "nros/trace"]
+trace = []
 
 [dependencies.arena]
 git = "https://git.sr.ht/~demindiro/arena"

@@ -89,6 +89,7 @@ impl<'a, D: Dev> File<'a, D> {
 	///
 	/// The returned value indicates how many bytes were actually read.
 	async fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
+		trace!("read {} (len: {})", offset, buf.len());
 		if buf.is_empty() {
 			return Ok(0);
 		}
@@ -103,12 +104,13 @@ impl<'a, D: Dev> File<'a, D> {
 			&Inner::Embed { offset: offt, length } => {
 				drop(data_f);
 				// If the offset extends past the end, don't even bother.
-				let end = offt + u64::from(length);
-				if offset >= end {
+				let length = u64::try_from(length).unwrap();
+				if offset >= length {
 					return Ok(0);
 				}
+				let end = offt + u64::from(length);
 				// Truncate buffer so we don't read out-of-bounds.
-				let l = usize::try_from(end - offset).unwrap();
+				let l = usize::try_from(length - offset).unwrap();
 				let l = buf.len().min(l);
 				let buf = &mut buf[..l];
 				// Read from directory heap
@@ -121,6 +123,7 @@ impl<'a, D: Dev> File<'a, D> {
 	///
 	/// If the buffer cannot be filled an error is returned.
 	async fn read_exact(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
+		trace!("read_exact {} (len: {})", offset, buf.len());
 		if buf.is_empty() {
 			return Ok(());
 		}
@@ -153,6 +156,7 @@ impl<'a, D: Dev> File<'a, D> {
 	///
 	/// The returned value indicates how many bytes were actually written.
 	async fn write(&self, offset: u64, data: &[u8]) -> Result<usize, Error<D>> {
+		trace!("write {} (len: {})", offset, data.len());
 		if data.is_empty() {
 			return Ok(0);
 		}
@@ -180,6 +184,7 @@ impl<'a, D: Dev> File<'a, D> {
 	///
 	/// If not all data could be written an error is returned.
 	async fn write_all(&self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
+		trace!("write_all {} (len: {})", offset, data.len());
 		if data.is_empty() {
 			return Ok(());
 		}
@@ -206,6 +211,7 @@ impl<'a, D: Dev> File<'a, D> {
 	/// Write an exact amount of data,
 	/// growing the object if necessary.
 	async fn write_grow(&self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
+		trace!("write_grow {} (len: {})", offset, data.len());
 		if data.is_empty() {
 			return Ok(());
 		}
@@ -238,7 +244,7 @@ impl<'a, D: Dev> File<'a, D> {
 					// TODO avoid redundant tail write
 					dir.write_heap(o, &buf).await?;
 					dir.write_heap(o + offset, &data).await?;
-					Inner::Embed { offset: offt, length }
+					Inner::Embed { offset: o, length: end.try_into().unwrap() }
 				} else {
 					// Create object, copy existing & new data to it.
 					let obj = self.fs.storage.create().await?;
@@ -262,6 +268,7 @@ impl<'a, D: Dev> File<'a, D> {
 
 	/// Resize the file.
 	async fn resize(&self, new_len: u64) -> Result<(), Error<D>> {
+		trace!("resize {}", new_len);
 		let mut data = self.fs.file_data(self.idx);
 		let dir = Dir::new(self.fs, data.header.parent_id);
 
@@ -336,6 +343,7 @@ impl<'a, D: Dev> File<'a, D> {
 
 	/// Destroy this file.
 	async fn destroy(self) -> Result<(), Error<D>> {
+		trace!("destroy");
 		todo!("destroy");
 	}
 }
@@ -423,23 +431,23 @@ impl<'a, D: Dev> FileRef<'a, D> {
 			(&mut data.directories, &mut data.files)
 		});
 
-		let idx = match dirs.get_mut(&dir.id).unwrap().children.entry(index) {
+		let dir_data = dirs.get_mut(&dir.id).expect("no DirData with id");
+		let idx = match dir_data.children.entry(index) {
 			hash_map::Entry::Occupied(e) => match e.get() {
 				&Child::Dir(_) => unreachable!(),
 				&Child::File(idx) => {
+					// Reference existing FileData
 					files[idx].header.reference_count += 1;
 					idx
 				}
 			},
 			hash_map::Entry::Vacant(e) => {
-				// FIXME check if entry is already present.
-				let idx = dir
-					.fs
-					.data
-					.borrow_mut()
-					.files
-					.insert(FileData { header: DataHeader::new(dir.id, index), inner });
+				// Insert new FileData and reference parent dict
+				let idx = files.insert(FileData { header: DataHeader::new(dir.id, index), inner });
 				e.insert(Child::File(idx));
+
+				dir_data.header.reference_count += 1;
+
 				idx
 			}
 		};

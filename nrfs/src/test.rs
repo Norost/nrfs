@@ -26,7 +26,7 @@ async fn new() -> Nrfs<MemDev> {
 		[[MemDev::new(1 << 10, BlockSize::K1)]],
 		BlockSize::K1,
 		MaxRecordSize::K1,
-		&Default::default(),
+		&DirOptions::new(&[0; 16]),
 		Compression::None,
 		1 << 12,
 		1 << 12,
@@ -43,7 +43,7 @@ async fn new_ext() -> Nrfs<MemDev> {
 		MaxRecordSize::K1,
 		&DirOptions {
 			extensions: *dir::EnableExtensions::default().add_unix().add_mtime(),
-			..Default::default()
+			..DirOptions::new(&[0; 16])
 		},
 		Compression::None,
 		4096,
@@ -56,6 +56,20 @@ async fn new_ext() -> Nrfs<MemDev> {
 #[test]
 fn create_fs() {
 	run(new());
+}
+
+/// BorrowMutErrors in Drop impls are annoying as hell
+#[test]
+fn drop_borrow() {
+	run(async {
+		let fs = new().await;
+		let dir = fs.root_dir().await.unwrap();
+		let file = dir
+			.create_file(b"test.txt".into(), &Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+	})
 }
 
 #[test]
@@ -72,12 +86,15 @@ fn create_file() {
 		f.write_grow(0, b"Hello, world!").await.unwrap();
 
 		assert!(d.find(b"I do not exist".into()).await.unwrap().is_none());
-		let mut g = d.find(b"test.txt".into()).await.unwrap().unwrap();
-		assert!(g.ext_unix().is_none());
-		assert!(g.ext_mtime().is_none());
+
+		let mut file = d.find(b"test.txt".into()).await.unwrap().unwrap();
+		let data = file.data().await.unwrap();
+		assert!(data.ext_unix.is_none());
+		assert!(data.ext_mtime.is_none());
 
 		let mut buf = [0; 32];
-		let l = g.as_file().unwrap().read(0, &mut buf).await.unwrap();
+		let Entry::File(file) = file else { panic!("expected file") };
+		let l = file.read(0, &mut buf).await.unwrap();
 		assert_eq!(core::str::from_utf8(&buf[..l]), Ok("Hello, world!"));
 	})
 }
@@ -100,16 +117,12 @@ fn create_many_files() {
 				.unwrap();
 			f.write_grow(0, contents.as_bytes()).await.unwrap();
 
-			let mut g = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
+			let mut file = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
 
 			let mut buf = [0; 32];
-			let l = g.as_file().unwrap().read(0, &mut buf).await.unwrap();
-			assert_eq!(
-				core::str::from_utf8(&buf[..l]),
-				Ok(&*contents),
-				"file #{}",
-				i
-			);
+			let Entry::File(file) = file else { panic!("expected file") };
+			let l = file.read(0, &mut buf).await.unwrap();
+			assert_eq!(core::str::from_utf8(&buf[..l]), Ok(&*contents),);
 
 			fs.finish_transaction().await.unwrap();
 		}
@@ -131,10 +144,11 @@ fn create_many_files() {
 
 			let mut d = fs.root_dir().await.unwrap();
 
-			let mut g = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
+			let mut file = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
 
 			let mut buf = [0; 32];
-			let l = g.as_file().unwrap().read(0, &mut buf).await.unwrap();
+			let Entry::File(file) = file else { panic!("expected file") };
+			let l = file.read(0, &mut buf).await.unwrap();
 			assert_eq!(
 				core::str::from_utf8(&buf[..l]),
 				Ok(&*contents),
@@ -165,14 +179,17 @@ fn create_file_ext() {
 		f.write_grow(0, b"Hello, world!").await.unwrap();
 
 		assert!(d.find(b"I do not exist".into()).await.unwrap().is_none());
-		let mut g = d.find(b"test.txt".into()).await.unwrap().unwrap();
-		assert_eq!(g.ext_unix().unwrap().permissions, 0o640);
-		assert_eq!(g.ext_unix().unwrap().uid, 1000);
-		assert_eq!(g.ext_unix().unwrap().gid, 1001);
-		assert_eq!(g.ext_mtime().unwrap().mtime, 0xdead);
+
+		let mut file = d.find(b"test.txt".into()).await.unwrap().unwrap();
+		let data = file.data().await.unwrap();
+		assert_eq!(data.ext_unix.unwrap().permissions, 0o640);
+		assert_eq!(data.ext_unix.unwrap().uid, 1000);
+		assert_eq!(data.ext_unix.unwrap().gid, 1001);
+		assert_eq!(data.ext_mtime.unwrap().mtime, 0xdead);
 
 		let mut buf = [0; 32];
-		let l = g.as_file().unwrap().read(0, &mut buf).await.unwrap();
+		let Entry::File(file) = file else { panic!("expected file") };
+		let l = file.read(0, &mut buf).await.unwrap();
 		assert_eq!(core::str::from_utf8(&buf[..l]), Ok("Hello, world!"));
 	})
 }
@@ -181,22 +198,27 @@ fn create_file_ext() {
 fn remove_file() {
 	run(async {
 		let mut fs = new().await;
+
 		let mut d = fs.root_dir().await.unwrap();
-		assert_eq!(d.len(), 0);
+		assert_eq!(d.len().await.unwrap(), 0);
+
 		d.create_file(b"hello".into(), &Default::default())
 			.await
 			.unwrap();
-		assert_eq!(d.len(), 1);
+		assert_eq!(d.len().await.unwrap(), 1);
+
 		d.create_file(b"world".into(), &Default::default())
 			.await
 			.unwrap();
-		assert_eq!(d.len(), 2);
+		assert_eq!(d.len().await.unwrap(), 2);
+
 		d.create_file(b"exist".into(), &Default::default())
 			.await
 			.unwrap();
-		assert_eq!(d.len(), 3);
+		assert_eq!(d.len().await.unwrap(), 3);
+
 		assert!(d.remove(b"hello".into()).await.unwrap());
-		assert_eq!(d.len(), 2);
+		assert_eq!(d.len().await.unwrap(), 2);
 
 		// Ensure no spooky entries appear when iterating
 		let mut i = Some(0);
@@ -206,7 +228,9 @@ fn remove_file() {
 		}
 		.await
 		{
-			assert!(matches!(&**e.name(), b"world" | b"exist"));
+			let data = e.data().await.unwrap();
+			let key = e.key(&data).await.unwrap();
+			assert!(matches!(&**key, b"world" | b"exist"));
 			i = ni;
 		}
 	})
@@ -217,23 +241,23 @@ fn shrink() {
 	run(async {
 		let mut fs = new().await;
 		let mut d = fs.root_dir().await.unwrap();
-		assert_eq!(d.len(), 0);
+		assert_eq!(d.len().await.unwrap(), 0);
 		d.create_file(b"hello".into(), &Default::default())
 			.await
 			.unwrap();
-		assert_eq!(d.len(), 1);
+		assert_eq!(d.len().await.unwrap(), 1);
 		d.create_file(b"world".into(), &Default::default())
 			.await
 			.unwrap();
-		assert_eq!(d.len(), 2);
+		assert_eq!(d.len().await.unwrap(), 2);
 		d.create_file(b"exist".into(), &Default::default())
 			.await
 			.unwrap();
-		assert_eq!(d.len(), 3);
+		assert_eq!(d.len().await.unwrap(), 3);
 		assert!(d.remove(b"hello".into()).await.unwrap());
-		assert_eq!(d.len(), 2);
+		assert_eq!(d.len().await.unwrap(), 2);
 		assert!(d.remove(b"exist".into()).await.unwrap());
-		assert_eq!(d.len(), 1);
+		assert_eq!(d.len().await.unwrap(), 1);
 
 		// Ensure no spooky entries appear when iterating
 		let mut i = Some(0);
@@ -243,9 +267,41 @@ fn shrink() {
 		}
 		.await
 		{
-			assert!(matches!(&**e.name(), b"world"));
+			let data = e.data().await.unwrap();
+			let key = e.key(&data).await.unwrap();
+			assert_eq!(&**key, b"world");
 			i = ni;
 		}
+	})
+}
+
+/// Attempt to find all files even with collisions.
+#[test]
+fn find_colllision() {
+	run(async {
+		let mut fs = new().await;
+		let mut d = fs.root_dir().await.unwrap();
+		// NOTE: hash must be SipHash13 and key must be 0
+		// Insert files to avoid shrinking below 8
+		for i in 0..5 {
+			d.create_file((&[i]).into(), &Default::default())
+				.await
+				.unwrap();
+		}
+		d.create_file(b"d".into(), &Default::default())
+			.await
+			.unwrap(); // c4eafac0
+		d.create_file(b"g".into(), &Default::default())
+			.await
+			.unwrap(); // e57630a8
+
+		assert!(d.find(b"\x00".into()).await.unwrap().is_some());
+		assert!(d.find(b"\x01".into()).await.unwrap().is_some());
+		assert!(d.find(b"\x02".into()).await.unwrap().is_some());
+		assert!(d.find(b"\x03".into()).await.unwrap().is_some());
+		assert!(d.find(b"\x04".into()).await.unwrap().is_some());
+		assert!(d.find(b"d".into()).await.unwrap().is_some());
+		assert!(d.find(b"g".into()).await.unwrap().is_some());
 	})
 }
 
@@ -279,7 +335,7 @@ fn real_case_find_000_minified() {
 	run(async {
 		let mut fs = new().await;
 		let mut d = fs.root_dir().await.unwrap();
-		d.create_dir(b"d".into(), &Default::default(), &Default::default())
+		d.create_dir(b"d".into(), &DirOptions::new(&[0; 16]), &Default::default())
 			.await
 			.unwrap();
 		d.create_file(b"C".into(), &Default::default())
@@ -288,10 +344,13 @@ fn real_case_find_000_minified() {
 		d.create_file(b".rustc_info.json".into(), &Default::default())
 			.await
 			.unwrap();
-		d.create_dir(b"p".into(), &Default::default(), &Default::default())
+		d.create_dir(b"p".into(), &DirOptions::new(&[0; 16]), &Default::default())
 			.await
 			.unwrap();
-		assert_eq!(d.len(), fs.root_dir().await.unwrap().len());
+		assert_eq!(
+			d.len().await.unwrap(),
+			fs.root_dir().await.unwrap().len().await.unwrap()
+		);
 		let mut d = fs.root_dir().await.unwrap();
 		d.find(b".rustc_info.json".into()).await.unwrap().unwrap();
 	})

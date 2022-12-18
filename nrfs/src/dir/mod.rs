@@ -7,11 +7,10 @@ use {
 		read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Idx, Name, Nrfs, SymRef,
 		UnknownRef,
 	},
-	core::{cell::RefMut, hash::Hasher},
+	core::cell::RefMut,
 	hashmap::*,
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
-	siphasher::sip::SipHasher13,
 };
 
 // TODO determine a good load factor.
@@ -45,12 +44,8 @@ pub struct DirData {
 	///
 	/// This is always between `0` and `32`.
 	hashmap_size_p2: u8,
-	/// The key to use with the hashing algorithm.
-	///
-	/// Necessary for some cryptographic hashes such as [`SipHasher13`].
-	hash_key: [u8; 16],
-	/// The hash algorithm used to index the hashmap.
-	hash_algorithm: HashAlgorithm,
+	/// The hasher used to index the hashmap.
+	hasher: Hasher,
 	/// The amount of entries in the hashmap.
 	entry_count: u32,
 	/// The offset of `unix` extension data, if in use.
@@ -103,17 +98,6 @@ impl DirData {
 		(self.capacity() as u32).wrapping_sub(1)
 	}
 
-	/// Hash an arbitrary-sized key.
-	fn hash(&self, key: &[u8]) -> u32 {
-		match self.hash_algorithm {
-			HashAlgorithm::SipHasher13 => {
-				let mut h = SipHasher13::new_with_key(&self.hash_key);
-				h.write(key);
-				h.finish() as _
-			}
-		}
-	}
-
 	/// Determine the offset of an entry.
 	///
 	/// This does *not* check if the index is in range.
@@ -145,17 +129,19 @@ impl<'a, D: Dev> Dir<'a, D> {
 	async fn init_with_size(
 		&self,
 		object: &nros::Tree<'a, D>,
+		data: &mut DirData,
 		map_size_p2: u8,
 	) -> Result<(), Error<D>> {
 		// Create header
-		let mut data = self.fs.dir_data(self.id);
+		let (hash_ty, hash_key) = data.hasher.to_raw();
+
 		let mut buf = [0; 64];
 		buf[0] = data.header_len8;
 		buf[1] = data.entry_len8;
-		buf[2] = data.hash_algorithm as _;
+		buf[2] = hash_ty;
 		buf[3] = map_size_p2;
 		buf[4..8].copy_from_slice(&data.entry_count.to_le_bytes());
-		buf[8..24].copy_from_slice(&data.hash_key);
+		buf[8..24].copy_from_slice(&hash_key);
 		let mut header_offt = 24;
 
 		let buf = &mut buf[..usize::from(data.header_len8) * 8];
@@ -209,11 +195,13 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 	/// Read a heap value.
 	pub(crate) async fn read_heap(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
+		trace!("read_heap {:?} (len: {})", offset, buf.len());
 		self.fs.read_exact(self.id + 1, offset, buf).await
 	}
 
 	/// Write a heap value.
 	pub(crate) async fn write_heap(&self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
+		trace!("write_heap {:?} (len: {})", offset, data.len());
 		self.fs.write_grow(self.id + 1, offset, data).await
 	}
 
@@ -262,34 +250,22 @@ impl<'a, D: Dev> Dir<'a, D> {
 		name: &[u8],
 		hash: u32,
 	) -> Result<bool, Error<D>> {
-		match entry.key() {
+		trace!(
+			"compare_names {:?} ({:?}, {:#10x})",
+			&entry.key,
+			<&Name>::try_from(name).unwrap(),
+			hash
+		);
+		match entry.key {
 			RawEntryKey::Embed { data, len } => Ok(&data[..len.into()] == name),
-			RawEntryKey::Heap { offset, len } => {
-				if entry.hash != hash || usize::from(len) != name.len() {
+			RawEntryKey::Heap { offset, len, hash: e_hash } => {
+				if e_hash != hash || usize::from(len) != name.len() {
 					return Ok(false);
 				}
 				let mut buf = vec![0; len.into()];
 				self.fs.read_exact(self.id + 1, offset, &mut buf).await?;
 				Ok(&buf == name)
 			}
-		}
-	}
-
-	/// Remove the entry with the given name.
-	///
-	/// Returns `true` if successful.
-	/// It will fail if no entry with the given name could be found.
-	/// It will also fail if the type is unknown to avoid space leaks.
-	///
-	/// # Note
-	///
-	/// While it does check if the entry is a directory, it does not check whether it's empty.
-	/// It is up to the user to ensure the directory is empty.
-	pub async fn remove(&self, name: &Name) -> Result<bool, Error<D>> {
-		if let Some(e) = self.hashmap().await?.find_index(name).await? {
-			self.remove_at(&e).await
-		} else {
-			Ok(false)
 		}
 	}
 
@@ -304,9 +280,9 @@ impl<'a, D: Dev> Dir<'a, D> {
 		self.hashmap().await?.remove_at(entry.index).await?;
 
 		// Deallocate key if stored on heap
-		match entry.key() {
+		match entry.key {
 			RawEntryKey::Embed { .. } => {}
-			RawEntryKey::Heap { offset, len } => self.dealloc(offset, len.into()).await?,
+			RawEntryKey::Heap { offset, len, .. } => self.dealloc(offset, len.into()).await?,
 		}
 
 		match ty {
@@ -334,6 +310,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 	/// Rename an entry.
 	async fn rename(&self, from: &Name, to: &Name) -> Result<bool, Error<D>> {
+		trace!("rename {:?} -> {:?}", from, to);
 		let map = self.hashmap().await?;
 		if let Some(e) = map.find_index(from).await? {
 			// Resizing is not necessary as there is guaranteed to be a free spot
@@ -388,6 +365,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 	///
 	/// `grow` indicates whether the size of the map should increase or decrease.
 	async fn resize(&self, grow: bool) -> Result<(), Error<D>> {
+		trace!("resize {}", if grow { "grow" } else { "shrink" });
 		// Since we're going to load the entire log we can as well minimize it.
 		self.alloc_log().await?;
 
@@ -411,7 +389,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 		drop(data);
 
 		let new_map = self.fs.storage.create().await?;
-		self.init_with_size(&new_map, new_size_p2).await?;
+		self.init_with_size(&new_map, &mut self.fs.dir_data(self.id), new_size_p2)
+			.await?;
 
 		// Copy entries
 		let cur_map = self.hashmap().await?;
@@ -463,11 +442,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 		let name = Some(entry.name);
 		let entry = RawEntry {
-			key_len: u8::MAX,
-			key_offset: u64::MAX,
 			ty: entry.ty.to_ty(),
-			hash: 0,
-			padding: [0; 4],
+			key: RawEntryKey::Embed { len: 0, data: [0; 14] },
 
 			id_or_offset: entry.ty.to_data(),
 
@@ -576,8 +552,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			header_len8: ((header_len + 7) / 8).try_into().unwrap(),
 			entry_len8: ((entry_len + 7) / 8).try_into().unwrap(),
 			hashmap_size_p2: options.capacity_p2,
-			hash_key: options.hash_key,
-			hash_algorithm: options.hash_algorithm,
+			hasher: options.hasher,
 			entry_count: 0,
 			unix_offset,
 			mtime_offset,
@@ -590,7 +565,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 
 		// Create hashmap
 		Dir::new(fs, slf_id)
-			.init_with_size(&slf_obj, options.capacity_p2)
+			.init_with_size(&slf_obj, &mut data, options.capacity_p2)
 			.await?;
 
 		// Insert directory data & return reference.
@@ -654,11 +629,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			header_len8,
 			entry_len8,
 			hashmap_size_p2,
-			hash_algorithm: match hash_algorithm {
-				1 => HashAlgorithm::SipHasher13,
-				n => return Err(Error::UnknownHashAlgorithm(n)),
-			},
-			hash_key,
+			hasher: Hasher::from_raw(hash_algorithm, &hash_key).unwrap(), // TODO
 			entry_count,
 			unix_offset,
 			mtime_offset,
@@ -678,6 +649,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		name: &Name,
 		ext: &Extensions,
 	) -> Result<Option<FileRef<'a, D>>, Error<D>> {
+		trace!("create_file {:?}", name);
 		let e = NewEntry { name, ty: Type::EmbedFile { offset: 0, length: 0 } };
 		let index = self.dir().insert(e, ext).await?;
 		Ok(index.map(|i| FileRef::from_embed(&self.dir(), 0, 0, i)))
@@ -692,6 +664,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		options: &DirOptions,
 		ext: &Extensions,
 	) -> Result<Option<DirRef<'a, D>>, Error<D>> {
+		trace!("create_dir {:?}", name);
 		// Try to insert stub entry
 		let e = NewEntry { name, ty: Type::Dir { id: u64::MAX } };
 		let Some(index) = self.dir().insert(e, ext).await? else { return Ok(None) };
@@ -711,11 +684,15 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		name: &Name,
 		ext: &Extensions,
 	) -> Result<Option<SymRef<'a, D>>, Error<D>> {
+		trace!("create_sym {:?}", name);
 		let e = NewEntry { name, ty: Type::EmbedSym { offset: 0, length: 0 } };
 		let index = self.dir().insert(e, ext).await?;
 		Ok(index.map(|i| SymRef::from_embed(&self.dir(), 0, 0, i)))
 	}
 
+	/// Retrieve the entry with an index equal or greater than `index`.
+	///
+	/// Used for iteration.
 	pub async fn next_from(
 		&self,
 		mut index: u32,
@@ -747,9 +724,28 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		}
 	}
 
+	/// Remove the entry with the given name.
+	///
+	/// Returns `true` if successful.
+	/// It will fail if no entry with the given name could be found.
+	/// It will also fail if the type is unknown to avoid space leaks.
+	///
+	/// # Note
+	///
+	/// While it does check if the entry is a directory, it does not check whether it's empty.
+	/// It is up to the user to ensure the directory is empty.
+	pub async fn remove(&self, name: &Name) -> Result<bool, Error<D>> {
+		trace!("remove {:?}", name);
+		if let Some(e) = self.dir().hashmap().await?.find_index(name).await? {
+			self.dir().remove_at(&e).await
+		} else {
+			Ok(false)
+		}
+	}
+
 	/// Get the amount of entries in this directory.
-	async fn len(&self) -> u32 {
-		self.fs.dir_data(self.id).entry_count
+	pub async fn len(&self) -> Result<u32, Error<D>> {
+		Ok(self.fs.dir_data(self.id).entry_count)
 	}
 
 	/// Create a [`Dir`] helper structure.
@@ -796,7 +792,7 @@ impl<'a, D: Dev> Entry<'a, D> {
 		let dir = Dir::new(fs, parent_id);
 		let map = dir.hashmap().await?;
 		let entry = map.get(parent_index).await?;
-		Ok(EntryData { key: entry.key(), ext_unix: entry.ext_unix, ext_mtime: entry.ext_mtime })
+		Ok(EntryData { key: entry.key, ext_unix: entry.ext_unix, ext_mtime: entry.ext_mtime })
 	}
 
 	/// Get the key,
@@ -805,7 +801,7 @@ impl<'a, D: Dev> Entry<'a, D> {
 			&RawEntryKey::Embed { data, len } => {
 				Ok(<&Name>::try_from(&data[..usize::from(len)]).unwrap().into())
 			}
-			&RawEntryKey::Heap { offset, len } => {
+			&RawEntryKey::Heap { offset, len, hash: _ } => {
 				// Heap is located at parent ID + 1
 				let DataHeader { parent_id, .. } = *self.data_header();
 				let heap = self.fs().storage.get(parent_id + 1).await?;
@@ -898,15 +894,27 @@ struct NewEntry<'a> {
 	ty: Type,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct DirOptions {
 	pub capacity_p2: u8,
 	pub extensions: EnableExtensions,
-	pub hash_key: [u8; 16],
-	pub hash_algorithm: HashAlgorithm,
+	pub hasher: Hasher,
 }
 
-#[derive(Clone, Copy, Default)]
+impl DirOptions {
+	/// Initialize directory options with default settings and the supplied hash key.
+	///
+	/// It is an alternative to [`Default`] which forces a key to be provided.
+	pub fn new(key: &[u8; 16]) -> Self {
+		Self {
+			capacity_p2: Default::default(),
+			extensions: Default::default(),
+			hasher: Hasher::SipHasher13(siphasher::sip::SipHasher13::new_with_key(key)),
+		}
+	}
+}
+
+#[derive(Clone, Copy, Default, Debug)]
 pub struct EnableExtensions(u8);
 
 macro_rules! ext {
