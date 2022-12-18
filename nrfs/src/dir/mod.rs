@@ -290,12 +290,27 @@ impl<'a, D: Dev> Dir<'a, D> {
 		match ty {
 			Type::File { id } | Type::Sym { id } => {
 				// Dereference object.
-				self.fs.storage.get(id).await?.decrease_reference_count().await?;
+				self.fs
+					.storage
+					.get(id)
+					.await?
+					.decrease_reference_count()
+					.await?;
 			}
 			Type::Dir { id } => {
 				// Dereference map and heap.
-				self.fs.storage.get(id + 0).await?.decrease_reference_count().await?;
-				self.fs.storage.get(id + 1).await?.decrease_reference_count().await?;
+				self.fs
+					.storage
+					.get(id + 0)
+					.await?
+					.decrease_reference_count()
+					.await?;
+				self.fs
+					.storage
+					.get(id + 1)
+					.await?
+					.decrease_reference_count()
+					.await?;
 			}
 			Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
 				// Free heap space.
@@ -311,16 +326,28 @@ impl<'a, D: Dev> Dir<'a, D> {
 	}
 
 	/// Rename an entry.
+	///
+	/// Returns `false` if the entry could not be found or another entry with the same index
+	/// exists.
 	async fn rename(&self, from: &Name, to: &Name) -> Result<bool, Error<D>> {
 		trace!("rename {:?} -> {:?}", from, to);
 		let map = self.hashmap().await?;
-		if let Some(e) = map.find_index(from).await? {
+		if let Some(entry) = map.find_index(from).await? {
 			// Resizing is not necessary as there is guaranteed to be a free spot
 			// and we'll free another spot if the insert succeeds.
-			let from_index = e.index;
-			let r = map.insert(e, Some(to)).await;
-			if r?.is_some() {
-				map.remove_at(from_index).await?;
+			let index = entry.index;
+			if let Some(new_index) = map.insert(entry, Some(to)).await? {
+				// Remove from old index
+				map.remove_at(index).await?;
+				// Fixup indices in corresponding File or DirData
+				let mut data = self.fs.dir_data(self.id);
+				let child = data.children.remove(&index).expect("child not present");
+				data.children.insert(new_index, child);
+				drop(data);
+				match child {
+					Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
+					Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
+				}
 				return Ok(true);
 			}
 		}
@@ -825,6 +852,14 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		} else {
 			Ok(None)
 		}
+	}
+
+	/// Rename an entry.
+	///
+	/// Returns `false` if the entry could not be found or another entry with the same index
+	/// exists.
+	pub async fn rename(&self, from: &Name, to: &Name) -> Result<bool, Error<D>> {
+		self.dir().rename(from, to).await
 	}
 
 	/// Remove the entry with the given name.

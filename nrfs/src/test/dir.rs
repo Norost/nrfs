@@ -15,6 +15,7 @@ fn create_file() {
 		let root = fs.root_dir().await.unwrap();
 		root.create_file(b"file".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 	})
 }
@@ -30,6 +31,7 @@ fn create_dir() {
 			&Default::default(),
 		)
 		.await
+		.unwrap()
 		.unwrap();
 	})
 }
@@ -41,6 +43,7 @@ fn create_sym() {
 		let root = fs.root_dir().await.unwrap();
 		root.create_sym(b"sym".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 	})
 }
@@ -55,6 +58,7 @@ fn create_file_long_name() {
 			&Default::default(),
 		)
 		.await
+		.unwrap()
 		.unwrap();
 	})
 }
@@ -66,6 +70,7 @@ fn get_file() {
 		let root = fs.root_dir().await.unwrap();
 		root.create_file(b"file".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 
 		let file = root.find(b"file".into()).await.unwrap().unwrap();
@@ -84,6 +89,7 @@ fn get_dir() {
 			&Default::default(),
 		)
 		.await
+		.unwrap()
 		.unwrap();
 
 		let dir = root.find(b"dir".into()).await.unwrap().unwrap();
@@ -98,6 +104,7 @@ fn get_sym() {
 		let root = fs.root_dir().await.unwrap();
 		root.create_sym(b"sym".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 
 		let sym = root.find(b"sym".into()).await.unwrap().unwrap();
@@ -115,6 +122,7 @@ fn get_file_long_name() {
 			&Default::default(),
 		)
 		.await
+		.unwrap()
 		.unwrap();
 
 		let file = root
@@ -133,6 +141,7 @@ fn remove_file() {
 		let root = fs.root_dir().await.unwrap();
 		root.create_file(b"file".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 
 		assert!(root.remove(b"file".into()).await.unwrap());
@@ -150,6 +159,7 @@ fn remove_dir() {
 			&Default::default(),
 		)
 		.await
+		.unwrap()
 		.unwrap();
 
 		assert!(root.remove(b"dir".into()).await.unwrap());
@@ -163,6 +173,7 @@ fn remove_sym() {
 		let root = fs.root_dir().await.unwrap();
 		root.create_sym(b"sym".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 
 		assert!(root.remove(b"sym".into()).await.unwrap());
@@ -179,11 +190,34 @@ fn remove_file_long_name() {
 			&Default::default(),
 		)
 		.await
+		.unwrap()
 		.unwrap();
 
 		assert!(root
 			.remove(b"This is a string with len >= 14".into())
 			.await
 			.unwrap());
+	})
+}
+
+#[test]
+fn rename() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+
+		let file = root
+			.create_file(b"file".into(), &Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+
+		let moved = root.rename(b"file".into(), b"same_file".into())
+			.await
+			.unwrap();
+		assert!(moved);
+
+		// Check if the associated FileData is still correct.
+		file.write_grow(0, b"panic in the disco").await.unwrap();
 	})
 }

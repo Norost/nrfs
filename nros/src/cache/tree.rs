@@ -866,7 +866,10 @@ impl<'a, D: Dev> Tree<'a, D> {
 	/// This may fail if the reference count is already [`u16::MAX`].
 	/// On failure, the returned value is `false`, otherwise `true`.
 	pub async fn increase_reference_count(&self) -> Result<bool, Error<D>> {
-		debug_assert_ne!(self.id, OBJECT_LIST_ID, "object list isn't reference counted");
+		debug_assert_ne!(
+			self.id, OBJECT_LIST_ID,
+			"object list isn't reference counted"
+		);
 
 		// Ensure the root doesn't get modified while we're working with it.
 		let _lock = ResizeLock::new(&self.cache.data, self.id).await;
@@ -888,7 +891,10 @@ impl<'a, D: Dev> Tree<'a, D> {
 	/// If the reference count reaches 0 the object is destroyed
 	/// and the tree should not be used anymore.
 	pub async fn decrease_reference_count(&self) -> Result<(), Error<D>> {
-		debug_assert_ne!(self.id, OBJECT_LIST_ID, "object list isn't reference counted");
+		debug_assert_ne!(
+			self.id, OBJECT_LIST_ID,
+			"object list isn't reference counted"
+		);
 
 		// Ensure the root doesn't get modified while we're working with it.
 		let lock = ResizeLock::new(&self.cache.data, self.id).await;
