@@ -370,7 +370,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let from_map = self.hashmap().await?;
 
 		// Find the entry to transfer.
-		let Some(e) = from_map.find_index(name).await? else { return Ok(false) };
+		let Some(entry) = from_map.find_index(name).await? else { return Ok(false) };
 
 		// Check if the destination directory has enough capacity.
 		// If not, grow it first.
@@ -380,12 +380,38 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let to_map = to_dir.hashmap().await?;
 
 		// Remove the entry from the current directory.
-		from_map.remove_at(e.index).await?;
+		from_map.remove_at(entry.index).await?;
 		self.update_entry_count(|x| x - 1).await?;
 
 		// Insert the entry in the destination directory.
-		let Some(_) = to_map.insert(e, Some(to_name)).await? else { return Ok(false) };
+		let from_index = entry.index;
+		let Some(to_index) = to_map.insert(entry, Some(to_name)).await? else { return Ok(false) };
 		to_dir.update_entry_count(|x| x + 1).await?;
+
+		// Fixup indices & reference counts in corresponding File or DirData
+
+		// Fixup from dir
+		let mut data = self.fs.dir_data(self.id);
+		data.header.reference_count -= 1;
+		let child = data
+			.children
+			.remove(&from_index)
+			.expect("child not present");
+		drop(data);
+
+		// Fixup to dir
+		let mut data = self.fs.dir_data(to_dir.id);
+		data.children.insert(to_index, child);
+		data.header.reference_count += 1;
+		drop(data);
+
+		// Fixup child
+		let mut header = match child {
+			Child::File(idx) => RefMut::map(self.fs.file_data(idx), |d| &mut d.header),
+			Child::Dir(id) => RefMut::map(self.fs.dir_data(id), |d| &mut d.header),
+		};
+		header.parent_id = to_dir.id;
+		header.parent_index = to_index;
 
 		Ok(true)
 	}
@@ -860,6 +886,27 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	/// exists.
 	pub async fn rename(&self, from: &Name, to: &Name) -> Result<bool, Error<D>> {
 		self.dir().rename(from, to).await
+	}
+
+	/// Move an entry to another directory.
+	///
+	/// Returns `false` if the entry could not be found or another entry with the same index
+	/// exists.
+	///
+	/// # Panics
+	///
+	/// If `self` and `to_dir` are on different filesystems.
+	pub async fn transfer(
+		&self,
+		name: &Name,
+		to_dir: &DirRef<'a, D>,
+		to_name: &Name,
+	) -> Result<bool, Error<D>> {
+		assert_eq!(
+			self.fs as *const _, to_dir.fs as *const _,
+			"self and to_dir are on different filesystems"
+		);
+		self.dir().transfer(name, to_dir.id, to_name).await
 	}
 
 	/// Remove the entry with the given name.

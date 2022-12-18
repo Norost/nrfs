@@ -149,6 +149,24 @@ fn remove_file() {
 }
 
 #[test]
+fn remove_large_file() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+		let file = root
+			.create_file(b"file".into(), &Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+
+		// Write at least 64KiB of data so an object is guaranteed to be allocated.
+		file.write_grow(0, &[0; 1 << 16]).await.unwrap();
+
+		assert!(root.remove(b"file".into()).await.unwrap());
+	})
+}
+
+#[test]
 fn remove_dir() {
 	run(async {
 		let fs = new().await;
@@ -212,7 +230,41 @@ fn rename() {
 			.unwrap()
 			.unwrap();
 
-		let moved = root.rename(b"file".into(), b"same_file".into())
+		let moved = root
+			.rename(b"file".into(), b"same_file".into())
+			.await
+			.unwrap();
+		assert!(moved);
+
+		// Check if the associated FileData is still correct.
+		file.write_grow(0, b"panic in the disco").await.unwrap();
+	})
+}
+
+#[test]
+fn transfer() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+
+		let dir = root
+			.create_dir(
+				b"dir".into(),
+				&DirOptions::new(&[0; 16]),
+				&Default::default(),
+			)
+			.await
+			.unwrap()
+			.unwrap();
+
+		let file = root
+			.create_file(b"file".into(), &Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+
+		let moved = root
+			.transfer(b"file".into(), &dir, b"same_file".into())
 			.await
 			.unwrap();
 		assert!(moved);
