@@ -135,7 +135,7 @@ impl<D: Dev> Nrfs<D> {
 		)
 		.await?;
 		let mut s = Self { storage, data: Default::default() };
-		DirRef::new(&mut s, u64::MAX, u32::MAX, dir).await?;
+		DirRef::new_root(&mut s, dir).await?;
 		Ok(s)
 	}
 
@@ -283,8 +283,30 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 			unreachable!()
 		};
 		data.get_mut().header.reference_count -= 1;
-		if data.get_mut().header.reference_count == 0 {
+		if data.get().header.reference_count == 0 {
+			// Remove DirData.
+			let DataHeader { parent_id, parent_index, .. } = data.get().header;
 			data.remove();
+
+			// If this is the root dir there is no parent dir,
+			// so check first.
+			if self.id != 0 {
+				// Remove itself from parent directory.
+				let dir = fs
+					.directories
+					.get_mut(&parent_id)
+					.expect("parent dir is not loaded");
+				let _r = dir.children.remove(&parent_index);
+				dbg!(&_r, &dir);
+				debug_assert!(
+					matches!(_r, Some(Child::Dir(id)) if id == self.id),
+					"child not present in parent"
+				);
+
+				// Reconstruct DirRef to adjust reference count of dir appropriately.
+				drop(fs);
+				drop(DirRef { fs: self.fs, id: parent_id });
+			}
 		}
 	}
 }

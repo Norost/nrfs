@@ -527,6 +527,46 @@ impl<'a, D: Dev> Dir<'a, D> {
 impl<'a, D: Dev> DirRef<'a, D> {
 	/// Create a new directory.
 	pub(crate) async fn new(
+		parent_dir: &Dir<'a, D>,
+		parent_index: u32,
+		options: &DirOptions,
+	) -> Result<DirRef<'a, D>, Error<D>> {
+		// Increase reference count to parent directory.
+		let mut parent = parent_dir.fs.dir_data(parent_dir.id);
+		parent.header.reference_count += 1;
+		debug_assert!(
+			!parent.children.contains_key(&parent_index),
+			"child present in parent"
+		);
+
+		// Load directory data.
+		drop(parent);
+		let dir_ref = Self::new_inner(parent_dir.fs, parent_dir.id, parent_index, options).await?;
+
+		let _r = parent_dir
+			.fs
+			.dir_data(parent_dir.id)
+			.children
+			.insert(parent_index, Child::Dir(dir_ref.id));
+		debug_assert!(_r.is_none(), "child present in parent");
+
+		Ok(dir_ref)
+	}
+
+	/// Create a new root directory.
+	///
+	/// This does not lock anything and is meant to be solely used in [`Nrfs::new`].
+	pub(crate) async fn new_root(
+		fs: &'a Nrfs<D>,
+		options: &DirOptions,
+	) -> Result<DirRef<'a, D>, Error<D>> {
+		Self::new_inner(fs, u64::MAX, u32::MAX, options).await
+	}
+
+	/// Create a new directory.
+	///
+	/// This does not directly create a reference to a parent directory.
+	async fn new_inner(
 		fs: &'a Nrfs<D>,
 		parent_id: u64,
 		parent_index: u32,
@@ -600,9 +640,18 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		);
 
 		// Load directory data.
+		drop(parent);
 		let dir_ref = Self::load_inner(parent_dir.fs, parent_dir.id, parent_index, id).await?;
 
-		// FIXME ditto
+		// Add ourselves to parent dir.
+		// FIXME account for potential move while loading the directory.
+		// The parent directory must hold a lock, but it currently is not.
+		let _r = parent_dir
+			.fs
+			.dir_data(parent_dir.id)
+			.children
+			.insert(parent_index, Child::Dir(id));
+		debug_assert!(_r.is_none(), "child present in parent");
 
 		Ok(dir_ref)
 	}
@@ -630,7 +679,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 
 	/// Load an existing directory.
 	///
-	/// This does not reference a parent directory.
+	/// This does not directly create a reference to a parent directory.
 	///
 	/// # Note
 	///
@@ -722,7 +771,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		let e = NewEntry { name, ty: Type::Dir { id: u64::MAX } };
 		let Some(index) = self.dir().insert(e, ext).await? else { return Ok(None) };
 		// Create new directory with stub index (u32::MAX).
-		let d = DirRef::new(self.fs, self.id, u32::MAX, &options).await?;
+		let d = DirRef::new(&self.dir(), u32::MAX, options).await?;
 		// Fixup ID in entry.
 		self.dir().set_ty(index, Type::Dir { id: d.id }).await?;
 		// Done!
