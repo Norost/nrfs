@@ -267,8 +267,8 @@ impl<D: Dev> Cache<D> {
 		b[mem::size_of::<Record>()..].copy_from_slice(rec.as_ref());
 		self.write_object_table(id, &b).await?;
 
-		let a = Tree::new(self, id).await?;
-		let b = Tree::new(self, id).await?;
+		let a = Tree::new(self, id + 0).await?;
+		let b = Tree::new(self, id + 1).await?;
 		Ok((a, b))
 	}
 
@@ -349,51 +349,6 @@ impl<D: Dev> Cache<D> {
 		}
 
 		self.dealloc_id(from);
-		Ok(())
-	}
-
-	/// Increase the reference count of an object.
-	///
-	/// This may fail if the reference count is already [`u16::MAX`].
-	/// On failure, the returned value is `false`, otherwise `true`.
-	pub async fn increase_refcount(&self, id: u64) -> Result<bool, Error<D>> {
-		// Ensure the root doesn't get modified while we're working with it.
-		let _lock = ResizeLock::new(&self.data, id).await;
-
-		let mut root = self.get_object_root(id).await?;
-		assert!(root.references != 0, "invalid object");
-		if root.references == u16::MAX {
-			return Ok(false);
-		}
-		root.references += 1;
-		self.set_object_root(id, &root).await?;
-
-		Ok(true)
-	}
-
-	/// Decrease the reference count of an object.
-	///
-	/// If the reference count reaches 0 the object is destroyed.
-	///
-	/// # Panics
-	///
-	/// If the object isn't valid, i.e. reference count is already 0.
-	pub async fn decrease_refcount(&self, id: u64) -> Result<(), Error<D>> {
-		// Ensure the root doesn't get modified while we're working with it.
-		let lock = ResizeLock::new(&self.data, id).await;
-
-		let mut root = self.get_object_root(id).await?;
-		assert!(root.references != 0, "invalid object");
-		root.references -= 1;
-		self.set_object_root(id, &root).await?;
-
-		drop(lock);
-
-		if root.references == 0 {
-			// Free space.
-			self.get(id).await?.resize(0).await?;
-		}
-
 		Ok(())
 	}
 

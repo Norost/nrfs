@@ -146,32 +146,6 @@ impl<D: Dev> Nros<D> {
 		self.store.create_pair().await
 	}
 
-	/// Increment the reference count to an object.
-	///
-	/// This operation returns `false` if the reference count would overflow.
-	///
-	/// This function *must not* be used on invalid objects!
-	///
-	/// # Panics
-	///
-	/// If the object is invalid.
-	pub async fn increase_reference_count(&self, id: u64) -> Result<bool, Error<D>> {
-		self.store.increase_refcount(id).await
-	}
-
-	/// Decrement the reference count to an object.
-	///
-	/// If this count reaches zero the object is automatically freed.
-	///
-	/// This function *must not* be used on invalid objects!
-	///
-	/// # Panics
-	///
-	/// If the object is invalid.
-	pub async fn decrease_reference_count(&self, id: u64) -> Result<(), Error<D>> {
-		self.store.decrease_refcount(id).await
-	}
-
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
 		self.store.finish_transaction().await
 	}

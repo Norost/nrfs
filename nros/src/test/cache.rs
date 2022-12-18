@@ -3,9 +3,9 @@ use super::*;
 /// Clear the entire cache of the object store.
 async fn clear(s: &Nros<MemDev>) {
 	s.resize_cache(0, 0).await.unwrap();
-	let status = s.cache_status();
-	assert_eq!(status.global_usage, 0);
-	assert_eq!(status.dirty_usage, 0);
+	let stat = s.statistics();
+	assert_eq!(stat.global_usage, 0);
+	assert_eq!(stat.dirty_usage, 0);
 	s.resize_cache(4000, 4000).await.unwrap();
 }
 
