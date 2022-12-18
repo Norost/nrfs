@@ -42,14 +42,14 @@ mod trace {
 
 	impl Trace {
 		pub fn new() -> Self {
-			DEPTH.with(|depth| { depth.update(|x| x + 1) });
+			DEPTH.with(|depth| depth.update(|x| x + 1));
 			Self
 		}
 	}
 
 	impl Drop for Trace {
 		fn drop(&mut self) {
-			DEPTH.with(|depth| { depth.update(|x| x - 1) });
+			DEPTH.with(|depth| depth.update(|x| x - 1));
 		}
 	}
 }
@@ -150,8 +150,9 @@ impl<D: Dev> Nrfs<D> {
 		})
 	}
 
+	/// Get a reference to the root directory.
 	pub async fn root_dir(&self) -> Result<DirRef<'_, D>, Error<D>> {
-		DirRef::load(self, u64::MAX, u32::MAX, 0).await
+		DirRef::load_root(self).await
 	}
 
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {

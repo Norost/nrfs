@@ -576,19 +576,71 @@ impl<'a, D: Dev> DirRef<'a, D> {
 
 	/// Load an existing directory.
 	pub(crate) async fn load(
-		fs: &'a Nrfs<D>,
-		parent_id: u64,
+		parent_dir: &Dir<'a, D>,
 		parent_index: u32,
 		id: u64,
 	) -> Result<DirRef<'a, D>, Error<D>> {
 		// Check if the directory is already present in the filesystem object.
 		//
 		// If so, just reference that and return.
-		if let Some(dir) = fs.data.borrow_mut().directories.get_mut(&id) {
+		if let Some(dir) = parent_dir.fs.data.borrow_mut().directories.get_mut(&id) {
 			dir.header.reference_count += 1;
-			return Ok(DirRef { fs, id });
+			return Ok(DirRef { fs: parent_dir.fs, id });
 		}
 
+		// FIXME check if the directory is already being loaded
+		// Also create some guard when we start fetching directory data.
+
+		// Increase reference count to parent directory.
+		let mut parent = parent_dir.fs.dir_data(parent_dir.id);
+		parent.header.reference_count += 1;
+		debug_assert!(
+			!parent.children.contains_key(&parent_index),
+			"child present in parent"
+		);
+
+		// Load directory data.
+		let dir_ref = Self::load_inner(parent_dir.fs, parent_dir.id, parent_index, id).await?;
+
+		// FIXME ditto
+
+		Ok(dir_ref)
+	}
+
+	/// Load the root directory.
+	pub(crate) async fn load_root(fs: &'a Nrfs<D>) -> Result<DirRef<'a, D>, Error<D>> {
+		// Check if the root directory is already present in the filesystem object.
+		//
+		// If so, just reference that and return.
+		if let Some(dir) = fs.data.borrow_mut().directories.get_mut(&0) {
+			dir.header.reference_count += 1;
+			return Ok(DirRef { fs, id: 0 });
+		}
+
+		// FIXME check if the directory is already being loaded
+		// Also create some guard when we start fetching directory data.
+
+		// Load directory data.
+		let dir_ref = Self::load_inner(fs, u64::MAX, u32::MAX, 0).await?;
+
+		// FIXME ditto
+
+		Ok(dir_ref)
+	}
+
+	/// Load an existing directory.
+	///
+	/// This does not reference a parent directory.
+	///
+	/// # Note
+	///
+	/// This function does not check if a corresponding [`DirData`] is already present!
+	async fn load_inner(
+		fs: &'a Nrfs<D>,
+		parent_id: u64,
+		parent_index: u32,
+		id: u64,
+	) -> Result<DirRef<'a, D>, Error<D>> {
 		// Get basic info
 		let mut buf = [0; 24];
 		fs.read_exact(id, 0, &mut buf).await?;
@@ -781,7 +833,7 @@ impl<'a, D: Dev> Entry<'a, D> {
 			Ok(Type::EmbedSym { offset, length }) => {
 				Self::Sym(SymRef::from_embed(dir, offset, length, entry.index))
 			}
-			Ok(Type::Dir { id }) => Self::Dir(DirRef::load(dir.fs, dir.id, entry.index, id).await?),
+			Ok(Type::Dir { id }) => Self::Dir(DirRef::load(dir, entry.index, id).await?),
 			Err(_) => Self::Unknown(UnknownRef::new(dir, entry.index)),
 		})
 	}
