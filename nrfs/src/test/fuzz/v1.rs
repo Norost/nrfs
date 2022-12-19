@@ -526,3 +526,21 @@ fn resize_children_backshift() {
 	)
 	.run()
 }
+
+#[test]
+fn f() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[85, 90, 85, 85, 85, 85, 85, 85]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[93, 223, 43, 0, 255, 255, 255, 255]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[93, 131, 239, 85, 98, 255, 77, 250]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[0]).into() },
+		],
+	)
+	.run();
+}

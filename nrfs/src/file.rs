@@ -439,7 +439,7 @@ impl<'a, D: Dev> FileRef<'a, D> {
 		let dir_data = dirs.get_mut(&dir.id).expect("no DirData with id");
 		let idx = match dir_data.children.entry(index) {
 			hash_map::Entry::Occupied(e) => match e.get() {
-				&Child::Dir(_) => unreachable!(),
+				&Child::Dir(_) => unreachable!("expected File, not Dir"),
 				&Child::File(idx) => {
 					// Reference existing FileData
 					files[idx].header.reference_count += 1;

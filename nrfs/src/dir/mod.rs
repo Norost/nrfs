@@ -378,26 +378,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 		Ok(false)
 	}
 
-	/// Move an child's index.
-	///
-	/// The target index *must* be empty!
-	///
-	/// # Panics
-	///
-	/// There is no valid child at `from_index`.
-	fn move_child(&self, from_index: u32, to_index: u32) {
-		trace!("move_child {} -> {}", from_index, to_index);
-		let mut data = self.fs.dir_data(self.id);
-		if let Some(child) = data.children.remove(&from_index) {
-			data.children.insert(to_index, child);
-			drop(data);
-			match child {
-				Child::File(idx) => self.fs.file_data(idx).header.parent_index = to_index,
-				Child::Dir(id) => self.fs.dir_data(id).header.parent_index = to_index,
-			}
-		}
-	}
-
 	/// Update the entry count.
 	async fn update_entry_count(&self, f: impl FnOnce(u32) -> u32) -> Result<(), Error<D>> {
 		let mut data = self.fs.dir_data(self.id);
@@ -1252,4 +1232,14 @@ pub struct Extensions {
 pub(crate) enum Child {
 	File(Idx),
 	Dir(u64),
+}
+
+impl Child {
+	/// Get the [`DataHeader`].
+	fn header<'a, D: Dev>(&self, fs: &'a Nrfs<D>) -> RefMut<'a, DataHeader> {
+		match self {
+			&Self::File(idx) => RefMut::map(fs.file_data(idx), |d| &mut d.header),
+			&Self::Dir(id) => RefMut::map(fs.dir_data(id), |d| &mut d.header),
+		}
+	}
 }
