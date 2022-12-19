@@ -253,7 +253,8 @@ pub struct DirRef<'a, D: Dev> {
 /// Raw [`DirRef`] data.
 ///
 /// This is more compact than [`DirRef`] and better suited for storing in a container.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use = "value must be used to avoid reference leaks"]
 pub struct RawDirRef {
 	/// ID of the directory object.
 	id: u64,
@@ -326,7 +327,8 @@ pub struct FileRef<'a, D: Dev> {
 /// Raw [`FileRef`] data.
 ///
 /// This is more compact than [`FileRef`] and better suited for storing in a container.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use = "value must be used to avoid reference leaks"]
 pub struct RawFileRef {
 	/// Handle pointing to the corresponding [`FileData`].
 	idx: Idx,
@@ -393,7 +395,8 @@ pub struct SymRef<'a, D: Dev>(FileRef<'a, D>);
 /// Raw [`SymRef`] data.
 ///
 /// This is more compact than [`SymRef`] and better suited for storing in a container.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use = "value must be used to avoid reference leaks"]
 pub struct RawSymRef(RawFileRef);
 
 impl<'a, D: Dev> SymRef<'a, D> {
@@ -415,7 +418,8 @@ pub struct UnknownRef<'a, D: Dev>(FileRef<'a, D>);
 /// Raw [`UnknownRef`] data.
 ///
 /// This is more compact than [`UnknownRef`] and better suited for storing in a container.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use = "value must be used to avoid reference leaks"]
 pub struct RawUnknownRef(RawFileRef);
 
 impl<'a, D: Dev> UnknownRef<'a, D> {

@@ -126,3 +126,15 @@ impl fmt::Display for Name {
 		String::from_utf8_lossy(self).fmt(f)
 	}
 }
+
+#[cfg(test)]
+impl<'a> arbitrary::Arbitrary<'a> for &'a Name {
+	fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+		let len = u.arbitrary_len::<usize>()?;
+		u.bytes(len).map(|b| b.try_into().unwrap())
+	}
+
+	fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+		(0, Some(255))
+	}
+}
