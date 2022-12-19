@@ -242,7 +242,7 @@ impl<'a> Test<'a> {
 
 						// Wrap offset
 						let len = file.len().await.unwrap();
-						let offt = offset % len;
+						let offt = offset.checked_rem(len).unwrap_or(0);
 
 						// Read
 						let buf = &mut vec![0; amount.into()];
@@ -388,6 +388,21 @@ fn resize_move_child_indices() {
 			},
 			Get { dir_idx: 0, name: (&[]).into() },
 			CreateFile { dir_idx: 0, name: (&[245]).into() },
+		],
+	)
+	.run()
+}
+
+/// There was a division by zero when trying to read empty files.
+#[test]
+fn fuzz_read_empty() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			Read { file_idx: 1, offset: 211106232402237, amount: 16384 },
 		],
 	)
 	.run()
