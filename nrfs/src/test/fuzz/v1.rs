@@ -26,20 +26,26 @@ pub struct Test<'a> {
 #[derive(Debug)]
 enum State<'a> {
 	/// The object is a file.
-	File { contents: RangeSet<u64> },
+	File { contents: RangeSet<u64>, indices: Vec<arena::Handle<()>> },
 	/// The object is a directory.
-	Dir { children: FxHashMap<&'a Name, State<'a>> },
+	Dir { children: FxHashMap<&'a Name, State<'a>>, indices: Vec<arena::Handle<()>> },
 }
 
 impl<'a> State<'a> {
 	fn file_mut(&mut self) -> &mut RangeSet<u64> {
-		let Self::File { contents } = self else { panic!("not a file") };
+		let Self::File { contents, .. } = self else { panic!("not a file") };
 		contents
 	}
 
 	fn dir_mut(&mut self) -> &mut FxHashMap<&'a Name, State<'a>> {
-		let Self::Dir { children } = self else { panic!("not a dir") };
+		let Self::Dir { children, .. } = self else { panic!("not a dir") };
 		children
+	}
+
+	fn indices_mut(&mut self) -> &mut Vec<arena::Handle<()>> {
+		match self {
+			Self::File { indices, .. } | Self::Dir { indices, .. } => indices,
+		}
 	}
 }
 
@@ -53,7 +59,7 @@ where
 	for p in path {
 		match state {
 			State::File { .. } => return None,
-			State::Dir { children } => state = children.get_mut(&p)?,
+			State::Dir { children, .. } => state = children.get_mut(&p)?,
 		}
 	}
 	Some(state)
@@ -105,13 +111,13 @@ impl<'a> Test<'a> {
 	pub fn run(self) {
 		run(async {
 			// References to entries.
-			let mut refs = Vec::<(_, Box<[&Name]>)>::new();
+			let mut refs = arena::Arena::<(_, Box<[&Name]>), ()>::new();
 			// Expected contents of the filesystem,
-			let mut state = State::Dir { children: Default::default() };
+			let mut state = State::Dir { children: Default::default(), indices: vec![] };
 
 			fn get_dir<'a, 'b, 'c, 'd>(
 				fs: &'b Nrfs<MemDev>,
-				refs: &'c Vec<(RawEntryRef, Box<[&'a Name]>)>,
+				refs: &'c arena::Arena<(RawEntryRef, Box<[&'a Name]>), ()>,
 				state: &'d mut State<'a>,
 				dir_idx: u16,
 			) -> Option<(
@@ -119,7 +125,7 @@ impl<'a> Test<'a> {
 				&'c [&'a Name],
 				&'d mut FxHashMap<&'a Name, State<'a>>,
 			)> {
-				match refs.get(usize::from(dir_idx)) {
+				match refs.get(arena::Handle::from_raw(dir_idx.into(), ())) {
 					Some((RawEntryRef::Dir(dir), path)) => {
 						let d = state_mut(state, path.iter().copied()).unwrap().dir_mut();
 						Some((DirRef::from_raw(fs, dir.clone()), path, d))
@@ -130,11 +136,11 @@ impl<'a> Test<'a> {
 
 			fn get_file<'a, 'b, 'c, 'd>(
 				fs: &'b Nrfs<MemDev>,
-				refs: &'c Vec<(RawEntryRef, Box<[&'a Name]>)>,
+				refs: &'c arena::Arena<(RawEntryRef, Box<[&'a Name]>), ()>,
 				state: &'d mut State<'a>,
 				file_idx: u16,
 			) -> Option<(FileRef<'b, MemDev>, &'c [&'a Name], &'d mut RangeSet<u64>)> {
-				match refs.get(usize::from(file_idx)) {
+				match refs.get(arena::Handle::from_raw(file_idx.into(), ())) {
 					Some((RawEntryRef::File(file), path)) => {
 						let c = state_mut(state, path.iter().copied()).unwrap().file_mut();
 						Some((FileRef::from_raw(fs, file.clone()), path, c))
@@ -158,7 +164,10 @@ impl<'a> Test<'a> {
 							.unwrap()
 							.is_some()
 						{
-							let r = d.insert(name, State::File { contents: Default::default() });
+							let r = d.insert(
+								name,
+								State::File { contents: Default::default(), indices: vec![] },
+							);
 							assert!(r.is_none());
 						} else {
 							assert!(d.contains_key(name));
@@ -175,7 +184,10 @@ impl<'a> Test<'a> {
 							.unwrap()
 							.is_some()
 						{
-							let r = d.insert(name, State::Dir { children: Default::default() });
+							let r = d.insert(
+								name,
+								State::Dir { children: Default::default(), indices: vec![] },
+							);
 							assert!(r.is_none());
 						} else {
 							assert!(d.contains_key(name));
@@ -188,13 +200,14 @@ impl<'a> Test<'a> {
 
 						let path = append(path, name);
 						if let Some(entry) = dir.find(name).await.unwrap() {
-							assert!(d.contains_key(name));
+							let state = d.get_mut(name).unwrap();
 							let r = match entry {
 								Entry::File(e) => RawEntryRef::File(e.into_raw()),
 								Entry::Dir(e) => RawEntryRef::Dir(e.into_raw()),
 								_ => panic!("unexpected entry type"),
 							};
-							refs.push((r, path));
+							let idx = refs.insert((r, path));
+							state.indices_mut().push(idx);
 						} else {
 							assert!(!d.contains_key(name));
 						}
@@ -203,11 +216,13 @@ impl<'a> Test<'a> {
 					}
 					Op::Root => {
 						let dir = self.fs.root_dir().await.unwrap();
-						refs.push((RawEntryRef::Dir(dir.into_raw()), [].into()));
+						let idx = refs.insert((RawEntryRef::Dir(dir.into_raw()), [].into()));
+						state.indices_mut().push(idx);
 					}
 					Op::Drop { idx } => {
-						if usize::from(idx) < refs.len() {
-							let (entry, _) = refs.swap_remove(idx.into());
+						let idx = arena::Handle::from_raw(idx.into(), ());
+						if let Some((entry, path)) = refs.remove(idx) {
+							// Drop reference
 							match entry {
 								RawEntryRef::File(e) => {
 									FileRef::from_raw(&self.fs, e);
@@ -216,6 +231,12 @@ impl<'a> Test<'a> {
 									DirRef::from_raw(&self.fs, e);
 								}
 							}
+							// Remove from state
+							let indices = state_mut(&mut state, path.iter().copied())
+								.unwrap()
+								.indices_mut();
+							let i = indices.iter().position(|e| e == &idx).unwrap();
+							indices.swap_remove(i);
 						}
 					}
 					Op::Write { file_idx, offset, amount } => {
@@ -268,9 +289,18 @@ impl<'a> Test<'a> {
 					Op::Rename { dir_idx, from, to } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 						if dir.rename(from, to).await.unwrap() {
-							let e = d.remove(from).unwrap();
+							// Rename succeeded
+							let mut e = d.remove(from).unwrap();
+
+							for &idx in e.indices_mut().iter() {
+								let l = &refs[idx].1;
+								refs[idx].1 =
+									l[..l.len() - 1].iter().copied().chain([to]).collect();
+							}
+
 							assert!(d.insert(to, e).is_none());
 						} else {
+							// Rename failed
 							assert!(!d.contains_key(from) || d.contains_key(to));
 						}
 						let _ = dir.into_raw();
@@ -283,11 +313,20 @@ impl<'a> Test<'a> {
 						};
 
 						if from_dir.transfer(from, &to_dir, to).await.unwrap() {
-							let e = d.remove(from).unwrap();
+							// Transfer succeeded
+
+							let mut e = d.remove(from).unwrap();
 							let d = state_mut(&mut state, to_path.iter().copied()).unwrap();
+
+							let to_path = to_path.iter().copied().chain([to]).collect::<Box<_>>();
+							for &idx in e.indices_mut().iter() {
+								refs[idx].1 = to_path.clone();
+							}
+
 							let r = d.dir_mut().insert(to, e);
-							assert!(r.is_none())
+							assert!(r.is_none());
 						} else {
+							// Transfer failed
 							let from_contains = d.contains_key(from);
 							let d = state_mut(&mut state, to_path.iter().copied()).unwrap();
 							assert!(!from_contains || d.dir_mut().contains_key(to));
@@ -403,6 +442,21 @@ fn fuzz_read_empty() {
 			CreateFile { dir_idx: 0, name: (&[]).into() },
 			Get { dir_idx: 0, name: (&[]).into() },
 			Read { file_idx: 1, offset: 211106232402237, amount: 16384 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn fuzz_rename_update_path() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			Rename { dir_idx: 0, from: (&[]).into(), to: (&[254]).into() },
+			Write { file_idx: 1, offset: 0, amount: 0 },
 		],
 	)
 	.run()
