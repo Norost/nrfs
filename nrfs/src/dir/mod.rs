@@ -186,6 +186,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 	///
 	/// The entry must not be empty, i.e. type is not 0.
 	pub(crate) async fn set_ty(&self, index: u32, ty: Type) -> Result<(), Error<D>> {
+		trace!("set_ty {:?} {:?}", index, ty);
 		let map = self.hashmap().await?;
 		let mut e = map.get(index).await?;
 		debug_assert!(e.ty != 0);
@@ -348,17 +349,30 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let map = self.hashmap().await?;
 		if let Some(entry) = map.find_index(from).await? {
 			// Remove entry.
+			let child = self.fs.dir_data(self.id).children.remove(&entry.index);
 			map.remove_at(entry.index).await?;
 
 			// Try to insert entry with new name.
 			let old_entry = entry.clone();
+			let old_index = entry.index;
 			if let Some(new_index) = map.insert(entry, Some(to)).await? {
 				// Fixup indices in corresponding File or DirData
-				self.move_child(old_entry.index, new_index);
+				if let Some(child) = child {
+					let _r = self.fs.dir_data(self.id).children.insert(new_index, child);
+					assert!(_r.is_none());
+					match child {
+						Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
+						Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
+					}
+				}
 				return Ok(true);
 			} else {
 				// On failure, restore entry.
 				map.insert(old_entry, None).await?;
+				if let Some(child) = child {
+					let _r = self.fs.dir_data(self.id).children.insert(old_index, child);
+					assert!(_r.is_none());
+				}
 			}
 		}
 		Ok(false)
@@ -508,7 +522,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 		// Copy entries
 		let cur_map = self.hashmap().await?;
 		let new_map = HashMap::new(self, new_map, new_size_p2);
-		let mut new_children = FxHashMap::default();
 		for index in (0..capacity).map(|i| i as _) {
 			let e = cur_map.get(index).await?;
 			if e.ty == 0 {
@@ -516,7 +529,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 			}
 			let new_index = new_map.insert(e, None).await?.unwrap();
 			if let Some(child) = children.remove(&index) {
-				let _r = new_children.insert(new_index, child);
+				let _r = self.fs.dir_data(self.id).children.insert(new_index, child);
 				debug_assert!(_r.is_none());
 				match child {
 					Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
@@ -539,7 +552,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 			.await?;
 		let mut data = self.fs.dir_data(self.id);
 		data.hashmap_size_p2 = new_size_p2;
-		data.children = new_children;
 		drop(data);
 		self.save_alloc_log().await
 	}
@@ -1018,7 +1030,12 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	/// Returns `false` on failure.
 	/// This operation will fail if the directory isn't empty.
 	pub async fn destroy(&self) -> Result<bool, Error<D>> {
-		todo!();
+		if self.fs.dir_data(self.id).entry_count > 0 {
+			// Don't delete data if any active entries are in the directory to avoid space leaks.
+			return Ok(true);
+		}
+
+		todo!()
 	}
 }
 

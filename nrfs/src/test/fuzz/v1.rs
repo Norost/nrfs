@@ -340,6 +340,16 @@ impl<'a> Test<'a> {
 					}
 				}
 			}
+
+			// Drop all refs to ensure refcounting works properly.
+			refs.drain().for_each(|(_, (r, _))| match r {
+				RawEntryRef::File(e) => {
+					FileRef::from_raw(&self.fs, e);
+				}
+				RawEntryRef::Dir(e) => {
+					DirRef::from_raw(&self.fs, e);
+				}
+			});
 		})
 	}
 }
@@ -477,6 +487,41 @@ fn transfer_circular_reference() {
 			},
 			Get { dir_idx: 0, name: (&[]).into() },
 			Transfer { from_dir_idx: 0, from: (&[]).into(), to_dir_idx: 1, to: (&[]).into() },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn rename_leaked_ref() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[85, 90, 85, 85, 85, 85, 85, 85]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[93, 223]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[93, 131]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			Transfer { from_dir_idx: 0, from: (&[]).into(), to_dir_idx: 0, to: (&[]).into() },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn resize_children_backshift() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[93, 131]).into() },
+			Get { dir_idx: 0, name: (&[93, 131]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[0]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into() },
 		],
 	)
 	.run()
