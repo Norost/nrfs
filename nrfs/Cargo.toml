@@ -28,3 +28,7 @@ version = "0.3"
 
 [dev-dependencies.futures-util]
 version = "0.3"
+
+[dev-dependencies.arbitrary]
+version = "1.2"
+features = ["derive"]

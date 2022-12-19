@@ -347,7 +347,7 @@ impl<'a, D: Dev> File<'a, D> {
 	}
 
 	/// Destroy this file.
-	async fn destroy(self) -> Result<(), Error<D>> {
+	async fn destroy(&self) -> Result<(), Error<D>> {
 		trace!("destroy");
 		todo!("destroy");
 	}
@@ -405,7 +405,7 @@ macro_rules! impl_common {
 		}
 
 		/// Destroy this file.
-		pub async fn destroy(self) -> Result<(), Error<D>> {
+		pub async fn destroy(&self) -> Result<(), Error<D>> {
 			self.file().destroy().await
 		}
 

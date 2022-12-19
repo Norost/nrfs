@@ -134,6 +134,15 @@ version = "0.1.2"
 source = "git+https://github.com/Demindiro/nora_endian#07bd2d0463c74a597dde433790be13c03b636808"
 
 [[package]]
+name = "nrfs-fuzz"
+version = "0.0.0"
+dependencies = [
+ "futures-util",
+ "libfuzzer-sys",
+ "nros",
+]
+
+[[package]]
 name = "nros"
 version = "0.1.0"
 dependencies = [
@@ -147,15 +156,6 @@ dependencies = [
  "rangemap",
  "rustc-hash",
  "xxhash-rust",
-]
-
-[[package]]
-name = "nros-fuzz"
-version = "0.0.0"
-dependencies = [
- "futures-util",
- "libfuzzer-sys",
- "nros",
 ]
 
 [[package]]

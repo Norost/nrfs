@@ -273,3 +273,24 @@ fn transfer() {
 		file.write_grow(0, b"panic in the disco").await.unwrap();
 	})
 }
+
+/// Get a directory while another [`DirRef`] pointing to the same directory is alive.
+#[test]
+fn get_dir_existing_ref() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+		let dir = root
+			.create_dir(
+				b"dir".into(),
+				&DirOptions::new(&[0; 16]),
+				&Default::default(),
+			)
+			.await
+			.unwrap()
+			.unwrap();
+
+		let dir2 = root.find(b"dir".into()).await.unwrap().unwrap();
+		assert!(matches!(dir2, Entry::Dir(_)));
+	})
+}

@@ -365,6 +365,11 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 	/// Move an entry to another directory.
 	async fn transfer(&self, name: &Name, to_dir: u64, to_name: &Name) -> Result<bool, Error<D>> {
+		if self.id == to_dir {
+			// Don't transfer, rename instead.
+			return self.rename(name, to_name).await;
+		}
+
 		let to_dir = Dir::new(self.fs, to_dir);
 
 		let from_map = self.hashmap().await?;
@@ -939,7 +944,10 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	}
 
 	/// Destroy this dictionary.
-	pub async fn destroy(self) -> Result<(), Error<D>> {
+	///
+	/// Returns `false` on failure.
+	/// This operation will fail if the directory isn't empty.
+	pub async fn destroy(&self) -> Result<bool, Error<D>> {
 		todo!();
 	}
 }
@@ -1017,13 +1025,16 @@ impl<'a, D: Dev> Entry<'a, D> {
 
 	/// Destroy this entry and the data it points to.
 	///
-	/// If the type is [`Self::Unknown`],
-	/// this function will fail and `false` is returned.
-	pub async fn destroy(self) -> Result<bool, Error<D>> {
+	/// On failure `false` is returned.
+	///
+	/// If the entry is a directory which is not empty the function will fail.
+	///
+	/// If the type is [`Self::Unknown`] this function will fail.
+	pub async fn destroy(&self) -> Result<bool, Error<D>> {
 		match self {
 			Self::Dir(e) => e.destroy().await,
-			Self::File(e) => e.destroy().await,
-			Self::Sym(e) => e.destroy().await,
+			Self::File(e) => e.destroy().await.map(|()| true),
+			Self::Sym(e) => e.destroy().await.map(|()| true),
 			Self::Unknown(_) => return Ok(false),
 		}?;
 		Ok(true)

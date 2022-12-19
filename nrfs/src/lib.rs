@@ -1,6 +1,7 @@
 //#![cfg_attr(not(test), no_std)]
 #![forbid(unused_must_use)]
 #![forbid(elided_lifetimes_in_paths)]
+#![feature(iterator_try_collect)]
 #![feature(cell_update)]
 #![feature(pin_macro)]
 #![feature(split_array)]
@@ -211,6 +212,9 @@ impl<D: Dev> Nrfs<D> {
 		self.storage.get(id).await?.len().await.map_err(Error::Nros)
 	}
 
+	/// Unmount the object store.
+	///
+	/// This performs one last transaction.
 	pub async fn unmount(self) -> Result<Vec<D>, Error<D>> {
 		self.storage.unmount().await.map_err(Error::Nros)
 	}
