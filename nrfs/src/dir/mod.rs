@@ -408,6 +408,26 @@ impl<'a, D: Dev> Dir<'a, D> {
 		// Find the entry to transfer.
 		let Some(entry) = from_map.find_index(name).await? else { return Ok(false) };
 
+		// If we don't know the type, don't transfer to avoid bringing the filesystem in an
+		// inconsistent state.
+		if entry.ty().is_err() {
+			return Ok(false);
+		}
+
+		// If the entry is a directory, ensure it is not a ancestor of to_dir
+		if let Ok(Type::Dir { id }) = entry.ty() {
+			// Start from to_dir and work downwards to the root.
+			// The root is guaranteed to be the ancestor of all other objects.
+			let mut cur_id = to_dir.id;
+			while cur_id != 0 {
+				if cur_id == id {
+					// to_dir is a descendant of the entry to be moved, so cancel operation.
+					return Ok(false);
+				}
+				cur_id = self.fs.dir_data(id).header.parent_id;
+			}
+		}
+
 		// Check if the destination directory has enough capacity.
 		// If not, grow it first.
 		if self.fs.dir_data(to_dir.id).should_grow() {
