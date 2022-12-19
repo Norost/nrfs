@@ -58,8 +58,8 @@ mod trace {
 pub mod dir;
 mod file;
 mod name;
-#[cfg(test)]
-mod test;
+#[cfg(any(test, fuzzing))]
+pub mod test;
 
 pub use {
 	dir::DirOptions,
@@ -70,7 +70,7 @@ pub use {
 use {
 	core::{
 		cell::{RefCell, RefMut},
-		fmt,
+		fmt, mem,
 	},
 	dir::{Child, DirData, Entry},
 	file::FileData,
@@ -92,10 +92,6 @@ struct NrfsData {
 	///
 	/// Indexed by ID.
 	directories: FxHashMap<u64, DirData>,
-	/// Entries that were destroyed but still have live references.
-	///
-	/// The value indicates the amount of references remaining.
-	destroyed: FxHashMap<Child, usize>,
 }
 
 impl NrfsData {
@@ -262,13 +258,14 @@ pub struct RawDirRef {
 
 impl<'a, D: Dev> DirRef<'a, D> {
 	/// Turn this reference into raw components.
-	fn into_raw(self) -> RawDirRef {
+	pub fn into_raw(self) -> RawDirRef {
 		let Self { fs: _, id } = self;
+		mem::forget(self);
 		RawDirRef { id }
 	}
 
 	/// Create a reference from raw components.
-	fn from_raw(fs: &'a Nrfs<D>, raw: RawDirRef) -> Self {
+	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawDirRef) -> Self {
 		let RawDirRef { id } = raw;
 		DirRef { fs, id }
 	}
@@ -290,18 +287,19 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 		data.get_mut().header.reference_count -= 1;
 		if data.get().header.reference_count == 0 {
 			// Remove DirData.
-			let DataHeader { parent_id, parent_index, .. } = data.get().header;
+			let header = data.get().header.clone();
 			data.remove();
 
 			// If this is the root dir there is no parent dir,
 			// so check first.
-			if self.id != 0 {
+			// Also check if dangling.
+			if self.id != 0 && !header.is_dangling() {
 				// Remove itself from parent directory.
 				let dir = fs
 					.directories
-					.get_mut(&parent_id)
+					.get_mut(&header.parent_id)
 					.expect("parent dir is not loaded");
-				let _r = dir.children.remove(&parent_index);
+				let _r = dir.children.remove(&header.parent_index);
 				debug_assert!(
 					matches!(_r, Some(Child::Dir(id)) if id == self.id),
 					"child not present in parent"
@@ -309,7 +307,9 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 
 				// Reconstruct DirRef to adjust reference count of dir appropriately.
 				drop(fs);
-				drop(DirRef { fs: self.fs, id: parent_id });
+				if !header.is_dangling() {
+					drop(DirRef { fs: self.fs, id: header.parent_id });
+				}
 			}
 		}
 	}
@@ -336,13 +336,14 @@ pub struct RawFileRef {
 
 impl<'a, D: Dev> FileRef<'a, D> {
 	/// Turn this reference into raw components.
-	fn into_raw(self) -> RawFileRef {
+	pub fn into_raw(self) -> RawFileRef {
 		let Self { fs: _, idx } = self;
+		mem::forget(self);
 		RawFileRef { idx }
 	}
 
 	/// Create a reference from raw components.
-	fn from_raw(fs: &'a Nrfs<D>, raw: RawFileRef) -> Self {
+	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawFileRef) -> Self {
 		let RawFileRef { idx } = raw;
 		FileRef { fs, idx }
 	}
@@ -368,12 +369,15 @@ impl<D: Dev> Drop for FileRef<'_, D> {
 		data.header.reference_count -= 1;
 		if data.header.reference_count == 0 {
 			// Remove itself from parent directory.
-			let dir = fs
-				.directories
-				.get_mut(&data.header.parent_id)
-				.expect("parent dir is not loaded");
-			let _r = dir.children.remove(&data.header.parent_index);
-			debug_assert!(matches!(_r, Some(Child::File(idx)) if idx == self.idx));
+			// Only if not dangling.
+			if !data.header.is_dangling() {
+				let dir = fs
+					.directories
+					.get_mut(&data.header.parent_id)
+					.expect("parent dir is not loaded");
+				let _r = dir.children.remove(&data.header.parent_index);
+				debug_assert!(matches!(_r, Some(Child::File(idx)) if idx == self.idx));
+			}
 
 			// Remove filedata.
 			let data = fs
@@ -383,7 +387,9 @@ impl<D: Dev> Drop for FileRef<'_, D> {
 
 			// Reconstruct DirRef to adjust reference count of dir appropriately.
 			drop(fs_ref);
-			drop(DirRef { fs: self.fs, id: data.header.parent_id });
+			if !data.header.is_dangling() {
+				drop(DirRef { fs: self.fs, id: data.header.parent_id });
+			}
 		}
 	}
 }
@@ -401,12 +407,12 @@ pub struct RawSymRef(RawFileRef);
 
 impl<'a, D: Dev> SymRef<'a, D> {
 	/// Turn this reference into raw components.
-	fn into_raw(self) -> RawSymRef {
+	pub fn into_raw(self) -> RawSymRef {
 		RawSymRef(self.0.into_raw())
 	}
 
 	/// Create a reference from raw components.
-	fn from_raw(fs: &'a Nrfs<D>, raw: RawSymRef) -> Self {
+	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawSymRef) -> Self {
 		SymRef(FileRef::from_raw(fs, raw.0))
 	}
 }
@@ -424,12 +430,12 @@ pub struct RawUnknownRef(RawFileRef);
 
 impl<'a, D: Dev> UnknownRef<'a, D> {
 	/// Turn this reference into raw components.
-	fn into_raw(self) -> RawUnknownRef {
+	pub fn into_raw(self) -> RawUnknownRef {
 		RawUnknownRef(self.0.into_raw())
 	}
 
 	/// Create a reference from raw components.
-	fn from_raw(fs: &'a Nrfs<D>, raw: RawUnknownRef) -> Self {
+	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawUnknownRef) -> Self {
 		UnknownRef(FileRef::from_raw(fs, raw.0))
 	}
 }
@@ -497,7 +503,7 @@ async fn read_exact<'a, D: Dev>(
 }
 
 /// Data header, shared by [`DirData`] and [`FileData`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct DataHeader {
 	/// The amount of live [`DirRef`]s to this directory.
 	reference_count: usize,
@@ -517,5 +523,18 @@ impl DataHeader {
 	/// Create a new header.
 	fn new(parent_id: u64, parent_index: u32) -> Self {
 		Self { reference_count: 1, parent_id, parent_index }
+	}
+
+	/// Check if the data is dangling,
+	/// i.e. it has no parent.
+	fn is_dangling(&self) -> bool {
+		self.parent_id == u64::MAX && self.parent_index == u32::MAX
+	}
+
+	/// Make the data dangling.
+	fn make_dangling(&mut self) {
+		debug_assert!(!self.is_dangling(), "already dangling");
+		self.parent_id = u64::MAX;
+		self.parent_index = u32::MAX;
 	}
 }

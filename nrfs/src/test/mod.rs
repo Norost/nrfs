@@ -1,5 +1,5 @@
 mod dir;
-mod fuzz;
+pub mod fuzz;
 
 use {
 	crate::{

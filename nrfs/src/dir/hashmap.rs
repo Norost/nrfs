@@ -1,10 +1,10 @@
 use {
 	super::{
-		ext, Dir, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM, TY_FILE, TY_NONE,
-		TY_SYM,
+		ext, Child, Dir, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM, TY_FILE,
+		TY_NONE, TY_SYM,
 	},
 	crate::{read_exact, write_all},
-	core::fmt,
+	core::{cell::RefMut, fmt},
 	nros::{Dev, Tree},
 	siphasher::sip::SipHasher13,
 };
@@ -34,7 +34,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 	/// Remove an entry.
 	///
-	/// This does not free heap data!
+	/// This does not free heap data nor does it remove the corresponding child!
 	pub async fn remove_at(&self, mut index: u32) -> Result<(), Error<D>> {
 		trace!("remove_at {:?}", index);
 		let hasher = self.fs.dir_data(self.dir_id).hasher;
@@ -53,13 +53,17 @@ impl<'a, D: Dev> HashMap<'a, D> {
 					// No need to shift anything else because:
 					// - if e.ty == 0, the next entry is empty.
 					//   We will clear the current entry below anyways.
-					// - if psl == 0 we don't want to shift it from it's ideal position.
+					// - if psl == 0 we don't want to shift it from its ideal position.
 					if e.ty == 0 || calc_psl(index + 1, e.hash(&hasher)) == 0 {
 						break;
 					}
+
 					// Copy the next entry over the current entry and move on to the next.
 					e.index = index;
 					self.set(&e).await?;
+
+					Dir::new(self.fs, self.dir_id).move_child(index + 1, index);
+
 					index += 1;
 					index &= self.mask;
 				}
@@ -244,6 +248,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 		async fn insert_entry<'a, D: Dev>(
 			slf: &HashMap<'a, D>,
+			prev_index: &mut u32,
 			entry_index: &mut Option<u32>,
 			name: Option<(&Name, u32)>,
 			e: &mut RawEntry,
@@ -273,6 +278,14 @@ impl<'a, D: Dev> HashMap<'a, D> {
 			// Store entry data at index.
 			slf.set(e).await?;
 
+			// Fixup indices of children.
+			// Only necessary for existing entries that are being moved, not the new entry
+			// that is just being inserted.
+			if entry_index.is_some() {
+				Dir::new(slf.fs, slf.dir_id).move_child(*prev_index, e.index);
+			}
+			*prev_index = e.index;
+
 			// Save the index of the original entry,
 			// otherwise just return the index of original entry.
 			Ok(*entry_index.get_or_insert(e.index))
@@ -286,6 +299,8 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		let mut entry_psl = 0u32;
 		let calc_psl = |i: u32, h| i.wrapping_sub(h) & self.mask;
 
+		let mut prev_index = entry.index;
+
 		match hasher {
 			Hasher::SipHasher13(_) => loop {
 				// Insert with robin-hood hashing,
@@ -297,7 +312,8 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				// We found a free slot.
 				if e.ty == 0 {
 					let entry_index =
-						insert_entry(self, &mut entry_index, name, &mut entry).await?;
+						insert_entry(self, &mut prev_index, &mut entry_index, name, &mut entry)
+							.await?;
 					// Return the index of the entry we were supposed to insert.
 					return Ok(Some(entry_index));
 				}
@@ -315,7 +331,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				// If yes, swap with it.
 				let e_psl = calc_psl(entry.index, e.hash(&hasher));
 				if entry_psl > e_psl {
-					insert_entry(self, &mut entry_index, name, &mut entry).await?;
+					insert_entry(self, &mut prev_index, &mut entry_index, name, &mut entry).await?;
 					(entry, entry_psl) = (e, e_psl);
 				}
 
@@ -328,7 +344,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 }
 
 /// Raw entry data.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct RawEntry {
 	// Header
 	/// Entry type.
@@ -386,6 +402,7 @@ impl RawEntry {
 }
 
 /// Entry key, which may be embedded or on the heap.
+#[derive(Clone)]
 pub(super) enum RawEntryKey {
 	Embed {
 		/// The length of the key.

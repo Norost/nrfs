@@ -46,21 +46,17 @@ impl<'a> State<'a> {
 /// Get a mutable reference to a [`State`] node.
 ///
 /// Fails if one of the nodes could not be found or is a [`State::File`].
-fn state_mut<'a, 'b, I>(
-	mut children: &'b mut FxHashMap<&'a Name, State<'a>>,
-	path: I,
-) -> Option<&'b mut State<'a>>
+fn state_mut<'a, 'b, I>(mut state: &'b mut State<'a>, path: I) -> Option<&'b mut State<'a>>
 where
 	I: IntoIterator<Item = &'a Name>,
 {
-	let mut path = path.into_iter().peekable();
-	while path.peek().is_some() {
-		match children.get_mut(path.next().unwrap())? {
+	for p in path {
+		match state {
 			State::File { .. } => return None,
-			State::Dir { children: c } => children = c,
+			State::Dir { children } => state = children.get_mut(&p)?,
 		}
 	}
-	children.get_mut(path.next().unwrap())
+	Some(state)
 }
 
 #[derive(Debug, Arbitrary)]
@@ -71,6 +67,8 @@ pub enum Op<'a> {
 	CreateDir { dir_idx: u16, name: &'a Name, key: [u8; 16] },
 	/// Get an entry.
 	Get { dir_idx: u16, name: &'a Name },
+	/// Get a reference to the root directory.
+	Root,
 	/// Drop an entry.
 	Drop { idx: u16 },
 	/// Write to a file.
@@ -104,17 +102,17 @@ impl<'a> Test<'a> {
 		}
 	}
 
-	pub fn run(mut self) {
+	pub fn run(self) {
 		run(async {
 			// References to entries.
 			let mut refs = Vec::<(_, Box<[&Name]>)>::new();
 			// Expected contents of the filesystem,
-			let mut state = FxHashMap::default();
+			let mut state = State::Dir { children: Default::default() };
 
 			fn get_dir<'a, 'b, 'c, 'd>(
 				fs: &'b Nrfs<MemDev>,
 				refs: &'c Vec<(RawEntryRef, Box<[&'a Name]>)>,
-				state: &'d mut FxHashMap<&'a Name, State<'a>>,
+				state: &'d mut State<'a>,
 				dir_idx: u16,
 			) -> Option<(
 				DirRef<'b, MemDev>,
@@ -133,7 +131,7 @@ impl<'a> Test<'a> {
 			fn get_file<'a, 'b, 'c, 'd>(
 				fs: &'b Nrfs<MemDev>,
 				refs: &'c Vec<(RawEntryRef, Box<[&'a Name]>)>,
-				state: &'d mut FxHashMap<&'a Name, State<'a>>,
+				state: &'d mut State<'a>,
 				file_idx: u16,
 			) -> Option<(FileRef<'b, MemDev>, &'c [&'a Name], &'d mut RangeSet<u64>)> {
 				match refs.get(usize::from(file_idx)) {
@@ -203,9 +201,21 @@ impl<'a> Test<'a> {
 
 						let _ = dir.into_raw();
 					}
+					Op::Root => {
+						let dir = self.fs.root_dir().await.unwrap();
+						refs.push((RawEntryRef::Dir(dir.into_raw()), [].into()));
+					}
 					Op::Drop { idx } => {
 						if usize::from(idx) < refs.len() {
-							refs.swap_remove(idx.into());
+							let (entry, _) = refs.swap_remove(idx.into());
+							match entry {
+								RawEntryRef::File(e) => {
+									FileRef::from_raw(&self.fs, e);
+								}
+								RawEntryRef::Dir(e) => {
+									DirRef::from_raw(&self.fs, e);
+								}
+							}
 						}
 					}
 					Op::Write { file_idx, offset, amount } => {
@@ -267,7 +277,10 @@ impl<'a> Test<'a> {
 					}
 					Op::Transfer { from_dir_idx, from, to_dir_idx, to } => {
 						let Some((to_dir, to_path, _)) = get_dir(&self.fs, &refs, &mut state, to_dir_idx) else { continue };
-						let Some((from_dir, _, d)) = get_dir(&self.fs, &refs, &mut state, from_dir_idx) else { continue };
+						let Some((from_dir, _, d)) = get_dir(&self.fs, &refs, &mut state, from_dir_idx) else {
+							let _ = to_dir.into_raw();
+							continue
+						};
 
 						if from_dir.transfer(from, &to_dir, to).await.unwrap() {
 							let e = d.remove(from).unwrap();
@@ -293,3 +306,89 @@ impl<'a> Test<'a> {
 }
 
 use Op::*;
+
+#[test]
+fn mem_forget_dirref_into_raw() {
+	Test::new(1 << 16, [Root, CreateFile { dir_idx: 0, name: b"".into() }]).run()
+}
+
+/// Op::Transfer did not mem::forget to_dir if from_dir wasn't found.
+#[test]
+fn fuzz_transfer_mem_forget() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			Transfer { from_dir_idx: 57164, from: b"".into(), to_dir_idx: 0, to: b"".into() },
+			CreateFile { dir_idx: 0, name: b"".into() },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn rename_unref_nochild() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: b"".into() },
+			Rename { dir_idx: 0, from: b"".into(), to: b"a".into() },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn rename_remove_stale_index() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[0]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			Rename { dir_idx: 0, from: (&[]).into(), to: (&[255]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn move_child_indices() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateDir {
+				dir_idx: 0,
+				name: (&[]).into(),
+				key: [
+					0, 0, 0, 0, 0, 0, 2, 135, 135, 135, 135, 255, 0, 255, 255, 90,
+				],
+			},
+			Get { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[255]).into() },
+			CreateFile { dir_idx: 0, name: (&[0]).into() },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn resize_move_child_indices() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateDir {
+				dir_idx: 0,
+				name: (&[]).into(),
+				key: [0, 0, 0, 0, 0, 2, 0, 0, 0, 135, 135, 255, 0, 255, 255, 90],
+			},
+			Get { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[245]).into() },
+		],
+	)
+	.run()
+}

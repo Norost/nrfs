@@ -7,7 +7,7 @@ use {
 		read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Idx, Name, Nrfs, SymRef,
 		UnknownRef,
 	},
-	core::cell::RefMut,
+	core::{cell::RefMut, mem},
 	hashmap::*,
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
@@ -281,6 +281,20 @@ impl<'a, D: Dev> Dir<'a, D> {
 		self.update_entry_count(|x| x - 1).await?;
 		self.hashmap().await?.remove_at(entry.index).await?;
 
+		// Remove child if present.
+		let mut data = self.fs.dir_data(self.id);
+		if let Some(child) = data.children.remove(&entry.index) {
+			// Reduce own reference count as the child will no longer reference us.
+			data.header.reference_count -= 1;
+			drop(data);
+			match child {
+				Child::File(idx) => self.fs.file_data(idx).header.make_dangling(),
+				Child::Dir(id) => self.fs.dir_data(id).header.make_dangling(),
+			};
+		} else {
+			drop(data);
+		}
+
 		// Deallocate key if stored on heap
 		match entry.key {
 			RawEntryKey::Embed { .. } => {}
@@ -333,25 +347,41 @@ impl<'a, D: Dev> Dir<'a, D> {
 		trace!("rename {:?} -> {:?}", from, to);
 		let map = self.hashmap().await?;
 		if let Some(entry) = map.find_index(from).await? {
-			// Resizing is not necessary as there is guaranteed to be a free spot
-			// and we'll free another spot if the insert succeeds.
-			let index = entry.index;
+			// Remove entry.
+			map.remove_at(entry.index).await?;
+
+			// Try to insert entry with new name.
+			let old_entry = entry.clone();
 			if let Some(new_index) = map.insert(entry, Some(to)).await? {
-				// Remove from old index
-				map.remove_at(index).await?;
 				// Fixup indices in corresponding File or DirData
-				let mut data = self.fs.dir_data(self.id);
-				let child = data.children.remove(&index).expect("child not present");
-				data.children.insert(new_index, child);
-				drop(data);
-				match child {
-					Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
-					Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
-				}
+				self.move_child(old_entry.index, new_index);
 				return Ok(true);
+			} else {
+				// On failure, restore entry.
+				map.insert(old_entry, None).await?;
 			}
 		}
 		Ok(false)
+	}
+
+	/// Move an child's index.
+	///
+	/// The target index *must* be empty!
+	///
+	/// # Panics
+	///
+	/// There is no valid child at `from_index`.
+	fn move_child(&self, from_index: u32, to_index: u32) {
+		trace!("move_child {} -> {}", from_index, to_index);
+		let mut data = self.fs.dir_data(self.id);
+		if let Some(child) = data.children.remove(&from_index) {
+			data.children.insert(to_index, child);
+			drop(data);
+			match child {
+				Child::File(idx) => self.fs.file_data(idx).header.parent_index = to_index,
+				Child::Dir(id) => self.fs.dir_data(id).header.parent_index = to_index,
+			}
+		}
 	}
 
 	/// Update the entry count.
@@ -365,6 +395,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 	/// Move an entry to another directory.
 	async fn transfer(&self, name: &Name, to_dir: u64, to_name: &Name) -> Result<bool, Error<D>> {
+		trace!("transfer {:?} {:?} {:?}", name, to_dir, to_name);
 		if self.id == to_dir {
 			// Don't transfer, rename instead.
 			return self.rename(name, to_name).await;
@@ -429,7 +460,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		// Since we're going to load the entire log we can as well minimize it.
 		self.alloc_log().await?;
 
-		let data = self.fs.dir_data(self.id);
+		let mut data = self.fs.dir_data(self.id);
 
 		let hashmap_size_p2 = data.hashmap_size_p2;
 		let capacity = data.capacity();
@@ -446,6 +477,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 			);
 			hashmap_size_p2 - 1
 		};
+
+		let mut children = mem::take(&mut data.children);
 		drop(data);
 
 		let new_map = self.fs.storage.create().await?;
@@ -455,13 +488,27 @@ impl<'a, D: Dev> Dir<'a, D> {
 		// Copy entries
 		let cur_map = self.hashmap().await?;
 		let new_map = HashMap::new(self, new_map, new_size_p2);
+		let mut new_children = FxHashMap::default();
 		for index in (0..capacity).map(|i| i as _) {
 			let e = cur_map.get(index).await?;
 			if e.ty == 0 {
 				continue;
 			}
-			new_map.insert(e, None).await?;
+			let new_index = new_map.insert(e, None).await?.unwrap();
+			if let Some(child) = children.remove(&index) {
+				let _r = new_children.insert(new_index, child);
+				debug_assert!(_r.is_none());
+				match child {
+					Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
+					Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
+				}
+			}
 		}
+		debug_assert!(
+			children.is_empty(),
+			"not all children have been moved: {:#?}",
+			children
+		);
 
 		// Replace old map
 		self.fs
@@ -470,7 +517,10 @@ impl<'a, D: Dev> Dir<'a, D> {
 			.await?
 			.replace_with(new_map.map)
 			.await?;
-		self.fs.dir_data(self.id).hashmap_size_p2 = new_size_p2;
+		let mut data = self.fs.dir_data(self.id);
+		data.hashmap_size_p2 = new_size_p2;
+		data.children = new_children;
+		drop(data);
 		self.save_alloc_log().await
 	}
 
@@ -830,7 +880,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		let e = NewEntry { name, ty: Type::Dir { id: u64::MAX } };
 		let Some(index) = self.dir().insert(e, ext).await? else { return Ok(None) };
 		// Create new directory with stub index (u32::MAX).
-		let d = DirRef::new(&self.dir(), u32::MAX, options).await?;
+		let d = DirRef::new(&self.dir(), index, options).await?;
 		// Fixup ID in entry.
 		self.dir().set_ty(index, Type::Dir { id: d.id }).await?;
 		// Done!
