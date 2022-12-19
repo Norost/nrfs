@@ -66,9 +66,11 @@ impl<'a, D: Dev> HashMap<'a, D> {
 					if let Some(child) = data.children.remove(&(index + 1)) {
 						let _r = data.children.insert(index, child);
 						assert!(_r.is_none(), "a child was already present");
+						drop(data);
 						child.header(self.fs).parent_index = index;
+					} else {
+						drop(data);
 					}
-					drop(data);
 
 					index += 1;
 					index &= self.mask;

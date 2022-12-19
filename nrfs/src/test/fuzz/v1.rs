@@ -528,7 +528,7 @@ fn resize_children_backshift() {
 }
 
 #[test]
-fn f() {
+fn insert_child_move_misuse() {
 	Test::new(
 		1 << 16,
 		[
@@ -543,4 +543,20 @@ fn f() {
 		],
 	)
 	.run();
+}
+
+#[test]
+fn file_borrow_error() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[0]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[127]).into() },
+			Rename { dir_idx: 0, from: (&[0]).into(), to: (&[]).into() },
+		],
+	)
+	.run()
 }
