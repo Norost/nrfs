@@ -560,3 +560,20 @@ fn file_borrow_error() {
 	)
 	.run()
 }
+
+#[test]
+fn file_resize_embed_truncated() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			Resize { file_idx: 1, len: 60 },
+			CreateFile { dir_idx: 4864, name: (&[]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			Resize { file_idx: 1, len: 31232 },
+		],
+	)
+	.run()
+}

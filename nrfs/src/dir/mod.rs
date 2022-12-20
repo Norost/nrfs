@@ -204,7 +204,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 	/// Write a heap value.
 	pub(crate) async fn write_heap(&self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
 		trace!("write_heap {:?} (len: {})", offset, data.len());
-		self.fs.write_grow(self.id + 1, offset, data).await
+		self.fs.write_all(self.id + 1, offset, data).await
 	}
 
 	/// Allocate heap space for arbitrary data.
@@ -218,7 +218,16 @@ impl<'a, D: Dev> Dir<'a, D> {
 		for r in log.gaps(&(0..u64::MAX)) {
 			if r.end - r.start >= len {
 				log.insert(r.start..r.start + len);
+				let end = log.iter().last().map_or(0, |r| r.end);
 				drop(log);
+
+				// Resize heap
+				let heap = self.fs.storage.get(self.id + 1).await?;
+				let len = heap.len().await?;
+				heap.resize(len.max(end)).await?;
+				drop(heap);
+
+				// Save alloc log
 				self.save_alloc_log().await?;
 				return Ok(r.start);
 			}
