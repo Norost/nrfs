@@ -1,6 +1,7 @@
 //#![cfg_attr(not(test), no_std)]
 #![forbid(unused_must_use)]
 #![forbid(elided_lifetimes_in_paths)]
+#![feature(iterator_try_collect)]
 #![feature(cell_update)]
 #![feature(pin_macro)]
 #![feature(split_array)]
@@ -57,8 +58,8 @@ mod trace {
 pub mod dir;
 mod file;
 mod name;
-#[cfg(test)]
-mod test;
+#[cfg(any(test, fuzzing))]
+pub mod test;
 
 pub use {
 	dir::DirOptions,
@@ -69,7 +70,7 @@ pub use {
 use {
 	core::{
 		cell::{RefCell, RefMut},
-		fmt,
+		fmt, mem,
 	},
 	dir::{Child, DirData, Entry},
 	file::FileData,
@@ -91,10 +92,6 @@ struct NrfsData {
 	///
 	/// Indexed by ID.
 	directories: FxHashMap<u64, DirData>,
-	/// Entries that were destroyed but still have live references.
-	///
-	/// The value indicates the amount of references remaining.
-	destroyed: FxHashMap<Child, usize>,
 }
 
 impl NrfsData {
@@ -211,6 +208,9 @@ impl<D: Dev> Nrfs<D> {
 		self.storage.get(id).await?.len().await.map_err(Error::Nros)
 	}
 
+	/// Unmount the object store.
+	///
+	/// This performs one last transaction.
 	pub async fn unmount(self) -> Result<Vec<D>, Error<D>> {
 		self.storage.unmount().await.map_err(Error::Nros)
 	}
@@ -249,7 +249,8 @@ pub struct DirRef<'a, D: Dev> {
 /// Raw [`DirRef`] data.
 ///
 /// This is more compact than [`DirRef`] and better suited for storing in a container.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use = "value must be used to avoid reference leaks"]
 pub struct RawDirRef {
 	/// ID of the directory object.
 	id: u64,
@@ -257,13 +258,14 @@ pub struct RawDirRef {
 
 impl<'a, D: Dev> DirRef<'a, D> {
 	/// Turn this reference into raw components.
-	fn into_raw(self) -> RawDirRef {
+	pub fn into_raw(self) -> RawDirRef {
 		let Self { fs: _, id } = self;
+		mem::forget(self);
 		RawDirRef { id }
 	}
 
 	/// Create a reference from raw components.
-	fn from_raw(fs: &'a Nrfs<D>, raw: RawDirRef) -> Self {
+	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawDirRef) -> Self {
 		let RawDirRef { id } = raw;
 		DirRef { fs, id }
 	}
@@ -285,7 +287,7 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 		data.get_mut().header.reference_count -= 1;
 		if data.get().header.reference_count == 0 {
 			// Remove DirData.
-			let DataHeader { parent_id, parent_index, .. } = data.get().header;
+			let header = data.get().header.clone();
 			data.remove();
 
 			// If this is the root dir there is no parent dir,
@@ -294,9 +296,9 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 				// Remove itself from parent directory.
 				let dir = fs
 					.directories
-					.get_mut(&parent_id)
+					.get_mut(&header.parent_id)
 					.expect("parent dir is not loaded");
-				let _r = dir.children.remove(&parent_index);
+				let _r = dir.children.remove(&header.parent_index);
 				debug_assert!(
 					matches!(_r, Some(Child::Dir(id)) if id == self.id),
 					"child not present in parent"
@@ -304,7 +306,7 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 
 				// Reconstruct DirRef to adjust reference count of dir appropriately.
 				drop(fs);
-				drop(DirRef { fs: self.fs, id: parent_id });
+				drop(DirRef { fs: self.fs, id: header.parent_id });
 			}
 		}
 	}
@@ -322,7 +324,8 @@ pub struct FileRef<'a, D: Dev> {
 /// Raw [`FileRef`] data.
 ///
 /// This is more compact than [`FileRef`] and better suited for storing in a container.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use = "value must be used to avoid reference leaks"]
 pub struct RawFileRef {
 	/// Handle pointing to the corresponding [`FileData`].
 	idx: Idx,
@@ -330,13 +333,14 @@ pub struct RawFileRef {
 
 impl<'a, D: Dev> FileRef<'a, D> {
 	/// Turn this reference into raw components.
-	fn into_raw(self) -> RawFileRef {
+	pub fn into_raw(self) -> RawFileRef {
 		let Self { fs: _, idx } = self;
+		mem::forget(self);
 		RawFileRef { idx }
 	}
 
 	/// Create a reference from raw components.
-	fn from_raw(fs: &'a Nrfs<D>, raw: RawFileRef) -> Self {
+	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawFileRef) -> Self {
 		let RawFileRef { idx } = raw;
 		FileRef { fs, idx }
 	}
@@ -389,17 +393,18 @@ pub struct SymRef<'a, D: Dev>(FileRef<'a, D>);
 /// Raw [`SymRef`] data.
 ///
 /// This is more compact than [`SymRef`] and better suited for storing in a container.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use = "value must be used to avoid reference leaks"]
 pub struct RawSymRef(RawFileRef);
 
 impl<'a, D: Dev> SymRef<'a, D> {
 	/// Turn this reference into raw components.
-	fn into_raw(self) -> RawSymRef {
+	pub fn into_raw(self) -> RawSymRef {
 		RawSymRef(self.0.into_raw())
 	}
 
 	/// Create a reference from raw components.
-	fn from_raw(fs: &'a Nrfs<D>, raw: RawSymRef) -> Self {
+	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawSymRef) -> Self {
 		SymRef(FileRef::from_raw(fs, raw.0))
 	}
 }
@@ -411,17 +416,18 @@ pub struct UnknownRef<'a, D: Dev>(FileRef<'a, D>);
 /// Raw [`UnknownRef`] data.
 ///
 /// This is more compact than [`UnknownRef`] and better suited for storing in a container.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[must_use = "value must be used to avoid reference leaks"]
 pub struct RawUnknownRef(RawFileRef);
 
 impl<'a, D: Dev> UnknownRef<'a, D> {
 	/// Turn this reference into raw components.
-	fn into_raw(self) -> RawUnknownRef {
+	pub fn into_raw(self) -> RawUnknownRef {
 		RawUnknownRef(self.0.into_raw())
 	}
 
 	/// Create a reference from raw components.
-	fn from_raw(fs: &'a Nrfs<D>, raw: RawUnknownRef) -> Self {
+	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawUnknownRef) -> Self {
 		UnknownRef(FileRef::from_raw(fs, raw.0))
 	}
 }
@@ -489,7 +495,7 @@ async fn read_exact<'a, D: Dev>(
 }
 
 /// Data header, shared by [`DirData`] and [`FileData`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct DataHeader {
 	/// The amount of live [`DirRef`]s to this directory.
 	reference_count: usize,

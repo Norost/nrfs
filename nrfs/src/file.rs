@@ -345,12 +345,6 @@ impl<'a, D: Dev> File<'a, D> {
 	fn is_embedded(&self) -> bool {
 		matches!(&self.fs.file_data(self.idx).inner, Inner::Embed { .. })
 	}
-
-	/// Destroy this file.
-	async fn destroy(self) -> Result<(), Error<D>> {
-		trace!("destroy");
-		todo!("destroy");
-	}
 }
 
 macro_rules! impl_common {
@@ -404,11 +398,6 @@ macro_rules! impl_common {
 			self.file().is_embedded()
 		}
 
-		/// Destroy this file.
-		pub async fn destroy(self) -> Result<(), Error<D>> {
-			self.file().destroy().await
-		}
-
 		/// Construct a helper [`File`]
 		pub(crate) fn file(&self) -> File<'a, D> {
 			let $s = self;
@@ -439,7 +428,7 @@ impl<'a, D: Dev> FileRef<'a, D> {
 		let dir_data = dirs.get_mut(&dir.id).expect("no DirData with id");
 		let idx = match dir_data.children.entry(index) {
 			hash_map::Entry::Occupied(e) => match e.get() {
-				&Child::Dir(_) => unreachable!(),
+				&Child::Dir(_) => unreachable!("expected File, not Dir"),
 				&Child::File(idx) => {
 					// Reference existing FileData
 					files[idx].header.reference_count += 1;

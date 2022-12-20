@@ -7,7 +7,7 @@ use {
 		read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Idx, Name, Nrfs, SymRef,
 		UnknownRef,
 	},
-	core::cell::RefMut,
+	core::{cell::RefMut, mem},
 	hashmap::*,
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
@@ -24,6 +24,13 @@ const TY_DIR: u8 = 2;
 const TY_SYM: u8 = 3;
 const TY_EMBED_FILE: u8 = 4;
 const TY_EMBED_SYM: u8 = 5;
+
+/// Constants used to manipulate the directory header.
+mod header {
+	pub mod offset {
+		pub const ENTRY_COUNT: u16 = 4;
+	}
+}
 
 /// Directory data only, which has no lifetimes.
 ///
@@ -186,6 +193,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 	///
 	/// The entry must not be empty, i.e. type is not 0.
 	pub(crate) async fn set_ty(&self, index: u32, ty: Type) -> Result<(), Error<D>> {
+		trace!("set_ty {:?} {:?}", index, ty);
 		let map = self.hashmap().await?;
 		let mut e = map.get(index).await?;
 		debug_assert!(e.ty != 0);
@@ -203,7 +211,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 	/// Write a heap value.
 	pub(crate) async fn write_heap(&self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
 		trace!("write_heap {:?} (len: {})", offset, data.len());
-		self.fs.write_grow(self.id + 1, offset, data).await
+		self.fs.write_all(self.id + 1, offset, data).await
 	}
 
 	/// Allocate heap space for arbitrary data.
@@ -217,7 +225,16 @@ impl<'a, D: Dev> Dir<'a, D> {
 		for r in log.gaps(&(0..u64::MAX)) {
 			if r.end - r.start >= len {
 				log.insert(r.start..r.start + len);
+				let end = log.iter().last().map_or(0, |r| r.end);
 				drop(log);
+
+				// Resize heap
+				let heap = self.fs.storage.get(self.id + 1).await?;
+				let len = heap.len().await?;
+				heap.resize(len.max(end)).await?;
+				drop(heap);
+
+				// Save alloc log
 				self.save_alloc_log().await?;
 				return Ok(r.start);
 			}
@@ -276,8 +293,21 @@ impl<'a, D: Dev> Dir<'a, D> {
 	/// It will fail for entries whose type is unknown to avoid space leaks.
 	async fn remove_at(&self, entry: &RawEntry) -> Result<bool, Error<D>> {
 		trace!("remove_at {:?}", (entry.index, &entry.key));
+
+		// Only destroy types we recognize
 		let Ok(ty) = entry.ty() else { return Ok(false) };
 
+		// If a child is present, don't remove as we don't want dangling references.
+		if self
+			.fs
+			.dir_data(self.id)
+			.children
+			.contains_key(&entry.index)
+		{
+			return Ok(false);
+		}
+
+		// Remove from map.
 		self.update_entry_count(|x| x - 1).await?;
 		self.hashmap().await?.remove_at(entry.index).await?;
 
@@ -298,13 +328,17 @@ impl<'a, D: Dev> Dir<'a, D> {
 					.await?;
 			}
 			Type::Dir { id } => {
+				// Ensure the directory is empty to avoid space leaks.
+				let map = self.fs.storage.get(id).await?;
+				let buf = &mut [0; 4];
+				read_exact(&map, header::offset::ENTRY_COUNT.into(), buf).await?;
+				let entry_count = u32::from_le_bytes(*buf);
+				if entry_count > 0 {
+					return Ok(false);
+				}
+
 				// Dereference map and heap.
-				self.fs
-					.storage
-					.get(id + 0)
-					.await?
-					.decrease_reference_count()
-					.await?;
+				map.decrease_reference_count().await?;
 				self.fs
 					.storage
 					.get(id + 1)
@@ -333,22 +367,31 @@ impl<'a, D: Dev> Dir<'a, D> {
 		trace!("rename {:?} -> {:?}", from, to);
 		let map = self.hashmap().await?;
 		if let Some(entry) = map.find_index(from).await? {
-			// Resizing is not necessary as there is guaranteed to be a free spot
-			// and we'll free another spot if the insert succeeds.
-			let index = entry.index;
+			// Remove entry.
+			let child = self.fs.dir_data(self.id).children.remove(&entry.index);
+			map.remove_at(entry.index).await?;
+
+			// Try to insert entry with new name.
+			let old_entry = entry.clone();
+			let old_index = entry.index;
 			if let Some(new_index) = map.insert(entry, Some(to)).await? {
-				// Remove from old index
-				map.remove_at(index).await?;
 				// Fixup indices in corresponding File or DirData
-				let mut data = self.fs.dir_data(self.id);
-				let child = data.children.remove(&index).expect("child not present");
-				data.children.insert(new_index, child);
-				drop(data);
-				match child {
-					Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
-					Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
+				if let Some(child) = child {
+					let _r = self.fs.dir_data(self.id).children.insert(new_index, child);
+					assert!(_r.is_none());
+					match child {
+						Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
+						Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
+					}
 				}
 				return Ok(true);
+			} else {
+				// On failure, restore entry.
+				map.insert(old_entry, None).await?;
+				if let Some(child) = child {
+					let _r = self.fs.dir_data(self.id).children.insert(old_index, child);
+					assert!(_r.is_none());
+				}
 			}
 		}
 		Ok(false)
@@ -365,12 +408,38 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 	/// Move an entry to another directory.
 	async fn transfer(&self, name: &Name, to_dir: u64, to_name: &Name) -> Result<bool, Error<D>> {
+		trace!("transfer {:?} {:?} {:?}", name, to_dir, to_name);
+		if self.id == to_dir {
+			// Don't transfer, rename instead.
+			return self.rename(name, to_name).await;
+		}
+
 		let to_dir = Dir::new(self.fs, to_dir);
 
 		let from_map = self.hashmap().await?;
 
 		// Find the entry to transfer.
 		let Some(entry) = from_map.find_index(name).await? else { return Ok(false) };
+
+		// If we don't know the type, don't transfer to avoid bringing the filesystem in an
+		// inconsistent state.
+		if entry.ty().is_err() {
+			return Ok(false);
+		}
+
+		// If the entry is a directory, ensure it is not a ancestor of to_dir
+		if let Ok(Type::Dir { id }) = entry.ty() {
+			// Start from to_dir and work downwards to the root.
+			// The root is guaranteed to be the ancestor of all other objects.
+			let mut cur_id = to_dir.id;
+			while cur_id != 0 {
+				if cur_id == id {
+					// to_dir is a descendant of the entry to be moved, so cancel operation.
+					return Ok(false);
+				}
+				cur_id = self.fs.dir_data(id).header.parent_id;
+			}
+		}
 
 		// Check if the destination directory has enough capacity.
 		// If not, grow it first.
@@ -424,7 +493,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		// Since we're going to load the entire log we can as well minimize it.
 		self.alloc_log().await?;
 
-		let data = self.fs.dir_data(self.id);
+		let mut data = self.fs.dir_data(self.id);
 
 		let hashmap_size_p2 = data.hashmap_size_p2;
 		let capacity = data.capacity();
@@ -441,6 +510,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 			);
 			hashmap_size_p2 - 1
 		};
+
+		let mut children = mem::take(&mut data.children);
 		drop(data);
 
 		let new_map = self.fs.storage.create().await?;
@@ -455,8 +526,21 @@ impl<'a, D: Dev> Dir<'a, D> {
 			if e.ty == 0 {
 				continue;
 			}
-			new_map.insert(e, None).await?;
+			let new_index = new_map.insert(e, None).await?.unwrap();
+			if let Some(child) = children.remove(&index) {
+				let _r = self.fs.dir_data(self.id).children.insert(new_index, child);
+				debug_assert!(_r.is_none());
+				match child {
+					Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
+					Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
+				}
+			}
 		}
+		debug_assert!(
+			children.is_empty(),
+			"not all children have been moved: {:#?}",
+			children
+		);
 
 		// Replace old map
 		self.fs
@@ -465,7 +549,9 @@ impl<'a, D: Dev> Dir<'a, D> {
 			.await?
 			.replace_with(new_map.map)
 			.await?;
-		self.fs.dir_data(self.id).hashmap_size_p2 = new_size_p2;
+		let mut data = self.fs.dir_data(self.id);
+		data.hashmap_size_p2 = new_size_p2;
+		drop(data);
 		self.save_alloc_log().await
 	}
 
@@ -825,7 +911,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		let e = NewEntry { name, ty: Type::Dir { id: u64::MAX } };
 		let Some(index) = self.dir().insert(e, ext).await? else { return Ok(None) };
 		// Create new directory with stub index (u32::MAX).
-		let d = DirRef::new(&self.dir(), u32::MAX, options).await?;
+		let d = DirRef::new(&self.dir(), index, options).await?;
 		// Fixup ID in entry.
 		self.dir().set_ty(index, Type::Dir { id: d.id }).await?;
 		// Done!
@@ -937,11 +1023,6 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	fn dir(&self) -> Dir<'a, D> {
 		Dir::new(self.fs, self.id)
 	}
-
-	/// Destroy this dictionary.
-	pub async fn destroy(self) -> Result<(), Error<D>> {
-		todo!();
-	}
 }
 
 /// A single entry in a directory.
@@ -1013,20 +1094,6 @@ impl<'a, D: Dev> Entry<'a, D> {
 				Ok(Box::<Name>::try_from(name.into_boxed_slice()).unwrap())
 			}
 		}
-	}
-
-	/// Destroy this entry and the data it points to.
-	///
-	/// If the type is [`Self::Unknown`],
-	/// this function will fail and `false` is returned.
-	pub async fn destroy(self) -> Result<bool, Error<D>> {
-		match self {
-			Self::Dir(e) => e.destroy().await,
-			Self::File(e) => e.destroy().await,
-			Self::Sym(e) => e.destroy().await,
-			Self::Unknown(_) => return Ok(false),
-		}?;
-		Ok(true)
 	}
 
 	/// Get a reference to the filesystem containing this entry's data.
@@ -1117,7 +1184,7 @@ impl DirOptions {
 		Self {
 			capacity_p2: Default::default(),
 			extensions: Default::default(),
-			hasher: Hasher::SipHasher13(siphasher::sip::SipHasher13::new_with_key(key)),
+			hasher: Hasher::SipHasher13(*key),
 		}
 	}
 }
@@ -1154,4 +1221,14 @@ pub struct Extensions {
 pub(crate) enum Child {
 	File(Idx),
 	Dir(u64),
+}
+
+impl Child {
+	/// Get the [`DataHeader`].
+	fn header<'a, D: Dev>(&self, fs: &'a Nrfs<D>) -> RefMut<'a, DataHeader> {
+		match self {
+			&Self::File(idx) => RefMut::map(fs.file_data(idx), |d| &mut d.header),
+			&Self::Dir(id) => RefMut::map(fs.dir_data(id), |d| &mut d.header),
+		}
+	}
 }

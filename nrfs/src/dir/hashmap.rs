@@ -1,10 +1,10 @@
 use {
 	super::{
-		ext, Dir, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM, TY_FILE, TY_NONE,
-		TY_SYM,
+		ext, Child, Dir, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM, TY_FILE,
+		TY_NONE, TY_SYM,
 	},
 	crate::{read_exact, write_all},
-	core::fmt,
+	core::{cell::RefMut, fmt},
 	nros::{Dev, Tree},
 	siphasher::sip::SipHasher13,
 };
@@ -34,7 +34,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 	/// Remove an entry.
 	///
-	/// This does not free heap data!
+	/// This does not free heap data nor does it remove the corresponding child!
 	pub async fn remove_at(&self, mut index: u32) -> Result<(), Error<D>> {
 		trace!("remove_at {:?}", index);
 		let hasher = self.fs.dir_data(self.dir_id).hasher;
@@ -53,13 +53,25 @@ impl<'a, D: Dev> HashMap<'a, D> {
 					// No need to shift anything else because:
 					// - if e.ty == 0, the next entry is empty.
 					//   We will clear the current entry below anyways.
-					// - if psl == 0 we don't want to shift it from it's ideal position.
+					// - if psl == 0 we don't want to shift it from its ideal position.
 					if e.ty == 0 || calc_psl(index + 1, e.hash(&hasher)) == 0 {
 						break;
 					}
+
 					// Copy the next entry over the current entry and move on to the next.
 					e.index = index;
 					self.set(&e).await?;
+
+					let mut data = self.fs.dir_data(self.dir_id);
+					if let Some(child) = data.children.remove(&(index + 1)) {
+						let _r = data.children.insert(index, child);
+						assert!(_r.is_none(), "a child was already present");
+						drop(data);
+						child.header(self.fs).parent_index = index;
+					} else {
+						drop(data);
+					}
+
 					index += 1;
 					index &= self.mask;
 				}
@@ -238,26 +250,18 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		// Update index
 		entry.index = hash & self.mask;
 
-		// If entry_index is None, we're still working with the to-be inserted entry.
-		// If it is Some, the entry has already been inserted and we're only shifting entries.
-		let mut entry_index = None;
-
+		/// Set the key & insert the entry.
 		async fn insert_entry<'a, D: Dev>(
 			slf: &HashMap<'a, D>,
-			entry_index: &mut Option<u32>,
 			name: Option<(&Name, u32)>,
-			e: &mut RawEntry,
+			mut entry: RawEntry,
 		) -> Result<u32, Error<D>> {
-			trace!(
-				"insert::insert_entry {:?} {:?} {:?}",
-				&entry_index,
-				name,
-				(e.index, &e.key)
-			);
-			// Store name if we're inserting the original entry.
-			if let Some((name, hash)) = entry_index.is_none().then(|| name).flatten() {
-				let dir = Dir::new(slf.fs, slf.dir_id);
-				e.key = if name.len_u8() <= 14 {
+			trace!("insert::insert_entry {:?} {:?}", name, &entry);
+			let dir = Dir::new(slf.fs, slf.dir_id);
+
+			// Store name if necessary.
+			if let Some((name, hash)) = name {
+				entry.key = if name.len_u8() <= 14 {
 					// Embed key
 					let mut data = [0; 14];
 					data[..name.len()].copy_from_slice(name.as_ref());
@@ -267,15 +271,11 @@ impl<'a, D: Dev> HashMap<'a, D> {
 					let offset = dir.alloc(name.len_u8().into()).await?;
 					dir.write_heap(offset, name).await?;
 					RawEntryKey::Heap { len: name.len_u8(), offset, hash }
-				}
+				};
 			}
 
 			// Store entry data at index.
-			slf.set(e).await?;
-
-			// Save the index of the original entry,
-			// otherwise just return the index of original entry.
-			Ok(*entry_index.get_or_insert(e.index))
+			slf.set(&entry).await.map(|()| entry.index)
 		}
 
 		let hasher = data.hasher;
@@ -287,48 +287,74 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		let calc_psl = |i: u32, h| i.wrapping_sub(h) & self.mask;
 
 		match hasher {
-			Hasher::SipHasher13(_) => loop {
+			Hasher::SipHasher13(_) => {
 				// Insert with robin-hood hashing,
-				// i.e. keep shifting entries until we find an empty one.
+				// - First, find an appropriate slot for the entry to be inserted.
+				// - Then, shift every other entry forward until we hit an empty slot.
 
-				// Note we're updating entry.index, so entry != e
-				let e = self.get(entry.index).await?;
+				// Insert current entry.
+				let (entry_index, mut entry, mut child) = loop {
+					let e = self.get(entry.index).await?;
 
-				// We found a free slot.
-				if e.ty == 0 {
-					let entry_index =
-						insert_entry(self, &mut entry_index, name, &mut entry).await?;
-					// Return the index of the entry we were supposed to insert.
-					return Ok(Some(entry_index));
-				}
-
-				// If the entry has the same name as us, exit.
-				if let Some((name, hash)) = name {
-					// If entry_index is Some, we're shifting existing entries which should not
-					// have conflicting names, so skip in that case.
-					if entry_index.is_none() && dir.compare_names(&e, name, hash).await? {
-						return Ok(None);
+					// We found a free slot.
+					// Insert and return.
+					if e.ty == 0 {
+						return insert_entry(self, name, entry).await.map(Some);
 					}
-				}
 
-				// Check if the PSL (Probe Sequence Length) is lower than that of ours
-				// If yes, swap with it.
-				let e_psl = calc_psl(entry.index, e.hash(&hasher));
-				if entry_psl > e_psl {
-					insert_entry(self, &mut entry_index, name, &mut entry).await?;
-					(entry, entry_psl) = (e, e_psl);
-				}
+					// If the entry has the same name as us, exit.
+					if let Some((name, hash)) = name {
+						if dir.compare_names(&e, name, hash).await? {
+							return Ok(None);
+						}
+					}
 
-				entry.index += 1;
-				entry.index &= self.mask;
-				entry_psl += 1;
-			},
+					// Check if the PSL (Probe Sequence Length) is lower than that of ours
+					// If yes, swap with it and begin shifting forward.
+					if entry_psl > calc_psl(entry.index, e.hash(&hasher)) {
+						let index = insert_entry(self, name, entry).await?;
+						let child = self.fs.dir_data(self.dir_id).children.remove(&index);
+						break (index, e, child);
+					}
+
+					// Try next slot
+					entry.index += 1;
+					entry.index &= self.mask;
+					entry_psl += 1;
+				};
+
+				// Shift all elements forward by one slot
+				// until an empty slot is found.
+				loop {
+					entry.index += 1;
+					entry.index &= self.mask;
+
+					let e = self.get(entry.index).await?;
+
+					// Insert unconditionally.
+					let index = insert_entry(self, None, entry).await?;
+					if let Some(c) = child.take() {
+						c.header(self.fs).parent_index = index;
+						child = self.fs.dir_data(self.dir_id).children.insert(index, c);
+					}
+
+					// We found a free slot.
+					// Free at last!
+					if e.ty == 0 {
+						debug_assert!(child.is_none(), "empty entry has child");
+						return Ok(Some(entry_index));
+					}
+
+					// Continue with swapped out entry.
+					entry = e;
+				}
+			}
 		}
 	}
 }
 
 /// Raw entry data.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct RawEntry {
 	// Header
 	/// Entry type.
@@ -386,6 +412,7 @@ impl RawEntry {
 }
 
 /// Entry key, which may be embedded or on the heap.
+#[derive(Clone)]
 pub(super) enum RawEntryKey {
 	Embed {
 		/// The length of the key.
@@ -432,7 +459,7 @@ impl fmt::Debug for RawEntryKey {
 /// Avoids the need to borrow `DirData` redundantly.
 #[derive(Clone, Copy, Debug)]
 pub enum Hasher {
-	SipHasher13(SipHasher13),
+	SipHasher13([u8; 16]),
 }
 
 impl Hasher {
@@ -442,7 +469,7 @@ impl Hasher {
 	/// the second element represents the key.
 	pub fn to_raw(self) -> (u8, [u8; 16]) {
 		match self {
-			Self::SipHasher13(h) => (1, h.key()),
+			Self::SipHasher13(h) => (1, h),
 		}
 	}
 
@@ -451,7 +478,7 @@ impl Hasher {
 	/// Fails if the hasher type is unknown.
 	pub fn from_raw(ty: u8, key: &[u8; 16]) -> Option<Self> {
 		Some(match ty {
-			1 => Self::SipHasher13(SipHasher13::new_with_key(key)),
+			1 => Self::SipHasher13(*key),
 			_ => return None,
 		})
 	}
@@ -460,7 +487,8 @@ impl Hasher {
 	fn hash(&self, key: &[u8]) -> u32 {
 		use core::hash::Hasher;
 		match self {
-			Self::SipHasher13(mut h) => {
+			Self::SipHasher13(key) => {
+				let mut h = SipHasher13::new_with_key(key);
 				h.write(key);
 				h.finish() as _
 			}

@@ -1,4 +1,5 @@
 mod dir;
+pub mod fuzz;
 
 use {
 	crate::{
@@ -27,10 +28,18 @@ where
 }
 
 async fn new() -> Nrfs<MemDev> {
+	new_cap(1 << 10, BlockSize::K1, MaxRecordSize::K1).await
+}
+
+async fn new_cap(
+	size: usize,
+	block_size: BlockSize,
+	max_record_size: MaxRecordSize,
+) -> Nrfs<MemDev> {
 	Nrfs::new(
-		[[MemDev::new(1 << 10, BlockSize::K1)]],
-		BlockSize::K1,
-		MaxRecordSize::K1,
+		[[MemDev::new(size, block_size)]],
+		block_size,
+		max_record_size,
 		&DirOptions::new(&[0; 16]),
 		Compression::None,
 		1 << 12,

@@ -116,7 +116,14 @@ alloc!(Box Rc Arc);
 impl fmt::Debug for Name {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		// TODO use Utf8Lossy when it becomes stable.
-		String::from_utf8_lossy(self).fmt(f)
+		#[cfg(not(fuzzing))]
+		{
+			format_args!("{:?} @ {:?}", String::from_utf8_lossy(self), &self.0).fmt(f)
+		}
+		#[cfg(fuzzing)]
+		{
+			format_args!("(&{:?}).into()", &self.0).fmt(f)
+		}
 	}
 }
 
@@ -124,5 +131,17 @@ impl fmt::Display for Name {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		// TODO use Utf8Lossy when it becomes stable.
 		String::from_utf8_lossy(self).fmt(f)
+	}
+}
+
+#[cfg(any(test, fuzzing))]
+impl<'a> arbitrary::Arbitrary<'a> for &'a Name {
+	fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+		let len = u.int_in_range::<usize>(0..=255)?;
+		u.bytes(len).map(|b| b.try_into().unwrap())
+	}
+
+	fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+		(1, Some(256))
 	}
 }
