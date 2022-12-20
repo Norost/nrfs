@@ -182,7 +182,7 @@ fn create_file_ext() {
 			.create_file(
 				b"test.txt".into(),
 				&Extensions {
-					unix: Some(ext::unix::Entry { permissions: 0o640, uid: 1000, gid: 1001 }),
+					unix: Some(ext::unix::Entry::new(0o640, 1000, 1001)),
 					mtime: Some(ext::mtime::Entry { mtime: 0xdead }),
 				},
 			)
@@ -196,8 +196,8 @@ fn create_file_ext() {
 		let file = d.find(b"test.txt".into()).await.unwrap().unwrap();
 		let data = file.data().await.unwrap();
 		assert_eq!(data.ext_unix.unwrap().permissions, 0o640);
-		assert_eq!(data.ext_unix.unwrap().uid, 1000);
-		assert_eq!(data.ext_unix.unwrap().gid, 1001);
+		assert_eq!(data.ext_unix.unwrap().uid(), 1000);
+		assert_eq!(data.ext_unix.unwrap().gid(), 1001);
 		assert_eq!(data.ext_mtime.unwrap().mtime, 0xdead);
 
 		let mut buf = [0; 32];

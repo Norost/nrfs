@@ -160,14 +160,13 @@ async fn make(args: Make) {
 			let mut ext = nrfs::dir::Extensions::default();
 
 			ext.unix = extensions.unix().then(|| {
-				let mut u =
-					nrfs::dir::ext::unix::Entry { permissions: 0o700, ..Default::default() };
+				let mut u = nrfs::dir::ext::unix::Entry::new(0o700, 0, 0);
 				let p = m.permissions();
 				#[cfg(target_family = "unix")]
 				{
 					u.permissions = (p.mode() & 0o777) as _;
-					u.uid = m.uid();
-					u.gid = m.gid();
+					u.set_uid(m.uid());
+					u.set_gid(m.gid());
 				}
 				u
 			});
@@ -244,8 +243,8 @@ async fn dump(args: Dump) {
 				print!(
 					"{} {:>4} {:>4}  ",
 					std::str::from_utf8(&s).unwrap(),
-					u.uid,
-					u.gid
+					u.uid(),
+					u.gid(),
 				);
 			}
 

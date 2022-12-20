@@ -87,11 +87,10 @@ impl Fs {
 		let fs = Nrfs::load([fs].into(), global_cache_size, dirty_cache_size)
 			.await
 			.unwrap();
-		let unix_default = nrfs::dir::ext::unix::Entry {
-			uid: unsafe { libc::getuid() },
-			gid: unsafe { libc::getgid() },
-			permissions: 0o700,
-		};
+		let unix_default =
+			nrfs::dir::ext::unix::Entry::new(0o700, unsafe { libc::getuid() }, unsafe {
+				libc::getgid()
+			});
 		let mut s = Self { fs, ino: InodeStore { unix_default, ..Default::default() } };
 
 		// Add root dir now so it's always at ino 1.
@@ -122,8 +121,8 @@ impl Fs {
 			crtime: UNIX_EPOCH,
 			perm: u.permissions,
 			nlink: 1,
-			uid: u.uid,
-			gid: u.gid,
+			uid: u.uid(),
+			gid: u.gid(),
 			rdev: 0,
 			flags: 0,
 			kind: ty,
@@ -375,8 +374,8 @@ impl Filesystem for Fs {
 			if let Some(ext) = &mut data.ext_unix {
 				if mode.is_some() || uid.is_some() || gid.is_some() {
 					mode.map(|m| ext.permissions = m as u16 & 0o777);
-					uid.map(|u| ext.uid = u);
-					gid.map(|g| ext.gid = g);
+					uid.map(|u| ext.set_uid(u));
+					gid.map(|g| ext.set_gid(g));
 					e.set_ext_unix(ext).await.unwrap();
 				}
 			}
@@ -526,11 +525,7 @@ impl Filesystem for Fs {
 			let d = self.ino.get_dir(&self.fs, parent);
 
 			let Ok(name) = name.as_bytes().try_into() else { return reply.error(libc::ENAMETOOLONG) };
-			let unix = nrfs::dir::ext::unix::Entry {
-				permissions: mode as _,
-				uid: req.uid(),
-				gid: req.gid(),
-			};
+			let unix = nrfs::dir::ext::unix::Entry::new(mode as _, req.uid(), req.gid());
 			let mtime = mtime_now();
 			let ext = nrfs::dir::Extensions {
 				unix: Some(unix),
@@ -584,8 +579,7 @@ impl Filesystem for Fs {
 		futures_executor::block_on(async move {
 			let d = self.ino.get_dir(&self.fs, parent);
 			let Ok(name) = name.as_bytes().try_into() else { return reply.error(libc::ENAMETOOLONG) };
-			let unix =
-				nrfs::dir::ext::unix::Entry { permissions: 0o777, uid: req.uid(), gid: req.gid() };
+			let unix = nrfs::dir::ext::unix::Entry::new(0o777, req.uid(), req.gid());
 			let mtime = mtime_now();
 			let ext = nrfs::dir::Extensions {
 				unix: Some(unix),
@@ -620,11 +614,7 @@ impl Filesystem for Fs {
 
 			let Ok(name) = name.as_bytes().try_into() else { return reply.error(libc::ENAMETOOLONG) };
 
-			let unix = nrfs::dir::ext::unix::Entry {
-				permissions: mode as _,
-				uid: req.uid(),
-				gid: req.gid(),
-			};
+			let unix = nrfs::dir::ext::unix::Entry::new(mode as _, req.uid(), req.gid());
 			let mtime = mtime_now();
 			let ext = nrfs::dir::Extensions { unix: Some(unix), ..Default::default() };
 			let opt = nrfs::DirOptions {
