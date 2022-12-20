@@ -142,6 +142,8 @@ async fn make(args: Make) {
 		let root = nrfs.root_dir().await.unwrap();
 		add_files(root, d, &args, extensions).await;
 	}
+
+	nrfs.finish_transaction().await.unwrap();
 	dbg!(nrfs.statistics());
 	nrfs.unmount().await.unwrap();
 

@@ -354,7 +354,24 @@ impl<D: Dev> Cache<D> {
 
 	/// Finish the current transaction, committing any changes to the underlying devices.
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
-		self.store.finish_transaction().await
+
+		// First flush cache
+		let data = self.data.borrow();
+		let global_max = data.lrus.global.cache_max;
+		let dirty_max = data.lrus.dirty.cache_max;
+		drop(data);
+		self.resize_cache(global_max, 0).await?;
+		debug_assert_eq!(
+			self.statistics().dirty_usage,
+			0,
+			"not all data has been flushed"
+		);
+
+		// Flush store-specific data.
+		self.store.finish_transaction().await?;
+
+		// Restore cache params
+		self.resize_cache(global_max, dirty_max).await
 	}
 
 	/// The block size used by the underlying [`Store`].
@@ -678,13 +695,7 @@ impl<D: Dev> Cache<D> {
 	/// The cache is flushed before returning the underlying [`Store`].
 	pub async fn unmount(self) -> Result<Store<D>, Error<D>> {
 		trace!("unmount");
-		let global_max = self.data.borrow().lrus.global.cache_max;
-		self.resize_cache(global_max, 0).await?;
-		debug_assert_eq!(
-			self.statistics().dirty_usage,
-			0,
-			"not all data has been flushed"
-		);
+		self.finish_transaction().await?;
 		Ok(self.store)
 	}
 
