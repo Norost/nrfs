@@ -345,12 +345,6 @@ impl<'a, D: Dev> File<'a, D> {
 	fn is_embedded(&self) -> bool {
 		matches!(&self.fs.file_data(self.idx).inner, Inner::Embed { .. })
 	}
-
-	/// Destroy this file.
-	async fn destroy(&self) -> Result<(), Error<D>> {
-		trace!("destroy");
-		todo!("destroy");
-	}
 }
 
 macro_rules! impl_common {
@@ -402,11 +396,6 @@ macro_rules! impl_common {
 		/// Whether this file is embedded or not.
 		pub fn is_embedded(&self) -> bool {
 			self.file().is_embedded()
-		}
-
-		/// Destroy this file.
-		pub async fn destroy(&self) -> Result<(), Error<D>> {
-			self.file().destroy().await
 		}
 
 		/// Construct a helper [`File`]

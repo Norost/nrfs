@@ -161,13 +161,15 @@ fn remove_large_file() {
 
 		// Write at least 64KiB of data so an object is guaranteed to be allocated.
 		file.write_grow(0, &[0; 1 << 16]).await.unwrap();
+		drop(file);
 
 		assert!(root.remove(b"file".into()).await.unwrap());
 	})
 }
 
+/// Try removing an empty directory, which should succeed.
 #[test]
-fn remove_dir() {
+fn remove_empty_dir() {
 	run(async {
 		let fs = new().await;
 		let root = fs.root_dir().await.unwrap();
@@ -181,6 +183,29 @@ fn remove_dir() {
 		.unwrap();
 
 		assert!(root.remove(b"dir".into()).await.unwrap());
+	})
+}
+
+/// Try removing an non-empty directory, which should fail.
+#[test]
+fn remove_nonempty_dir() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+		root.create_dir(
+			b"dir".into(),
+			&DirOptions::new(&[0; 16]),
+			&Default::default(),
+		)
+		.await
+		.unwrap()
+		.unwrap()
+		.create_file(b"file".into(), &Default::default())
+		.await
+		.unwrap()
+		.unwrap();
+
+		assert!(!root.remove(b"dir".into()).await.unwrap());
 	})
 }
 

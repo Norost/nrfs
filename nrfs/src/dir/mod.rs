@@ -25,6 +25,13 @@ const TY_SYM: u8 = 3;
 const TY_EMBED_FILE: u8 = 4;
 const TY_EMBED_SYM: u8 = 5;
 
+/// Constants used to manipulate the directory header.
+mod header {
+	pub mod offset {
+		pub const ENTRY_COUNT: u16 = 4;
+	}
+}
+
 /// Directory data only, which has no lifetimes.
 ///
 /// The map is located at ID.
@@ -286,24 +293,23 @@ impl<'a, D: Dev> Dir<'a, D> {
 	/// It will fail for entries whose type is unknown to avoid space leaks.
 	async fn remove_at(&self, entry: &RawEntry) -> Result<bool, Error<D>> {
 		trace!("remove_at {:?}", (entry.index, &entry.key));
+
+		// Only destroy types we recognize
 		let Ok(ty) = entry.ty() else { return Ok(false) };
 
+		// If a child is present, don't remove as we don't want dangling references.
+		if self
+			.fs
+			.dir_data(self.id)
+			.children
+			.contains_key(&entry.index)
+		{
+			return Ok(false);
+		}
+
+		// Remove from map.
 		self.update_entry_count(|x| x - 1).await?;
 		self.hashmap().await?.remove_at(entry.index).await?;
-
-		// Remove child if present.
-		let mut data = self.fs.dir_data(self.id);
-		if let Some(child) = data.children.remove(&entry.index) {
-			// Reduce own reference count as the child will no longer reference us.
-			data.header.reference_count -= 1;
-			drop(data);
-			match child {
-				Child::File(idx) => self.fs.file_data(idx).header.make_dangling(),
-				Child::Dir(id) => self.fs.dir_data(id).header.make_dangling(),
-			};
-		} else {
-			drop(data);
-		}
 
 		// Deallocate key if stored on heap
 		match entry.key {
@@ -322,13 +328,17 @@ impl<'a, D: Dev> Dir<'a, D> {
 					.await?;
 			}
 			Type::Dir { id } => {
+				// Ensure the directory is empty to avoid space leaks.
+				let map = self.fs.storage.get(id).await?;
+				let buf = &mut [0; 4];
+				read_exact(&map, header::offset::ENTRY_COUNT.into(), buf).await?;
+				let entry_count = u32::from_le_bytes(*buf);
+				if entry_count > 0 {
+					return Ok(false);
+				}
+
 				// Dereference map and heap.
-				self.fs
-					.storage
-					.get(id + 0)
-					.await?
-					.decrease_reference_count()
-					.await?;
+				map.decrease_reference_count().await?;
 				self.fs
 					.storage
 					.get(id + 1)
@@ -1013,19 +1023,6 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	fn dir(&self) -> Dir<'a, D> {
 		Dir::new(self.fs, self.id)
 	}
-
-	/// Destroy this dictionary.
-	///
-	/// Returns `false` on failure.
-	/// This operation will fail if the directory isn't empty.
-	pub async fn destroy(&self) -> Result<bool, Error<D>> {
-		if self.fs.dir_data(self.id).entry_count > 0 {
-			// Don't delete data if any active entries are in the directory to avoid space leaks.
-			return Ok(true);
-		}
-
-		todo!()
-	}
 }
 
 /// A single entry in a directory.
@@ -1097,23 +1094,6 @@ impl<'a, D: Dev> Entry<'a, D> {
 				Ok(Box::<Name>::try_from(name.into_boxed_slice()).unwrap())
 			}
 		}
-	}
-
-	/// Destroy this entry and the data it points to.
-	///
-	/// On failure `false` is returned.
-	///
-	/// If the entry is a directory which is not empty the function will fail.
-	///
-	/// If the type is [`Self::Unknown`] this function will fail.
-	pub async fn destroy(&self) -> Result<bool, Error<D>> {
-		match self {
-			Self::Dir(e) => e.destroy().await,
-			Self::File(e) => e.destroy().await.map(|()| true),
-			Self::Sym(e) => e.destroy().await.map(|()| true),
-			Self::Unknown(_) => return Ok(false),
-		}?;
-		Ok(true)
 	}
 
 	/// Get a reference to the filesystem containing this entry's data.
