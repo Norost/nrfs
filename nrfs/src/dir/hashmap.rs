@@ -1,7 +1,7 @@
 use {
 	super::{
-		ext, Child, Dir, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM, TY_FILE,
-		TY_NONE, TY_SYM, DirSize,
+		ext, Child, Dir, DirSize, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM,
+		TY_FILE, TY_NONE, TY_SYM,
 	},
 	crate::{read_exact, write_all},
 	core::{cell::RefMut, fmt},
@@ -29,7 +29,12 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	/// Create a [`HashMap`] helper structure.
 	pub fn new(dir: &Dir<'a, D>, map: Tree<'a, D>, size: DirSize) -> Self {
 		let &Dir { fs, id: dir_id } = dir;
-		Self { fs, dir_id, map, mask: 1u32.wrapping_shl(size.to_raw().into()).wrapping_sub(1) }
+		Self {
+			fs,
+			dir_id,
+			map,
+			mask: 1u32.wrapping_shl(size.to_raw().into()).wrapping_sub(1),
+		}
 	}
 
 	/// Remove an entry.

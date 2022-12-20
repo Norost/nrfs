@@ -1084,18 +1084,24 @@ impl<'a, D: Dev> Entry<'a, D> {
 	///
 	/// Returns `false` if the extension is not enabled for the parent directory.
 	pub async fn set_ext_unix(&self, data: &ext::unix::Entry) -> Result<bool, Error<D>> {
-		self.parent_dir()
-			.ext_set_unix(self.data_header().parent_index, data)
-			.await
+		// Root dir has no attributes.
+		if matches!(self, Self::Dir(d) if d.id == 0) {
+			return Ok(false);
+		}
+		let index = self.data_header().parent_index;
+		self.parent_dir().ext_set_unix(index, data).await
 	}
 
 	/// Set `mtime` extension data.
 	///
 	/// Returns `false` if the extension is not enabled for the parent directory.
 	pub async fn set_ext_mtime(&self, data: &ext::mtime::Entry) -> Result<bool, Error<D>> {
-		self.parent_dir()
-			.ext_set_mtime(self.data_header().parent_index, data)
-			.await
+		// Root dir has no attributes.
+		if matches!(self, Self::Dir(d) if d.id == 0) {
+			return Ok(false);
+		}
+		let index = self.data_header().parent_index;
+		self.parent_dir().ext_set_mtime(index, data).await
 	}
 
 	/// Get the key,
@@ -1312,6 +1318,7 @@ impl EnableExtensions {
 }
 
 #[derive(Default, Debug)]
+#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
 pub struct Extensions {
 	pub unix: Option<ext::unix::Entry>,
 	pub mtime: Option<ext::mtime::Entry>,

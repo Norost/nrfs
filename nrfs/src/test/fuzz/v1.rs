@@ -26,9 +26,19 @@ pub struct Test<'a> {
 #[derive(Debug)]
 enum State<'a> {
 	/// The object is a file.
-	File { contents: RangeSet<u64>, indices: Vec<arena::Handle<()>> },
+	File {
+		contents: RangeSet<u64>,
+		indices: Vec<arena::Handle<()>>,
+		ext_unix: ext::unix::Entry,
+		ext_mtime: ext::mtime::Entry,
+	},
 	/// The object is a directory.
-	Dir { children: FxHashMap<&'a Name, State<'a>>, indices: Vec<arena::Handle<()>> },
+	Dir {
+		children: FxHashMap<&'a Name, State<'a>>,
+		indices: Vec<arena::Handle<()>>,
+		ext_unix: ext::unix::Entry,
+		ext_mtime: ext::mtime::Entry,
+	},
 }
 
 impl<'a> State<'a> {
@@ -45,6 +55,18 @@ impl<'a> State<'a> {
 	fn indices_mut(&mut self) -> &mut Vec<arena::Handle<()>> {
 		match self {
 			Self::File { indices, .. } | Self::Dir { indices, .. } => indices,
+		}
+	}
+
+	fn ext_unix_mut(&mut self) -> &mut ext::unix::Entry {
+		match self {
+			Self::File { ext_unix, .. } | Self::Dir { ext_unix, .. } => ext_unix,
+		}
+	}
+
+	fn ext_mtime_mut(&mut self) -> &mut ext::mtime::Entry {
+		match self {
+			Self::File { ext_mtime, .. } | Self::Dir { ext_mtime, .. } => ext_mtime,
 		}
 	}
 }
@@ -68,9 +90,9 @@ where
 #[derive(Debug, Arbitrary)]
 pub enum Op<'a> {
 	/// Create a file.
-	CreateFile { dir_idx: u16, name: &'a Name },
+	CreateFile { dir_idx: u16, name: &'a Name, ext: Extensions },
 	/// Create a directory.
-	CreateDir { dir_idx: u16, name: &'a Name, options: DirOptions },
+	CreateDir { dir_idx: u16, name: &'a Name, options: DirOptions, ext: Extensions },
 	/// Get an entry.
 	Get { dir_idx: u16, name: &'a Name },
 	/// Get a reference to the root directory.
@@ -89,6 +111,12 @@ pub enum Op<'a> {
 	Transfer { from_dir_idx: u16, from: &'a Name, to_dir_idx: u16, to: &'a Name },
 	/// Remove an entry.
 	Remove { dir_idx: u16, name: &'a Name },
+	/// Set `unix` extension data.
+	SetExtUnix { idx: u16, ext: ext::unix::Entry },
+	/// Set `mtime` extension data.
+	SetExtMtime { idx: u16, ext: ext::mtime::Entry },
+	/// Get and verify extension data.
+	GetExt { idx: u16 },
 }
 
 impl<'a> Arbitrary<'a> for Test<'a> {
@@ -113,7 +141,35 @@ impl<'a> Test<'a> {
 			// References to entries.
 			let mut refs = arena::Arena::<(_, Box<[&Name]>), ()>::new();
 			// Expected contents of the filesystem,
-			let mut state = State::Dir { children: Default::default(), indices: vec![] };
+			let mut state = State::Dir {
+				children: Default::default(),
+				indices: Default::default(),
+				ext_unix: Default::default(),
+				ext_mtime: Default::default(),
+			};
+
+			fn get<'a, 'b, 'c, 'd>(
+				fs: &'b Nrfs<MemDev>,
+				refs: &'c arena::Arena<(RawEntryRef, Box<[&'a Name]>), ()>,
+				state: &'d mut State<'a>,
+				file_idx: u16,
+			) -> Option<(
+				TmpRef<'c, Entry<'b, MemDev>>,
+				&'c [&'a Name],
+				&'d mut State<'a>,
+			)> {
+				match refs.get(arena::Handle::from_raw(file_idx.into(), ())) {
+					Some((RawEntryRef::File(file), path)) => {
+						let c = state_mut(state, path.iter().copied()).unwrap();
+						Some((file.into_tmp(fs).into(), path, c))
+					}
+					Some((RawEntryRef::Dir(dir), path)) => {
+						let c = state_mut(state, path.iter().copied()).unwrap();
+						Some((dir.into_tmp(fs).into(), path, c))
+					}
+					_ => None,
+				}
+			}
 
 			fn get_dir<'a, 'b, 'c, 'd>(
 				fs: &'b Nrfs<MemDev>,
@@ -159,36 +215,41 @@ impl<'a> Test<'a> {
 
 			for op in self.ops.into_vec() {
 				match op {
-					Op::CreateFile { dir_idx, name } => {
+					Op::CreateFile { dir_idx, name, ext } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
-						if dir
-							.create_file(name, &Default::default())
-							.await
-							.unwrap()
-							.is_some()
-						{
+						if dir.create_file(name, &ext).await.unwrap().is_some() {
 							let r = d.insert(
 								name,
-								State::File { contents: Default::default(), indices: vec![] },
+								State::File {
+									contents: Default::default(),
+									indices: Default::default(),
+									ext_unix: Default::default(),
+									ext_mtime: Default::default(),
+								},
 							);
 							assert!(r.is_none());
 						} else {
 							assert!(d.contains_key(name));
 						}
 					}
-					Op::CreateDir { dir_idx, name, options } => {
+					Op::CreateDir { dir_idx, name, options, ext } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
 						if dir
-							.create_dir(name, &options, &Default::default())
+							.create_dir(name, &options, &ext)
 							.await
 							.unwrap()
 							.is_some()
 						{
 							let r = d.insert(
 								name,
-								State::Dir { children: Default::default(), indices: vec![] },
+								State::Dir {
+									children: Default::default(),
+									indices: Default::default(),
+									ext_unix: Default::default(),
+									ext_mtime: Default::default(),
+								},
 							);
 							assert!(r.is_none());
 						} else {
@@ -330,7 +391,7 @@ impl<'a> Test<'a> {
 							//   - if the entry is a directory it is empty
 							match d.remove(name).unwrap() {
 								State::File { indices, .. } => assert!(indices.is_empty()),
-								State::Dir { children, indices } => {
+								State::Dir { children, indices, .. } => {
 									assert!(children.is_empty());
 									assert!(indices.is_empty());
 								}
@@ -343,10 +404,32 @@ impl<'a> Test<'a> {
 							match d.get(name) {
 								None => {}
 								Some(State::File { indices, .. }) => assert!(!indices.is_empty()),
-								Some(State::Dir { children, indices }) => {
+								Some(State::Dir { children, indices, .. }) => {
 									assert!(!children.is_empty() || !indices.is_empty())
 								}
 							}
+						}
+					}
+					Op::SetExtUnix { idx, ext } => {
+						let Some((entry, _, _)) = get(&self.fs, &refs, &mut state, idx) else { continue };
+						entry.set_ext_unix(&ext).await.unwrap();
+					}
+					Op::SetExtMtime { idx, ext } => {
+						let Some((entry, _, _)) = get(&self.fs, &refs, &mut state, idx) else { continue };
+						entry.set_ext_mtime(&ext).await.unwrap();
+					}
+					Op::GetExt { idx } => {
+						let Some((entry, _, e)) = get(&self.fs, &refs, &mut state, idx) else { continue };
+						let data = entry.data().await.unwrap();
+						if let Some(data) = data.ext_unix {
+							let ext = e.ext_unix_mut();
+							assert_eq!(ext.permissions, data.permissions);
+							assert_eq!(ext.uid(), data.uid());
+							assert_eq!(ext.gid(), data.gid());
+						}
+						if let Some(data) = data.ext_mtime {
+							let ext = e.ext_mtime_mut();
+							assert_eq!(ext.mtime, data.mtime);
 						}
 					}
 				}
@@ -369,7 +452,14 @@ use Op::*;
 
 #[test]
 fn mem_forget_dirref_into_raw() {
-	Test::new(1 << 16, [Root, CreateFile { dir_idx: 0, name: b"".into() }]).run()
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: b"".into(), ext: Default::default() },
+		],
+	)
+	.run()
 }
 
 /// Op::Transfer did not mem::forget to_dir if from_dir wasn't found.
@@ -380,7 +470,7 @@ fn fuzz_transfer_mem_forget() {
 		[
 			Root,
 			Transfer { from_dir_idx: 57164, from: b"".into(), to_dir_idx: 0, to: b"".into() },
-			CreateFile { dir_idx: 0, name: b"".into() },
+			CreateFile { dir_idx: 0, name: b"".into(), ext: Default::default() },
 		],
 	)
 	.run()
@@ -392,7 +482,7 @@ fn rename_unref_nochild() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: b"".into() },
+			CreateFile { dir_idx: 0, name: b"".into(), ext: Default::default() },
 			Rename { dir_idx: 0, from: b"".into(), to: b"a".into() },
 		],
 	)
@@ -405,10 +495,10 @@ fn rename_remove_stale_index() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[0]).into() },
-			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[0]).into(), ext: Default::default() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
 			Rename { dir_idx: 0, from: (&[]).into(), to: (&[255]).into() },
-			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
 		],
 	)
 	.run()
@@ -426,10 +516,11 @@ fn move_child_indices() {
 				options: DirOptions::new(&[
 					0, 0, 0, 0, 0, 0, 2, 135, 135, 135, 135, 255, 0, 255, 255, 90,
 				]),
+				ext: Default::default(),
 			},
 			Get { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[255]).into() },
-			CreateFile { dir_idx: 0, name: (&[0]).into() },
+			CreateFile { dir_idx: 0, name: (&[255]).into(), ext: Default::default() },
+			CreateFile { dir_idx: 0, name: (&[0]).into(), ext: Default::default() },
 		],
 	)
 	.run()
@@ -447,9 +538,10 @@ fn resize_move_child_indices() {
 				options: DirOptions::new(&[
 					0, 0, 0, 0, 0, 2, 0, 0, 0, 135, 135, 255, 0, 255, 255, 90,
 				]),
+				ext: Default::default(),
 			},
 			Get { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[245]).into() },
+			CreateFile { dir_idx: 0, name: (&[245]).into(), ext: Default::default() },
 		],
 	)
 	.run()
@@ -462,7 +554,7 @@ fn fuzz_read_empty() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
 			Get { dir_idx: 0, name: (&[]).into() },
 			Read { file_idx: 1, offset: 211106232402237, amount: 16384 },
 		],
@@ -476,7 +568,7 @@ fn fuzz_rename_update_path() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
 			Get { dir_idx: 0, name: (&[]).into() },
 			Rename { dir_idx: 0, from: (&[]).into(), to: (&[254]).into() },
 			Write { file_idx: 1, offset: 0, amount: 0 },
@@ -497,6 +589,7 @@ fn transfer_circular_reference() {
 				dir_idx: 0,
 				name: (&[]).into(),
 				options: DirOptions::new(&[89, 89, 0, 225, 0, 0, 0, 1, 0, 0, 0, 12, 0, 0, 1, 254]),
+				ext: Default::default(),
 			},
 			Get { dir_idx: 0, name: (&[]).into() },
 			Transfer { from_dir_idx: 0, from: (&[]).into(), to_dir_idx: 1, to: (&[]).into() },
@@ -511,11 +604,15 @@ fn rename_leaked_ref() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[85, 90, 85, 85, 85, 85, 85, 85]).into() },
-			CreateFile { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[93, 223]).into() },
+			CreateFile {
+				dir_idx: 0,
+				name: (&[85, 90, 85, 85, 85, 85, 85, 85]).into(),
+				ext: Default::default(),
+			},
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
+			CreateFile { dir_idx: 0, name: (&[93, 223]).into(), ext: Default::default() },
 			Get { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[93, 131]).into() },
+			CreateFile { dir_idx: 0, name: (&[93, 131]).into(), ext: Default::default() },
 			Get { dir_idx: 0, name: (&[]).into() },
 			Transfer { from_dir_idx: 0, from: (&[]).into(), to_dir_idx: 0, to: (&[]).into() },
 		],
@@ -529,12 +626,12 @@ fn resize_children_backshift() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[93, 131]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
+			CreateFile { dir_idx: 0, name: (&[93, 131]).into(), ext: Default::default() },
 			Get { dir_idx: 0, name: (&[93, 131]).into() },
 			Get { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[0]).into() },
-			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[0]).into(), ext: Default::default() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
 		],
 	)
 	.run()
@@ -546,13 +643,25 @@ fn insert_child_move_misuse() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[85, 90, 85, 85, 85, 85, 85, 85]).into() },
-			CreateFile { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[93, 223, 43, 0, 255, 255, 255, 255]).into() },
+			CreateFile {
+				dir_idx: 0,
+				name: (&[85, 90, 85, 85, 85, 85, 85, 85]).into(),
+				ext: Default::default(),
+			},
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
+			CreateFile {
+				dir_idx: 0,
+				name: (&[93, 223, 43, 0, 255, 255, 255, 255]).into(),
+				ext: Default::default(),
+			},
 			Get { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[93, 131, 239, 85, 98, 255, 77, 250]).into() },
+			CreateFile {
+				dir_idx: 0,
+				name: (&[93, 131, 239, 85, 98, 255, 77, 250]).into(),
+				ext: Default::default(),
+			},
 			Get { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[0]).into() },
+			CreateFile { dir_idx: 0, name: (&[0]).into(), ext: Default::default() },
 		],
 	)
 	.run();
@@ -564,10 +673,10 @@ fn file_borrow_error() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[0]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
+			CreateFile { dir_idx: 0, name: (&[0]).into(), ext: Default::default() },
 			Get { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[127]).into() },
+			CreateFile { dir_idx: 0, name: (&[127]).into(), ext: Default::default() },
 			Rename { dir_idx: 0, from: (&[0]).into(), to: (&[]).into() },
 		],
 	)
@@ -580,10 +689,10 @@ fn file_resize_embed_truncated() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
 			Get { dir_idx: 0, name: (&[]).into() },
 			Resize { file_idx: 1, len: 60 },
-			CreateFile { dir_idx: 4864, name: (&[]).into() },
+			CreateFile { dir_idx: 4864, name: (&[]).into(), ext: Default::default() },
 			Get { dir_idx: 0, name: (&[]).into() },
 			Resize { file_idx: 1, len: 31232 },
 		],
@@ -598,9 +707,9 @@ fn fuzz_op_remove() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
 			Remove { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
 		],
 	)
 	.run()
@@ -612,8 +721,12 @@ fn rename_fail_dangling_ref() {
 		1 << 16,
 		[
 			Root,
-			CreateFile { dir_idx: 0, name: (&[]).into() },
-			CreateFile { dir_idx: 0, name: (&[95, 223, 43, 65, 255, 255, 255, 255]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into(), ext: Default::default() },
+			CreateFile {
+				dir_idx: 0,
+				name: (&[95, 223, 43, 65, 255, 255, 255, 255]).into(),
+				ext: Default::default(),
+			},
 			Get { dir_idx: 0, name: (&[]).into() },
 			Rename {
 				dir_idx: 0,
@@ -622,6 +735,15 @@ fn rename_fail_dangling_ref() {
 			},
 			Remove { dir_idx: 0, name: (&[]).into() },
 		],
+	)
+	.run()
+}
+
+#[test]
+fn set_ext_borrow_error() {
+	Test::new(
+		1 << 16,
+		[Root, SetExtMtime { idx: 0, ext: Default::default() }],
 	)
 	.run()
 }
