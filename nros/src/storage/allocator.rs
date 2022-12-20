@@ -17,7 +17,7 @@ struct Entry {
 raw!(Entry);
 
 #[derive(Debug)]
-pub struct Allocator {
+pub(super) struct Allocator {
 	/// Map of *allocated* blocks.
 	///
 	/// Gaps can be freely used.
@@ -35,6 +35,25 @@ pub struct Allocator {
 	///
 	/// Should be freed on log rewrite.
 	stack: Vec<Record>,
+	/// Allocator statistics.
+	///
+	/// Used for debugging.
+	pub(super) statistics: Statistics,
+}
+
+/// Statistics for this session.
+///
+/// Used for debugging.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Statistics {
+	/// Total amount of allocations in this session.
+	pub allocations: u64,
+	/// Total amount of deallocations in this session.
+	pub deallocations: u64,
+	/// Total amount of blocks allocated in this session.
+	pub allocated_blocks: u64,
+	/// Total amount of blocks deallocated in this session.
+	pub deallocated_blocks: u64,
 }
 
 impl Default for Allocator {
@@ -45,6 +64,7 @@ impl Default for Allocator {
 			free_map: Default::default(),
 			dirty_map: Default::default(),
 			stack: Default::default(),
+			statistics: Default::default(),
 		}
 	}
 }
@@ -54,6 +74,8 @@ impl Allocator {
 	where
 		D: Dev,
 	{
+		trace!("load");
+
 		let mut alloc_map = RangeSet::new();
 		let mut stack = Vec::new();
 
@@ -67,7 +89,7 @@ impl Allocator {
 			// Get record data
 			let data = store.read(&record).await?;
 			let lba = u64::from(record.lba);
-			let size = u64::from(u32::from(record.length));
+			let size = u64::try_from(data.len()).unwrap();
 			let end = usize::try_from(size).unwrap();
 
 			// Add record itself
@@ -108,11 +130,14 @@ impl Allocator {
 			record = util::get_record(&data, 0);
 		}
 
+		trace!("    ==>  {:?}", &alloc_map);
+
 		Ok(Self {
 			alloc_map,
 			free_map: Default::default(),
 			dirty_map: Default::default(),
 			stack,
+			statistics: Default::default(),
 		})
 	}
 
@@ -125,6 +150,8 @@ impl Allocator {
 			if r.end - r.start >= blocks {
 				self.alloc_map.insert(r.start..r.start + blocks);
 				self.dirty_map.insert(r.start..r.start + blocks);
+				self.statistics.allocations += 1;
+				self.statistics.allocated_blocks += blocks;
 				return Some(r.start);
 			}
 		}
@@ -149,6 +176,8 @@ impl Allocator {
 				self.free_map.insert(i..i + 1);
 			}
 		}
+		self.statistics.deallocations += 1;
+		self.statistics.deallocated_blocks += blocks;
 	}
 
 	/// Ensure all blocks in a range are allocated.
@@ -168,12 +197,19 @@ impl Allocator {
 	where
 		D: Dev,
 	{
+		trace!("save");
+		trace!("  alloc  {:?}", &self.alloc_map);
+		trace!("  dirty  {:?}", &self.dirty_map);
+		trace!("  free   {:?}", &self.free_map);
+
 		// Update map
 		// TODO it would be nice if we could avoid a Clone.
 		let mut alloc_map = self.alloc_map.clone();
 		for r in self.free_map.iter() {
 			alloc_map.remove(r.clone());
 		}
+
+		trace!("    -->  {:?}", &alloc_map);
 
 		// Save map
 		// TODO avoid writing the entire log every time.
@@ -222,7 +258,7 @@ impl Allocator {
 			// as it is possible all memory is used up by the current writes.
 			let mut b = store.devices.alloc(len).await?;
 
-			prev = Record::pack(&buf, b.get_mut(), store.compression());
+			prev = Record::pack(&buf, b.get_mut(), store.compression(), store.block_size());
 			let len = store.round_block_size(prev.length.into());
 			b.shrink(len);
 
@@ -254,6 +290,8 @@ impl Allocator {
 		self.alloc_map = alloc_map;
 		self.free_map = Default::default();
 		self.dirty_map = Default::default();
+
+		trace!("    ==>  {:?}", &self.alloc_map);
 
 		Ok(())
 	}

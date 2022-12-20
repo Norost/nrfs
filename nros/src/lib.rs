@@ -1,5 +1,6 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
+#![feature(cell_update)]
 #![feature(hash_drain_filter)]
 #![feature(int_roundings)]
 #![feature(iterator_try_collect)]
@@ -47,14 +48,14 @@ macro_rules! n2e {
 		}
 
 		impl $name {
-			pub(crate) fn from_raw(n: u8) -> Option<Self> {
+			pub fn from_raw(n: u8) -> Option<Self> {
 				Some(match n {
 					$($v => Self::$k,)*
 					_ => return None,
 				})
 			}
 
-			pub(crate) fn to_raw(self) -> u8 {
+			pub fn to_raw(self) -> u8 {
 				self as _
 			}
 		}
@@ -69,9 +70,8 @@ macro_rules! n2e {
 /// Tracing in debug mode only.
 macro_rules! trace {
 	($($arg:tt)*) => {{
-		let _f = format_args!($($arg)*);
 		#[cfg(feature = "trace")]
-		eprintln!("[DEBUG] {}", _f);
+		eprintln!("[DEBUG] {}", format_args!($($arg)*));
 	}};
 }
 
@@ -84,12 +84,9 @@ pub mod test;
 mod util;
 
 pub use {
-	cache::{CacheStatus, Tree},
+	cache::{Statistics, Tree},
 	record::{Compression, MaxRecordSize},
-	storage::{
-		dev::{Allocator, Buf, MemDev, MemDevError},
-		Dev, Store,
-	},
+	storage::{dev, Dev, Store},
 };
 
 use {cache::Cache, core::fmt, record::Record, storage::DevSet};
@@ -149,32 +146,6 @@ impl<D: Dev> Nros<D> {
 		self.store.create_pair().await
 	}
 
-	/// Increment the reference count to an object.
-	///
-	/// This operation returns `false` if the reference count would overflow.
-	///
-	/// This function *must not* be used on invalid objects!
-	///
-	/// # Panics
-	///
-	/// If the object is invalid.
-	pub async fn increase_reference_count(&self, id: u64) -> Result<bool, Error<D>> {
-		self.store.increase_refcount(id).await
-	}
-
-	/// Decrement the reference count to an object.
-	///
-	/// If this count reaches zero the object is automatically freed.
-	///
-	/// This function *must not* be used on invalid objects!
-	///
-	/// # Panics
-	///
-	/// If the object is invalid.
-	pub async fn decrease_reference_count(&self, id: u64) -> Result<(), Error<D>> {
-		self.store.decrease_refcount(id).await
-	}
-
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
 		self.store.finish_transaction().await
 	}
@@ -185,6 +156,10 @@ impl<D: Dev> Nros<D> {
 
 	/// Return an owned reference to an object.
 	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
+		assert!(
+			id != u64::MAX,
+			"ID u64::MAX is reserved for the object list"
+		);
 		self.store.get(id).await
 	}
 
@@ -199,9 +174,9 @@ impl<D: Dev> Nros<D> {
 		self.store.resize_cache(global_max, write_max).await
 	}
 
-	/// Get cache status.
-	pub fn cache_status(&self) -> CacheStatus {
-		self.store.cache_status()
+	/// Get statistics for current session.
+	pub fn statistics(&self) -> Statistics {
+		self.store.statistics()
 	}
 
 	/// Unmount the object store.

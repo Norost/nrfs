@@ -6,7 +6,7 @@ mod dev;
 mod record;
 
 use {
-	crate::*,
+	crate::{dev::*, *},
 	core::{
 		future::Future,
 		task::{Context, Poll},
@@ -54,6 +54,37 @@ where
 fn create_fs() {
 	run(async {
 		new(MaxRecordSize::K1).await;
+	})
+}
+
+#[test]
+fn create_destroy() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+		obj.decrease_reference_count().await.unwrap();
+	})
+}
+
+#[test]
+#[should_panic]
+fn create_destroy_twice() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+		let obj = s.create().await.unwrap();
+		obj.decrease_reference_count().await.unwrap();
+		// Should panic here, as reference count is already zero
+		obj.decrease_reference_count().await.unwrap();
+	})
+}
+
+#[test]
+fn create_destroy_pair() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+		let (obj_a, obj_b) = s.create_pair().await.unwrap();
+		obj_a.decrease_reference_count().await.unwrap();
+		obj_b.decrease_reference_count().await.unwrap();
 	})
 }
 

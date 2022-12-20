@@ -5,19 +5,17 @@ mod tree_data;
 pub use tree::Tree;
 
 use {
-	crate::{util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
+	crate::{storage, util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{Ref, RefCell, RefMut},
-		fmt,
-		future,
-		mem,
+		fmt, future, mem,
 		ops::{Deref, DerefMut},
 		task::{Poll, Waker},
 	},
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
 	std::collections::hash_map,
-	tree_data::{ReadWriteLock, ResizeLock, FmtTreeData, TreeData},
+	tree_data::{FmtTreeData, ReadWriteLock, ResizeLock, TreeData},
 };
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
@@ -269,8 +267,8 @@ impl<D: Dev> Cache<D> {
 		b[mem::size_of::<Record>()..].copy_from_slice(rec.as_ref());
 		self.write_object_table(id, &b).await?;
 
-		let a = Tree::new(self, id).await?;
-		let b = Tree::new(self, id).await?;
+		let a = Tree::new(self, id + 0).await?;
+		let b = Tree::new(self, id + 1).await?;
 		Ok((a, b))
 	}
 
@@ -351,51 +349,6 @@ impl<D: Dev> Cache<D> {
 		}
 
 		self.dealloc_id(from);
-		Ok(())
-	}
-
-	/// Increase the reference count of an object.
-	///
-	/// This may fail if the reference count is already [`u16::MAX`].
-	/// On failure, the returned value is `false`, otherwise `true`.
-	pub async fn increase_refcount(&self, id: u64) -> Result<bool, Error<D>> {
-		// Ensure the root doesn't get modified while we're working with it.
-		let _lock = ResizeLock::new(&self.data, id).await;
-
-		let mut root = self.get_object_root(id).await?;
-		assert!(root.references != 0, "invalid object");
-		if root.references == u16::MAX {
-			return Ok(false);
-		}
-		root.references += 1;
-		self.set_object_root(id, &root).await?;
-
-		Ok(true)
-	}
-
-	/// Decrease the reference count of an object.
-	///
-	/// If the reference count reaches 0 the object is destroyed.
-	///
-	/// # Panics
-	///
-	/// If the object isn't valid, i.e. reference count is already 0.
-	pub async fn decrease_refcount(&self, id: u64) -> Result<(), Error<D>> {
-		// Ensure the root doesn't get modified while we're working with it.
-		let lock = ResizeLock::new(&self.data, id).await;
-
-		let mut root = self.get_object_root(id).await?;
-		assert!(root.references != 0, "invalid object");
-		root.references -= 1;
-		self.set_object_root(id, &root).await?;
-
-		drop(lock);
-
-		if root.references == 0 {
-			// Free space.
-			self.get(id).await?.resize(0).await?;
-		}
-
 		Ok(())
 	}
 
@@ -728,20 +681,21 @@ impl<D: Dev> Cache<D> {
 		let global_max = self.data.borrow().lrus.global.cache_max;
 		self.resize_cache(global_max, 0).await?;
 		debug_assert_eq!(
-			self.cache_status().dirty_usage,
+			self.statistics().dirty_usage,
 			0,
 			"not all data has been flushed"
 		);
 		Ok(self.store)
 	}
 
-	/// Get cache status
-	pub fn cache_status(&self) -> CacheStatus {
+	/// Get statistics for this sesion.
+	pub fn statistics(&self) -> Statistics {
 		#[cfg(test)]
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();
-		CacheStatus {
+		Statistics {
+			storage: self.store.statistics(),
 			global_usage: data.lrus.global.cache_size,
 			dirty_usage: data.lrus.dirty.cache_size,
 		}
@@ -887,17 +841,6 @@ impl fmt::Debug for Entry {
 	}
 }
 
-/// Summary of [`Cache`] status.
-///
-/// Returned by [`Cache::cache_status`].
-#[derive(Debug)]
-pub struct CacheStatus {
-	/// Total amount of memory used by record data, including dirty data.
-	pub global_usage: usize,
-	/// Total amount of memory used by dirty record data.
-	pub dirty_usage: usize,
-}
-
 /// Mutable reference to a cache entry.
 ///
 /// This will mark the entry as dirty when it is dropped.
@@ -950,4 +893,17 @@ impl Drop for EntryRefMut<'_> {
 		self.lrus.global.cache_size += self.entry.data.len();
 		self.lrus.global.cache_size -= self.original_len;
 	}
+}
+
+/// Statistics for this session.
+///
+/// Used for debugging.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Statistics {
+	/// Storage statistics.
+	pub storage: storage::Statistics,
+	/// Total amount of memory used by record data, including dirty data.
+	pub global_usage: usize,
+	/// Total amount of memory used by dirty record data.
+	pub dirty_usage: usize,
 }

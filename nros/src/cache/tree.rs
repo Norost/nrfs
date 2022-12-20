@@ -861,6 +861,60 @@ impl<'a, D: Dev> Tree<'a, D> {
 		self.cache.move_object(other.id, self.id).await
 	}
 
+	/// Increase the reference count of an object.
+	///
+	/// This may fail if the reference count is already [`u16::MAX`].
+	/// On failure, the returned value is `false`, otherwise `true`.
+	pub async fn increase_reference_count(&self) -> Result<bool, Error<D>> {
+		debug_assert_ne!(
+			self.id, OBJECT_LIST_ID,
+			"object list isn't reference counted"
+		);
+
+		// Ensure the root doesn't get modified while we're working with it.
+		let _lock = ResizeLock::new(&self.cache.data, self.id).await;
+
+		// Use get_object_root as the object list doesn't use reference counting.
+		let mut root = self.cache.get_object_root(self.id).await?;
+		debug_assert!(root.references != 0, "invalid object");
+		if root.references == u16::MAX {
+			return Ok(false);
+		}
+		root.references += 1;
+		self.cache.set_object_root(self.id, &root).await?;
+
+		Ok(true)
+	}
+
+	/// Decrease the reference count of an object.
+	///
+	/// If the reference count reaches 0 the object is destroyed
+	/// and the tree should not be used anymore.
+	pub async fn decrease_reference_count(&self) -> Result<(), Error<D>> {
+		debug_assert_ne!(
+			self.id, OBJECT_LIST_ID,
+			"object list isn't reference counted"
+		);
+
+		// Ensure the root doesn't get modified while we're working with it.
+		let lock = ResizeLock::new(&self.cache.data, self.id).await;
+
+		// Use get_object_root as the object list doesn't use reference counting.
+		let mut root = self.cache.get_object_root(self.id).await?;
+		debug_assert!(root.references != 0, "invalid object");
+		root.references -= 1;
+		self.cache.set_object_root(self.id, &root).await?;
+
+		drop(lock);
+
+		if root.references == 0 {
+			// Free space.
+			self.resize(0).await?;
+		}
+
+		Ok(())
+	}
+
 	/// Get the maximum record size.
 	fn max_record_size(&self) -> MaxRecordSize {
 		self.cache.max_record_size()
