@@ -121,14 +121,14 @@ impl<'a> Test<'a> {
 				state: &'d mut State<'a>,
 				dir_idx: u16,
 			) -> Option<(
-				DirRef<'b, MemDev>,
+				TmpRef<'c, DirRef<'b, MemDev>>,
 				&'c [&'a Name],
 				&'d mut FxHashMap<&'a Name, State<'a>>,
 			)> {
 				match refs.get(arena::Handle::from_raw(dir_idx.into(), ())) {
 					Some((RawEntryRef::Dir(dir), path)) => {
 						let d = state_mut(state, path.iter().copied()).unwrap().dir_mut();
-						Some((DirRef::from_raw(fs, dir.clone()), path, d))
+						Some((dir.into_tmp(fs), path, d))
 					}
 					_ => None,
 				}
@@ -139,11 +139,15 @@ impl<'a> Test<'a> {
 				refs: &'c arena::Arena<(RawEntryRef, Box<[&'a Name]>), ()>,
 				state: &'d mut State<'a>,
 				file_idx: u16,
-			) -> Option<(FileRef<'b, MemDev>, &'c [&'a Name], &'d mut RangeSet<u64>)> {
+			) -> Option<(
+				TmpRef<'c, FileRef<'b, MemDev>>,
+				&'c [&'a Name],
+				&'d mut RangeSet<u64>,
+			)> {
 				match refs.get(arena::Handle::from_raw(file_idx.into(), ())) {
 					Some((RawEntryRef::File(file), path)) => {
 						let c = state_mut(state, path.iter().copied()).unwrap().file_mut();
-						Some((FileRef::from_raw(fs, file.clone()), path, c))
+						Some((file.into_tmp(fs), path, c))
 					}
 					_ => None,
 				}
@@ -172,8 +176,6 @@ impl<'a> Test<'a> {
 						} else {
 							assert!(d.contains_key(name));
 						}
-
-						let _ = dir.into_raw();
 					}
 					Op::CreateDir { dir_idx, name, key } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
@@ -192,8 +194,6 @@ impl<'a> Test<'a> {
 						} else {
 							assert!(d.contains_key(name));
 						}
-
-						let _ = dir.into_raw();
 					}
 					Op::Get { dir_idx, name } => {
 						let Some((dir, path, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
@@ -211,8 +211,6 @@ impl<'a> Test<'a> {
 						} else {
 							assert!(!d.contains_key(name));
 						}
-
-						let _ = dir.into_raw();
 					}
 					Op::Root => {
 						let dir = self.fs.root_dir().await.unwrap();
@@ -255,8 +253,6 @@ impl<'a> Test<'a> {
 						if amount > 0 {
 							contents.insert(offset..offset + u64::from(amount));
 						}
-
-						let _ = file.into_raw();
 					}
 					Op::Read { file_idx, offset, amount } => {
 						let Some((file, _, contents)) = get_file(&self.fs, &refs, &mut state, file_idx) else { continue };
@@ -275,8 +271,6 @@ impl<'a> Test<'a> {
 								assert_eq!(contents.contains(&i), *c == 1);
 							}
 						}
-
-						let _ = file.into_raw();
 					}
 					Op::Resize { file_idx, len } => {
 						let Some((file, _, contents)) = get_file(&self.fs, &refs, &mut state, file_idx) else { continue };
@@ -284,7 +278,6 @@ impl<'a> Test<'a> {
 						if len < u64::MAX {
 							contents.remove(len..u64::MAX);
 						}
-						let _ = file.into_raw();
 					}
 					Op::Rename { dir_idx, from, to } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
@@ -303,14 +296,10 @@ impl<'a> Test<'a> {
 							// Rename failed
 							assert!(!d.contains_key(from) || d.contains_key(to));
 						}
-						let _ = dir.into_raw();
 					}
 					Op::Transfer { from_dir_idx, from, to_dir_idx, to } => {
 						let Some((to_dir, to_path, _)) = get_dir(&self.fs, &refs, &mut state, to_dir_idx) else { continue };
-						let Some((from_dir, _, d)) = get_dir(&self.fs, &refs, &mut state, from_dir_idx) else {
-							let _ = to_dir.into_raw();
-							continue
-						};
+						let Some((from_dir, _, d)) = get_dir(&self.fs, &refs, &mut state, from_dir_idx) else { continue };
 
 						if from_dir.transfer(from, &to_dir, to).await.unwrap() {
 							// Transfer succeeded
@@ -331,9 +320,6 @@ impl<'a> Test<'a> {
 							// There are many possible reasons for failure, so don't bother
 							// checking for the conditions yet.
 						}
-
-						let _ = from_dir.into_raw();
-						let _ = to_dir.into_raw();
 					}
 					Op::Remove { dir_idx, name } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
@@ -362,8 +348,6 @@ impl<'a> Test<'a> {
 								}
 							}
 						}
-
-						let _ = dir.into_raw();
 					}
 				}
 			}

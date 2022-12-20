@@ -70,7 +70,10 @@ pub use {
 use {
 	core::{
 		cell::{RefCell, RefMut},
-		fmt, mem,
+		fmt,
+		marker::PhantomData,
+		mem,
+		ops::{Deref, DerefMut},
 	},
 	dir::{Child, DirData, Entry},
 	file::FileData,
@@ -431,6 +434,54 @@ impl<'a, D: Dev> UnknownRef<'a, D> {
 		UnknownRef(FileRef::from_raw(fs, raw.0))
 	}
 }
+
+/// "temporary" reference, i.e reference that doesn't run its destructor on drop.
+pub struct TmpRef<'a, T> {
+	inner: mem::ManuallyDrop<T>,
+	_marker: PhantomData<&'a ()>,
+}
+
+impl<'a, T> Deref for TmpRef<'a, T> {
+	type Target = T;
+
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl<'a, T> DerefMut for TmpRef<'a, T> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.inner
+	}
+}
+
+macro_rules! impl_tmpref {
+	($raw:ident $ref:ident $var:ident) => {
+		impl $raw {
+			/// Create a "temporary" reference.
+			///
+			/// See [`TmpRef`] for more information.
+			pub fn into_tmp<'s, 'f, D: Dev>(&'s self, fs: &'f Nrfs<D>) -> TmpRef<'s, $ref<'f, D>> {
+				TmpRef {
+					inner: mem::ManuallyDrop::new($ref::from_raw(fs, self.clone())),
+					_marker: PhantomData,
+				}
+			}
+		}
+
+		impl<'s, 'f, D: Dev> From<TmpRef<'s, $ref<'f, D>>> for TmpRef<'s, Entry<'f, D>> {
+			fn from(TmpRef { inner, _marker }: TmpRef<'s, $ref<'f, D>>) -> Self {
+				let inner = mem::ManuallyDrop::into_inner(inner);
+				Self { inner: mem::ManuallyDrop::new(Entry::$var(inner)), _marker }
+			}
+		}
+	};
+}
+
+impl_tmpref!(RawDirRef DirRef Dir);
+impl_tmpref!(RawFileRef FileRef File);
+impl_tmpref!(RawSymRef SymRef Sym);
+impl_tmpref!(RawUnknownRef UnknownRef Unknown);
 
 pub enum Error<D>
 where
