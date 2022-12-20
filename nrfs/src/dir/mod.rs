@@ -1204,7 +1204,7 @@ impl DirOptions {
 		Self {
 			capacity_p2: Default::default(),
 			extensions: Default::default(),
-			hasher: Hasher::SipHasher13(siphasher::sip::SipHasher13::new_with_key(key)),
+			hasher: Hasher::SipHasher13(*key),
 		}
 	}
 }

@@ -459,7 +459,7 @@ impl fmt::Debug for RawEntryKey {
 /// Avoids the need to borrow `DirData` redundantly.
 #[derive(Clone, Copy, Debug)]
 pub enum Hasher {
-	SipHasher13(SipHasher13),
+	SipHasher13([u8; 16]),
 }
 
 impl Hasher {
@@ -469,7 +469,7 @@ impl Hasher {
 	/// the second element represents the key.
 	pub fn to_raw(self) -> (u8, [u8; 16]) {
 		match self {
-			Self::SipHasher13(h) => (1, h.key()),
+			Self::SipHasher13(h) => (1, h),
 		}
 	}
 
@@ -478,7 +478,7 @@ impl Hasher {
 	/// Fails if the hasher type is unknown.
 	pub fn from_raw(ty: u8, key: &[u8; 16]) -> Option<Self> {
 		Some(match ty {
-			1 => Self::SipHasher13(SipHasher13::new_with_key(key)),
+			1 => Self::SipHasher13(*key),
 			_ => return None,
 		})
 	}
@@ -487,7 +487,8 @@ impl Hasher {
 	fn hash(&self, key: &[u8]) -> u32 {
 		use core::hash::Hasher;
 		match self {
-			Self::SipHasher13(mut h) => {
+			Self::SipHasher13(key) => {
+				let mut h = SipHasher13::new_with_key(key);
 				h.write(key);
 				h.finish() as _
 			}
