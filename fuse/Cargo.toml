@@ -19,6 +19,12 @@ git = "https://git.sr.ht/~demindiro/arena"
 [dependencies.env_logger]
 version = "0.9"
 
+[dependencies.futures-executor]
+version = "0.3"
+
+[dependencies.futures-util]
+version = "0.3"
+
 [dependencies.log]
 version = "0.4.6"
 features = ["max_level_trace", "release_max_level_debug"]
