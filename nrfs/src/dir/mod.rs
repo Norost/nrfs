@@ -1053,6 +1053,18 @@ impl<'a, D: Dev> Entry<'a, D> {
 
 	/// Get entry data, i.e. data in the entry itself, excluding heap data.
 	pub async fn data(&self) -> Result<EntryData, Error<D>> {
+		// Root dir doesn't have a parent, so it has no attributes.
+		// TODO we should store attrs in filesystem header.
+		if let Self::Dir(d) = self {
+			if d.id == 0 {
+				return Ok(EntryData {
+					key: RawEntryKey::Embed { len: 0, data: [0; 14] },
+					ext_unix: None,
+					ext_mtime: None,
+				});
+			}
+		}
+
 		let fs = self.fs();
 		let DataHeader { parent_index, parent_id, .. } = *self.data_header();
 		let dir = Dir::new(fs, parent_id);
