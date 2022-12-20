@@ -117,7 +117,8 @@ async fn make(args: Make) {
 	let mut extensions = nrfs::dir::EnableExtensions::default();
 	extensions.add_unix();
 	extensions.add_mtime();
-	let opt = nrfs::DirOptions { extensions, ..Default::default() };
+	// FIXME randomize key
+	let opt = nrfs::DirOptions { extensions, ..nrfs::DirOptions::new(&[0; 16]) };
 	let rec_size = nrfs::MaxRecordSize::K128; // TODO
 	let compr = match args.compression {
 		Compression::None => nrfs::Compression::None,
@@ -125,7 +126,7 @@ async fn make(args: Make) {
 	};
 
 	let s = FileDev::new(f, block_size);
-	let mut nrfs = Nrfs::new(
+	let nrfs = Nrfs::new(
 		[[s]],
 		block_size,
 		rec_size,
@@ -138,14 +139,14 @@ async fn make(args: Make) {
 	.unwrap();
 
 	if let Some(d) = &args.directory {
-		let mut root = nrfs.root_dir().await.unwrap();
-		add_files(&mut root, d, &args, extensions).await;
+		let root = nrfs.root_dir().await.unwrap();
+		add_files(root, d, &args, extensions).await;
 	}
 	dbg!(nrfs.statistics());
 	nrfs.unmount().await.unwrap();
 
 	async fn add_files(
-		root: &mut nrfs::Dir<'_, FileDev>,
+		root: nrfs::DirRef<'_, FileDev>,
 		from: &Path,
 		args: &Make,
 		extensions: nrfs::dir::EnableExtensions,
@@ -182,18 +183,19 @@ async fn make(args: Make) {
 
 			if m.is_file() || (m.is_symlink() && args.follow) {
 				let c = fs::read(f.path()).unwrap();
-				let mut f = root.create_file(n, &ext).await.unwrap().unwrap();
+				let f = root.create_file(n, &ext).await.unwrap().unwrap();
 				f.write_grow(0, &c).await.unwrap();
 			} else if m.is_dir() {
-				let opt = nrfs::DirOptions { extensions, ..Default::default() };
-				let mut d = root.create_dir(n, &opt, &ext).await.unwrap().unwrap();
+				// FIXME randomize key
+				let opt = nrfs::DirOptions { extensions, ..nrfs::DirOptions::new(&[0; 16]) };
+				let d = root.create_dir(n, &opt, &ext).await.unwrap().unwrap();
 				let path = f.path();
 				let fut: Pin<Box<dyn Future<Output = ()>>> =
-					Box::pin(add_files(&mut d, &path, args, extensions));
+					Box::pin(add_files(d, &path, args, extensions));
 				fut.await
 			} else if m.is_symlink() {
 				let c = fs::read_link(f.path()).unwrap();
-				let mut f = root.create_sym(n, &ext).await.unwrap().unwrap();
+				let f = root.create_sym(n, &ext).await.unwrap().unwrap();
 				f.write_grow(0, c.to_str().unwrap().as_bytes())
 					.await
 					.unwrap();
@@ -213,15 +215,15 @@ async fn dump(args: Dump) {
 	f.read_exact(&mut block_size_p2).unwrap();
 
 	let s = FileDev::new(f, BlockSize::from_raw(block_size_p2[0]).unwrap());
-	let mut nrfs = Nrfs::load([s].into(), args.global_cache_size, args.dirty_cache_size)
+	let nrfs = Nrfs::load([s].into(), args.global_cache_size, args.dirty_cache_size)
 		.await
 		.unwrap();
 
-	let mut root = nrfs.root_dir().await.unwrap();
+	let root = nrfs.root_dir().await.unwrap();
 	println!("block size: 2**{}", block_size_p2[0]);
-	list_files(&mut root, 0).await;
+	list_files(root, 0).await;
 
-	async fn list_files(root: &mut nrfs::Dir<'_, FileDev>, indent: usize) {
+	async fn list_files(root: nrfs::DirRef<'_, FileDev>, indent: usize) {
 		let mut i = Some(0);
 		while let Some((mut e, next_i)) = async {
 			if let Some(i) = i {
@@ -232,7 +234,9 @@ async fn dump(args: Dump) {
 		}
 		.await
 		{
-			if let Some(u) = e.ext_unix() {
+			let data = e.data().await.unwrap();
+
+			if let Some(u) = data.ext_unix {
 				let mut s = [0; 9];
 				for (i, (c, l)) in s.iter_mut().zip(b"rwxrwxrwx").rev().enumerate() {
 					*c = [b'-', *l][usize::from(u.permissions & 1 << i != 0)];
@@ -245,7 +249,7 @@ async fn dump(args: Dump) {
 				);
 			}
 
-			if let Some(t) = e.ext_mtime() {
+			if let Some(t) = data.ext_mtime {
 				let secs = (t.mtime / 1000) as i64;
 				let millis = t.mtime.rem_euclid(1000) as u32;
 				let t = chrono::NaiveDateTime::from_timestamp(secs, millis * 1_000_000);
@@ -253,43 +257,49 @@ async fn dump(args: Dump) {
 				print!("{:<23}", format!("{}", t));
 			}
 
-			let name = String::from_utf8_lossy(e.name()).into_owned();
-			if e.is_file() {
-				let mut f = e.as_file().unwrap();
-				println!(
-					"{:>8}  {:>indent$}{}f {}",
-					f.len().await.unwrap(),
-					"",
-					[' ', 'e'][usize::from(e.is_embedded())],
-					name,
-					indent = indent
-				);
-			} else if e.is_dir() {
-				let mut d = e.as_dir().await.unwrap().unwrap();
-				println!(
-					"{:>8}  {:>indent$} d {}",
-					d.len(),
-					"",
-					name,
-					indent = indent
-				);
-				let fut: Pin<Box<dyn Future<Output = _>>> =
-					Box::pin(list_files(&mut d, indent + 2));
-				fut.await;
-			} else if e.is_sym() {
-				let mut f = e.as_sym().unwrap();
-				let len = f.len().await.unwrap();
-				let mut buf = vec![0; len as _];
-				f.read_exact(0, &mut buf).await.unwrap();
-				let link = String::from_utf8_lossy(&buf);
-				println!(
-					"{:>indent$}{}s {} -> {}",
-					"",
-					[' ', 'e'][usize::from(e.is_embedded())],
-					name,
-					link,
-					indent = 10 + indent
-				);
+			let name = e.key(&data).await.unwrap();
+			let name = String::from_utf8_lossy(name.as_ref()).into_owned();
+
+			use nrfs::dir::Entry;
+			match e {
+				Entry::File(f) => {
+					println!(
+						"{:>8}  {:>indent$}{}f {}",
+						f.len().await.unwrap(),
+						"",
+						[' ', 'e'][usize::from(f.is_embedded())],
+						name,
+						indent = indent
+					);
+				}
+				Entry::Dir(d) => {
+					println!(
+						"{:>8}  {:>indent$} d {}",
+						d.len().await.unwrap(),
+						"",
+						name,
+						indent = indent
+					);
+					let fut: Pin<Box<dyn Future<Output = _>>> = Box::pin(list_files(d, indent + 2));
+					fut.await;
+				}
+				Entry::Sym(f) => {
+					let len = f.len().await.unwrap();
+					let mut buf = vec![0; len as _];
+					f.read_exact(0, &mut buf).await.unwrap();
+					let link = String::from_utf8_lossy(&buf);
+					println!(
+						"{:>indent$}{}s {} -> {}",
+						"",
+						[' ', 'e'][usize::from(f.is_embedded())],
+						name,
+						link,
+						indent = 10 + indent
+					);
+				}
+				Entry::Unknown(_) => {
+					println!("     ???  {:>indent$} ? {}", "", name, indent = indent);
+				}
 			}
 			i = next_i
 		}
