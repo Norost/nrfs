@@ -70,7 +70,7 @@ pub enum Op<'a> {
 	/// Create a file.
 	CreateFile { dir_idx: u16, name: &'a Name },
 	/// Create a directory.
-	CreateDir { dir_idx: u16, name: &'a Name, key: [u8; 16] },
+	CreateDir { dir_idx: u16, name: &'a Name, options: DirOptions },
 	/// Get an entry.
 	Get { dir_idx: u16, name: &'a Name },
 	/// Get a reference to the root directory.
@@ -177,11 +177,11 @@ impl<'a> Test<'a> {
 							assert!(d.contains_key(name));
 						}
 					}
-					Op::CreateDir { dir_idx, name, key } => {
+					Op::CreateDir { dir_idx, name, options } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
 						if dir
-							.create_dir(name, &DirOptions::new(&key), &Default::default())
+							.create_dir(name, &options, &Default::default())
 							.await
 							.unwrap()
 							.is_some()
@@ -423,9 +423,9 @@ fn move_child_indices() {
 			CreateDir {
 				dir_idx: 0,
 				name: (&[]).into(),
-				key: [
+				options: DirOptions::new(&[
 					0, 0, 0, 0, 0, 0, 2, 135, 135, 135, 135, 255, 0, 255, 255, 90,
-				],
+				]),
 			},
 			Get { dir_idx: 0, name: (&[]).into() },
 			CreateFile { dir_idx: 0, name: (&[255]).into() },
@@ -444,7 +444,9 @@ fn resize_move_child_indices() {
 			CreateDir {
 				dir_idx: 0,
 				name: (&[]).into(),
-				key: [0, 0, 0, 0, 0, 2, 0, 0, 0, 135, 135, 255, 0, 255, 255, 90],
+				options: DirOptions::new(&[
+					0, 0, 0, 0, 0, 2, 0, 0, 0, 135, 135, 255, 0, 255, 255, 90,
+				]),
 			},
 			Get { dir_idx: 0, name: (&[]).into() },
 			CreateFile { dir_idx: 0, name: (&[245]).into() },
@@ -494,7 +496,7 @@ fn transfer_circular_reference() {
 			CreateDir {
 				dir_idx: 0,
 				name: (&[]).into(),
-				key: [89, 89, 0, 225, 0, 0, 0, 1, 0, 0, 0, 12, 0, 0, 1, 254],
+				options: DirOptions::new(&[89, 89, 0, 225, 0, 0, 0, 1, 0, 0, 0, 12, 0, 0, 1, 254]),
 			},
 			Get { dir_idx: 0, name: (&[]).into() },
 			Transfer { from_dir_idx: 0, from: (&[]).into(), to_dir_idx: 1, to: (&[]).into() },

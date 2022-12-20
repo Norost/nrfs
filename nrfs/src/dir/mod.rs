@@ -48,10 +48,8 @@ pub struct DirData {
 	header_len8: u8,
 	/// The length of a single entry, in multiples of 8 bytes.
 	entry_len8: u8,
-	/// The size of the hashmap, as a power of 2.
-	///
-	/// This is always between `0` and `32`.
-	hashmap_size_p2: u8,
+	/// The size of the hashmap.
+	hashmap_size: DirSize,
 	/// The hasher used to index the hashmap.
 	hasher: Hasher,
 	/// The amount of entries in the hashmap.
@@ -96,7 +94,7 @@ impl DirData {
 
 	/// The current size of the hashmap
 	fn capacity(&self) -> u64 {
-		1 << self.hashmap_size_p2
+		1u64 << self.hashmap_size
 	}
 
 	/// The size of the hashmap minus one.
@@ -138,7 +136,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		&self,
 		object: &nros::Tree<'a, D>,
 		data: &mut DirData,
-		map_size_p2: u8,
+		map_size: DirSize,
 	) -> Result<(), Error<D>> {
 		// Create header
 		let (hash_ty, hash_key) = data.hasher.to_raw();
@@ -147,7 +145,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		buf[0] = data.header_len8;
 		buf[1] = data.entry_len8;
 		buf[2] = hash_ty;
-		buf[3] = map_size_p2;
+		buf[3] = map_size.to_raw();
 		buf[4..8].copy_from_slice(&data.entry_count.to_le_bytes());
 		buf[8..24].copy_from_slice(&hash_key);
 		let mut header_offt = 24;
@@ -172,7 +170,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let header_len = usize::from(data.header_len8) * 8;
 		drop(data);
 		object
-			.resize(hashmap_base + (u64::from(entry_size) << map_size_p2))
+			.resize(hashmap_base + (u64::from(entry_size) << map_size))
 			.await?;
 		object.write(0, &buf[..header_len]).await?;
 
@@ -185,7 +183,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		Ok(HashMap::new(
 			self,
 			obj,
-			self.fs.dir_data(self.id).hashmap_size_p2,
+			self.fs.dir_data(self.id).hashmap_size,
 		))
 	}
 
@@ -502,32 +500,31 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 		let mut data = self.fs.dir_data(self.id);
 
-		let hashmap_size_p2 = data.hashmap_size_p2;
+		let hashmap_size = data.hashmap_size;
 		let capacity = data.capacity();
 		let entry_count = data.entry_count;
 
-		let new_size_p2 = if grow {
-			debug_assert!(hashmap_size_p2 < 32, "hashmap is already at maximum size");
-			hashmap_size_p2 + 1
+		let new_size = if grow {
+			// FIXME don't panic, we should just fail.
+			DirSize::from_raw(hashmap_size.to_raw() + 1).unwrap()
 		} else {
-			debug_assert!(hashmap_size_p2 > 0, "hashmap is already at minimum size");
 			debug_assert!(
 				u64::from(entry_count) < capacity / 2,
 				"not enough free slots"
 			);
-			hashmap_size_p2 - 1
+			DirSize::from_raw(hashmap_size.to_raw() - 1).expect("hashmap is already at min size")
 		};
 
 		let mut children = mem::take(&mut data.children);
 		drop(data);
 
 		let new_map = self.fs.storage.create().await?;
-		self.init_with_size(&new_map, &mut self.fs.dir_data(self.id), new_size_p2)
+		self.init_with_size(&new_map, &mut self.fs.dir_data(self.id), new_size)
 			.await?;
 
 		// Copy entries
 		let cur_map = self.hashmap().await?;
-		let new_map = HashMap::new(self, new_map, new_size_p2);
+		let new_map = HashMap::new(self, new_map, new_size);
 		for index in (0..capacity).map(|i| i as _) {
 			let e = cur_map.get(index).await?;
 			if e.ty == 0 {
@@ -557,7 +554,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 			.replace_with(new_map.map)
 			.await?;
 		let mut data = self.fs.dir_data(self.id);
-		data.hashmap_size_p2 = new_size_p2;
+		data.hashmap_size = new_size;
 		drop(data);
 		self.save_alloc_log().await
 	}
@@ -739,7 +736,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			children: Default::default(),
 			header_len8: ((header_len + 7) / 8).try_into().unwrap(),
 			entry_len8: ((entry_len + 7) / 8).try_into().unwrap(),
-			hashmap_size_p2: options.capacity_p2,
+			hashmap_size: options.capacity,
 			hasher: options.hasher,
 			entry_count: 0,
 			unix_offset,
@@ -753,7 +750,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 
 		// Create hashmap
 		Dir::new(fs, slf_id)
-			.init_with_size(&slf_obj, &mut data, options.capacity_p2)
+			.init_with_size(&slf_obj, &mut data, options.capacity)
 			.await?;
 
 		// Insert directory data & return reference.
@@ -844,6 +841,9 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			buf;
 		let entry_count = u32::from_le_bytes([a, b, c, d]);
 
+		// FIXME return error
+		let hashmap_size = DirSize::from_raw(hashmap_size_p2).unwrap();
+
 		// Get extensions
 		let mut unix_offset = None;
 		let mut mtime_offset = None;
@@ -877,7 +877,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			children: Default::default(),
 			header_len8,
 			entry_len8,
-			hashmap_size_p2,
+			hashmap_size,
 			hasher: Hasher::from_raw(hash_algorithm, &hash_key).unwrap(), // TODO
 			entry_count,
 			unix_offset,
@@ -1189,8 +1189,9 @@ struct NewEntry<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
 pub struct DirOptions {
-	pub capacity_p2: u8,
+	pub capacity: DirSize,
 	pub extensions: EnableExtensions,
 	pub hasher: Hasher,
 }
@@ -1201,14 +1202,95 @@ impl DirOptions {
 	/// It is an alternative to [`Default`] which forces a key to be provided.
 	pub fn new(key: &[u8; 16]) -> Self {
 		Self {
-			capacity_p2: Default::default(),
+			capacity: Default::default(),
 			extensions: Default::default(),
 			hasher: Hasher::SipHasher13(*key),
 		}
 	}
 }
 
+macro_rules! n2e {
+	(@INTERNAL $op:ident :: $fn:ident $int:ident $name:ident) => {
+		impl core::ops::$op<$name> for $int {
+			type Output = $int;
+
+			fn $fn(self, rhs: $name) -> Self::Output {
+				self.$fn(rhs.to_raw())
+			}
+		}
+	};
+	{
+		$(#[doc = $doc:literal])*
+		[$name:ident]
+		$($v:literal $k:ident)*
+	} => {
+		$(#[doc = $doc])*
+		#[derive(Clone, Copy, Default, Debug)]
+		#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
+		pub enum $name {
+			#[default]
+			$($k = $v,)*
+		}
+
+		impl $name {
+			pub fn from_raw(n: u8) -> Option<Self> {
+				Some(match n {
+					$($v => Self::$k,)*
+					_ => return None,
+				})
+			}
+
+			pub fn to_raw(self) -> u8 {
+				self as _
+			}
+		}
+
+		n2e!(@INTERNAL Shl::shl u64 $name);
+		n2e!(@INTERNAL Shr::shr u64 $name);
+		n2e!(@INTERNAL Shl::shl usize $name);
+		n2e!(@INTERNAL Shr::shr usize $name);
+	};
+}
+
+n2e! {
+	/// The capacity of the directory.
+	[DirSize]
+	0 B1
+	1 B2
+	2 B4
+	3 B8
+	4 B16
+	5 B32
+	6 B64
+	7 B128
+	8 B256
+	9 B512
+	10 K1
+	11 K2
+	12 K4
+	13 K8
+	14 K16
+	15 K32
+	16 K64
+	17 K128
+	18 K256
+	19 K512
+	20 M1
+	21 M2
+	22 M4
+	23 M8
+	24 M16
+	25 M32
+	26 M64
+	27 M128
+	28 M256
+	29 M512
+	30 G1
+	31 G2
+}
+
 #[derive(Clone, Copy, Default, Debug)]
+#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
 pub struct EnableExtensions(u8);
 
 macro_rules! ext {

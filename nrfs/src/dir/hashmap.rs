@@ -1,7 +1,7 @@
 use {
 	super::{
 		ext, Child, Dir, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM, TY_FILE,
-		TY_NONE, TY_SYM,
+		TY_NONE, TY_SYM, DirSize,
 	},
 	crate::{read_exact, write_all},
 	core::{cell::RefMut, fmt},
@@ -27,9 +27,9 @@ pub(super) struct HashMap<'a, D: Dev> {
 
 impl<'a, D: Dev> HashMap<'a, D> {
 	/// Create a [`HashMap`] helper structure.
-	pub fn new(dir: &Dir<'a, D>, map: Tree<'a, D>, size_p2: u8) -> Self {
+	pub fn new(dir: &Dir<'a, D>, map: Tree<'a, D>, size: DirSize) -> Self {
 		let &Dir { fs, id: dir_id } = dir;
-		Self { fs, dir_id, map, mask: 1u32.wrapping_shl(size_p2.into()).wrapping_sub(1) }
+		Self { fs, dir_id, map, mask: 1u32.wrapping_shl(size.to_raw().into()).wrapping_sub(1) }
 	}
 
 	/// Remove an entry.
@@ -458,6 +458,7 @@ impl fmt::Debug for RawEntryKey {
 ///
 /// Avoids the need to borrow `DirData` redundantly.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
 pub enum Hasher {
 	SipHasher13([u8; 16]),
 }
