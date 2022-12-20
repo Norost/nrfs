@@ -161,6 +161,7 @@ fn remove_large_file() {
 
 		// Write at least 64KiB of data so an object is guaranteed to be allocated.
 		file.write_grow(0, &[0; 1 << 16]).await.unwrap();
+		drop(file);
 
 		assert!(root.remove(b"file".into()).await.unwrap());
 	})

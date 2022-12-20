@@ -286,24 +286,23 @@ impl<'a, D: Dev> Dir<'a, D> {
 	/// It will fail for entries whose type is unknown to avoid space leaks.
 	async fn remove_at(&self, entry: &RawEntry) -> Result<bool, Error<D>> {
 		trace!("remove_at {:?}", (entry.index, &entry.key));
+
+		// Only destroy types we recognize
 		let Ok(ty) = entry.ty() else { return Ok(false) };
 
+		// If a child is present, don't remove as we don't want dangling references.
+		if self
+			.fs
+			.dir_data(self.id)
+			.children
+			.contains_key(&entry.index)
+		{
+			return Ok(false);
+		}
+
+		// Remove from map.
 		self.update_entry_count(|x| x - 1).await?;
 		self.hashmap().await?.remove_at(entry.index).await?;
-
-		// Remove child if present.
-		let mut data = self.fs.dir_data(self.id);
-		if let Some(child) = data.children.remove(&entry.index) {
-			// Reduce own reference count as the child will no longer reference us.
-			data.header.reference_count -= 1;
-			drop(data);
-			match child {
-				Child::File(idx) => self.fs.file_data(idx).header.make_dangling(),
-				Child::Dir(id) => self.fs.dir_data(id).header.make_dangling(),
-			};
-		} else {
-			drop(data);
-		}
 
 		// Deallocate key if stored on heap
 		match entry.key {

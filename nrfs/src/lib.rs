@@ -292,8 +292,7 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 
 			// If this is the root dir there is no parent dir,
 			// so check first.
-			// Also check if dangling.
-			if self.id != 0 && !header.is_dangling() {
+			if self.id != 0 {
 				// Remove itself from parent directory.
 				let dir = fs
 					.directories
@@ -307,9 +306,7 @@ impl<D: Dev> Drop for DirRef<'_, D> {
 
 				// Reconstruct DirRef to adjust reference count of dir appropriately.
 				drop(fs);
-				if !header.is_dangling() {
-					drop(DirRef { fs: self.fs, id: header.parent_id });
-				}
+				drop(DirRef { fs: self.fs, id: header.parent_id });
 			}
 		}
 	}
@@ -369,15 +366,12 @@ impl<D: Dev> Drop for FileRef<'_, D> {
 		data.header.reference_count -= 1;
 		if data.header.reference_count == 0 {
 			// Remove itself from parent directory.
-			// Only if not dangling.
-			if !data.header.is_dangling() {
-				let dir = fs
-					.directories
-					.get_mut(&data.header.parent_id)
-					.expect("parent dir is not loaded");
-				let _r = dir.children.remove(&data.header.parent_index);
-				debug_assert!(matches!(_r, Some(Child::File(idx)) if idx == self.idx));
-			}
+			let dir = fs
+				.directories
+				.get_mut(&data.header.parent_id)
+				.expect("parent dir is not loaded");
+			let _r = dir.children.remove(&data.header.parent_index);
+			debug_assert!(matches!(_r, Some(Child::File(idx)) if idx == self.idx));
 
 			// Remove filedata.
 			let data = fs
@@ -387,9 +381,7 @@ impl<D: Dev> Drop for FileRef<'_, D> {
 
 			// Reconstruct DirRef to adjust reference count of dir appropriately.
 			drop(fs_ref);
-			if !data.header.is_dangling() {
-				drop(DirRef { fs: self.fs, id: data.header.parent_id });
-			}
+			drop(DirRef { fs: self.fs, id: data.header.parent_id });
 		}
 	}
 }
@@ -523,18 +515,5 @@ impl DataHeader {
 	/// Create a new header.
 	fn new(parent_id: u64, parent_index: u32) -> Self {
 		Self { reference_count: 1, parent_id, parent_index }
-	}
-
-	/// Check if the data is dangling,
-	/// i.e. it has no parent.
-	fn is_dangling(&self) -> bool {
-		self.parent_id == u64::MAX && self.parent_index == u32::MAX
-	}
-
-	/// Make the data dangling.
-	fn make_dangling(&mut self) {
-		debug_assert!(!self.is_dangling(), "already dangling");
-		self.parent_id = u64::MAX;
-		self.parent_index = u32::MAX;
 	}
 }
