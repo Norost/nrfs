@@ -87,6 +87,8 @@ pub enum Op<'a> {
 	Rename { dir_idx: u16, from: &'a Name, to: &'a Name },
 	/// Transfer an entry.
 	Transfer { from_dir_idx: u16, from: &'a Name, to_dir_idx: u16, to: &'a Name },
+	/// Remove an entry.
+	Remove { dir_idx: u16, name: &'a Name },
 }
 
 impl<'a> Arbitrary<'a> for Test<'a> {
@@ -333,6 +335,36 @@ impl<'a> Test<'a> {
 						let _ = from_dir.into_raw();
 						let _ = to_dir.into_raw();
 					}
+					Op::Remove { dir_idx, name } => {
+						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
+
+						if dir.remove(name).await.unwrap() {
+							// Remove succeeded:
+							// - the entry exists and there are no active refs.
+							//   - if the entry is a directory it is empty
+							match d.remove(name).unwrap() {
+								State::File { indices, .. } => assert!(indices.is_empty()),
+								State::Dir { children, indices } => {
+									assert!(children.is_empty());
+									assert!(indices.is_empty());
+								}
+							}
+						} else {
+							// Remove failed:
+							// - the entry doesn't exist.
+							// - the entry exists and there are active refs.
+							// - the entry is a non-empty directory.
+							match d.get(name) {
+								None => {}
+								Some(State::File { indices, .. }) => assert!(!indices.is_empty()),
+								Some(State::Dir { children, indices }) => {
+									assert!(!children.is_empty() || !indices.is_empty())
+								}
+							}
+						}
+
+						let _ = dir.into_raw();
+					}
 				}
 			}
 
@@ -568,6 +600,21 @@ fn file_resize_embed_truncated() {
 			CreateFile { dir_idx: 4864, name: (&[]).into() },
 			Get { dir_idx: 0, name: (&[]).into() },
 			Resize { file_idx: 1, len: 31232 },
+		],
+	)
+	.run()
+}
+
+/// Newly added op with bugs in the op handling :P
+#[test]
+fn fuzz_op_remove() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			Remove { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[]).into() },
 		],
 	)
 	.run()

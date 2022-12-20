@@ -25,6 +25,13 @@ const TY_SYM: u8 = 3;
 const TY_EMBED_FILE: u8 = 4;
 const TY_EMBED_SYM: u8 = 5;
 
+/// Constants used to manipulate the directory header.
+mod header {
+	pub mod offset {
+		pub const ENTRY_COUNT: u16 = 4;
+	}
+}
+
 /// Directory data only, which has no lifetimes.
 ///
 /// The map is located at ID.
@@ -321,13 +328,17 @@ impl<'a, D: Dev> Dir<'a, D> {
 					.await?;
 			}
 			Type::Dir { id } => {
+				// Ensure the directory is empty to avoid space leaks.
+				let map = self.fs.storage.get(id).await?;
+				let buf = &mut [0; 4];
+				read_exact(&map, header::offset::ENTRY_COUNT.into(), buf).await?;
+				let entry_count = u32::from_le_bytes(*buf);
+				if entry_count > 0 {
+					return Ok(false);
+				}
+
 				// Dereference map and heap.
-				self.fs
-					.storage
-					.get(id + 0)
-					.await?
-					.decrease_reference_count()
-					.await?;
+				map.decrease_reference_count().await?;
 				self.fs
 					.storage
 					.get(id + 1)
