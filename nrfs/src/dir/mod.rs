@@ -1012,19 +1012,6 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	fn dir(&self) -> Dir<'a, D> {
 		Dir::new(self.fs, self.id)
 	}
-
-	/// Destroy this dictionary.
-	///
-	/// Returns `false` on failure.
-	/// This operation will fail if the directory isn't empty.
-	pub async fn destroy(&self) -> Result<bool, Error<D>> {
-		if self.fs.dir_data(self.id).entry_count > 0 {
-			// Don't delete data if any active entries are in the directory to avoid space leaks.
-			return Ok(true);
-		}
-
-		todo!()
-	}
 }
 
 /// A single entry in a directory.
@@ -1096,23 +1083,6 @@ impl<'a, D: Dev> Entry<'a, D> {
 				Ok(Box::<Name>::try_from(name.into_boxed_slice()).unwrap())
 			}
 		}
-	}
-
-	/// Destroy this entry and the data it points to.
-	///
-	/// On failure `false` is returned.
-	///
-	/// If the entry is a directory which is not empty the function will fail.
-	///
-	/// If the type is [`Self::Unknown`] this function will fail.
-	pub async fn destroy(&self) -> Result<bool, Error<D>> {
-		match self {
-			Self::Dir(e) => e.destroy().await,
-			Self::File(e) => e.destroy().await.map(|()| true),
-			Self::Sym(e) => e.destroy().await.map(|()| true),
-			Self::Unknown(_) => return Ok(false),
-		}?;
-		Ok(true)
 	}
 
 	/// Get a reference to the filesystem containing this entry's data.

@@ -87,8 +87,6 @@ pub enum Op<'a> {
 	Rename { dir_idx: u16, from: &'a Name, to: &'a Name },
 	/// Transfer an entry.
 	Transfer { from_dir_idx: u16, from: &'a Name, to_dir_idx: u16, to: &'a Name },
-	/// Destroy an entry.
-	Destroy { idx: u16 },
 }
 
 impl<'a> Arbitrary<'a> for Test<'a> {
@@ -334,9 +332,6 @@ impl<'a> Test<'a> {
 
 						let _ = from_dir.into_raw();
 						let _ = to_dir.into_raw();
-					}
-					Op::Destroy { idx } => {
-						// TODO
 					}
 				}
 			}
