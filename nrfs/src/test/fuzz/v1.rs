@@ -603,3 +603,23 @@ fn fuzz_op_remove() {
 	)
 	.run()
 }
+
+#[test]
+fn rename_fail_dangling_ref() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile { dir_idx: 0, name: (&[]).into() },
+			CreateFile { dir_idx: 0, name: (&[95, 223, 43, 65, 255, 255, 255, 255]).into() },
+			Get { dir_idx: 0, name: (&[]).into() },
+			Rename {
+				dir_idx: 0,
+				from: (&[]).into(),
+				to: (&[95, 223, 43, 65, 255, 255, 255, 255]).into(),
+			},
+			Remove { dir_idx: 0, name: (&[]).into() },
+		],
+	)
+	.run()
+}

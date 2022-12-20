@@ -387,10 +387,17 @@ impl<'a, D: Dev> Dir<'a, D> {
 				return Ok(true);
 			} else {
 				// On failure, restore entry.
-				map.insert(old_entry, None).await?;
+				let index = map
+					.insert(old_entry, None)
+					.await?
+					.expect("failed to insert after remove");
 				if let Some(child) = child {
-					let _r = self.fs.dir_data(self.id).children.insert(old_index, child);
+					let _r = self.fs.dir_data(self.id).children.insert(index, child);
 					assert!(_r.is_none());
+					if index != old_index {
+						// The entry is not at its old position.
+						child.header(self.fs).parent_index = index;
+					}
 				}
 			}
 		}
