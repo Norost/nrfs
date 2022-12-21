@@ -490,12 +490,12 @@ impl Hasher {
 	}
 
 	/// Hash an arbitrary-sized key.
-	fn hash(&self, key: &[u8]) -> u32 {
+	fn hash(&self, data: &[u8]) -> u32 {
 		use core::hash::Hasher;
 		match self {
 			Self::SipHasher13(key) => {
 				let mut h = SipHasher13::new_with_key(key);
-				h.write(key);
+				h.write(data);
 				h.finish() as _
 			}
 		}
