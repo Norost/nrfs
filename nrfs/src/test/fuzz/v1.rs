@@ -1,5 +1,6 @@
 use {
 	super::*,
+	crate::dir::{DirSize, Hasher, RemoveError},
 	arbitrary::{Arbitrary, Unstructured},
 	core::mem,
 	rangemap::RangeSet,
@@ -385,29 +386,32 @@ impl<'a> Test<'a> {
 					Op::Remove { dir_idx, name } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
-						if dir.remove(name).await.unwrap() {
+						match dir.remove(name).await.unwrap() {
 							// Remove succeeded:
 							// - the entry exists and there are no active refs.
 							//   - if the entry is a directory it is empty
-							match d.remove(name).unwrap() {
+							Ok(()) => match d.remove(name).unwrap() {
 								State::File { indices, .. } => assert!(indices.is_empty()),
 								State::Dir { children, indices, .. } => {
 									assert!(children.is_empty());
 									assert!(indices.is_empty());
 								}
-							}
-						} else {
+							},
 							// Remove failed:
 							// - the entry doesn't exist.
+							Err(RemoveError::NotFound) => assert!(d.get(name).is_none()),
 							// - the entry exists and there are active refs.
-							// - the entry is a non-empty directory.
-							match d.get(name) {
-								None => {}
-								Some(State::File { indices, .. }) => assert!(!indices.is_empty()),
-								Some(State::Dir { children, indices, .. }) => {
-									assert!(!children.is_empty() || !indices.is_empty())
-								}
+							Err(RemoveError::LiveReference) => {
+								assert!(!d.get_mut(name).unwrap().indices_mut().is_empty())
 							}
+							// - the entry is a non-empty directory.
+							Err(RemoveError::NotEmpty) => {
+								let State::Dir { children, .. } = d.get(name).unwrap() else {
+									panic!()
+								};
+								assert!(!children.is_empty());
+							}
+							Err(RemoveError::UnknownType) => unreachable!(),
 						}
 					}
 					Op::SetExtUnix { idx, ext } => {
@@ -793,6 +797,44 @@ fn transfer_childless() {
 				ext: Extensions { unix: None, mtime: None },
 			},
 			Transfer { from_dir_idx: 23, from: (&[]).into(), to_dir_idx: 0, to: (&[]).into() },
+		],
+	)
+	.run()
+}
+
+/// This one somehow fixed itself, I haven't got a clue.
+#[test]
+fn magically_fixed_no_dirdata_with_id() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateDir {
+				dir_idx: 0,
+				name: (&[]).into(),
+				options: DirOptions {
+					capacity: DirSize::B512,
+					extensions: Default::default(),
+					hasher: Hasher::SipHasher13([
+						1, 0, 79, 79, 86, 79, 79, 252, 67, 58, 255, 255, 255, 255, 0, 0,
+					]),
+				},
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Get { dir_idx: 0, name: (&[]).into() },
+			Rename { dir_idx: 0, from: (&[]).into(), to: (&[0]).into() },
+			CreateDir {
+				dir_idx: 0,
+				name: (&[]).into(),
+				options: DirOptions {
+					capacity: DirSize::B1,
+					extensions: *EnableExtensions::default().add_unix().add_mtime(),
+					hasher: Hasher::SipHasher13([
+						113, 65, 67, 149, 67, 253, 0, 0, 25, 67, 0, 0, 1, 0, 0, 0,
+					]),
+				},
+				ext: Extensions { unix: None, mtime: None },
+			},
 		],
 	)
 	.run()

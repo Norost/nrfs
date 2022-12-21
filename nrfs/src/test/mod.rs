@@ -1,4 +1,5 @@
 mod dir;
+mod file;
 pub mod fuzz;
 
 use {
@@ -230,7 +231,7 @@ fn remove_file() {
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 3);
 
-		assert!(d.remove(b"hello".into()).await.unwrap());
+		d.remove(b"hello".into()).await.unwrap().unwrap();
 		assert_eq!(d.len().await.unwrap(), 2);
 
 		// Ensure no spooky entries appear when iterating
@@ -267,9 +268,9 @@ fn shrink() {
 			.await
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 3);
-		assert!(d.remove(b"hello".into()).await.unwrap());
+		d.remove(b"hello".into()).await.unwrap().unwrap();
 		assert_eq!(d.len().await.unwrap(), 2);
-		assert!(d.remove(b"exist".into()).await.unwrap());
+		d.remove(b"exist".into()).await.unwrap().unwrap();
 		assert_eq!(d.len().await.unwrap(), 1);
 
 		// Ensure no spooky entries appear when iterating
@@ -336,10 +337,10 @@ fn remove_collision() {
 		d.create_file(b"g".into(), &Default::default())
 			.await
 			.unwrap(); // e57630a8
-		assert!(d.remove(b"d".into()).await.unwrap());
+		d.remove(b"d".into()).await.unwrap().unwrap();
 		// If the hashmap is improperly implemented, the empty slot makes
 		// it impossible to find "g" with linear probing
-		assert!(d.remove(b"g".into()).await.unwrap());
+		d.remove(b"g".into()).await.unwrap().unwrap();
 	})
 }
 

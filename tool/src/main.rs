@@ -259,7 +259,6 @@ async fn dump(args: Dump) {
 			}
 
 			let name = e.key(&data).await.unwrap();
-			let name = String::from_utf8_lossy(name.as_ref()).into_owned();
 
 			use nrfs::dir::Entry;
 			match e {

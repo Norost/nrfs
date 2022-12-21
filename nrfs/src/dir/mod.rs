@@ -6,8 +6,8 @@ pub use hashmap::Hasher;
 
 use {
 	crate::{
-		read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Idx, Name, Nrfs, SymRef,
-		UnknownRef,
+		file, read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Idx, Name, Nrfs,
+		SymRef, UnknownRef,
 	},
 	core::{cell::RefMut, mem},
 	hashmap::*,
@@ -31,6 +31,14 @@ const TY_EMBED_SYM: u8 = 5;
 mod header {
 	pub mod offset {
 		pub const ENTRY_COUNT: u16 = 4;
+	}
+}
+
+/// Constants used to manipulate entry headers.
+mod entry {
+	pub mod offset {
+		pub const EMBED_DATA_OFFSET: u16 = 16;
+		pub const EMBED_DATA_LENGTH: u16 = 22;
 	}
 }
 
@@ -291,11 +299,11 @@ impl<'a, D: Dev> Dir<'a, D> {
 	///
 	/// Returns `true` if successful.
 	/// It will fail for entries whose type is unknown to avoid space leaks.
-	async fn remove_at(&self, entry: &RawEntry) -> Result<bool, Error<D>> {
+	async fn remove_at(&self, entry: &RawEntry) -> Result<Result<(), RemoveError>, Error<D>> {
 		trace!("remove_at {:?}", (entry.index, &entry.key));
 
 		// Only destroy types we recognize
-		let Ok(ty) = entry.ty() else { return Ok(false) };
+		let Ok(ty) = entry.ty() else { return Ok(Err(RemoveError::UnknownType)) };
 
 		// If a child is present, don't remove as we don't want dangling references.
 		if self
@@ -304,7 +312,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 			.children
 			.contains_key(&entry.index)
 		{
-			return Ok(false);
+			return Ok(Err(RemoveError::LiveReference));
 		}
 
 		// Remove from map.
@@ -334,7 +342,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 				read_exact(&map, header::offset::ENTRY_COUNT.into(), buf).await?;
 				let entry_count = u32::from_le_bytes(*buf);
 				if entry_count > 0 {
-					return Ok(false);
+					return Ok(Err(RemoveError::NotEmpty));
 				}
 
 				// Dereference map and heap.
@@ -356,7 +364,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		if self.fs.dir_data(self.id).should_shrink() {
 			self.shrink().await?;
 		}
-		Ok(true)
+		Ok(Ok(()))
 	}
 
 	/// Rename an entry.
@@ -444,7 +452,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 					// to_dir is a descendant of the entry to be moved, so cancel operation.
 					return Ok(false);
 				}
-				cur_id = self.fs.dir_data(id).header.parent_id;
+				cur_id = self.fs.dir_data(cur_id).header.parent_id;
 			}
 		}
 
@@ -455,23 +463,69 @@ impl<'a, D: Dev> Dir<'a, D> {
 		}
 		let to_map = to_dir.hashmap().await?;
 
-		// Remove the entry from the current directory.
+		// Try to insert
+
+		// Remove the entry and child from the current directory.
+		let mut data = self.fs.dir_data(self.id);
+		let child = data.children.remove(&entry.index);
+		if child.is_some() {
+			data.header.reference_count -= 1;
+		}
+		drop(data);
 		from_map.remove_at(entry.index).await?;
 		self.update_entry_count(|x| x - 1).await?;
+		// If it is an embedded file or symlink, also move out data.
+		let file_data = match entry.ty().expect("entry type should be known") {
+			Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
+				Some((offset, length))
+			}
+			_ => None,
+		};
 
-		// Insert the entry in the destination directory.
-		let from_index = entry.index;
-		let Some(to_index) = to_map.insert(entry, Some(to_name)).await? else { return Ok(false) };
+		// Insert the entry and child in the destination directory.
+		let Some(to_index) = to_map.insert(entry.clone(), Some(to_name)).await? else {
+			// The entry already exists at the destination directory,
+			// or couldn't insert it for some other reason.
+			//
+			// Reinsert back in current dir.
+			let index = from_map.insert(entry, Some(name)).await?
+				.expect("failed to reinsert entry");
+			self.update_entry_count(|x| x + 1).await?;
+			if let Some(child) = child {
+				let mut data = self.fs.dir_data(self.id);
+				data.children.insert(index, child);
+				data.header.reference_count += 1;
+				drop(data);
+				let mut header = child.header(self.fs);
+				header.parent_index = index;
+			}
+			return Ok(false)
+		};
 		to_dir.update_entry_count(|x| x + 1).await?;
 
-		// Fixup indices & reference counts in corresponding File or DirData
+		// If there is file data, transfer it.
+		let file_data = if let Some((offset, length)) = file_data {
+			// Read
+			let mut buf = vec![0; length.into()];
+			self.read_heap(offset, &mut buf).await?;
+			self.dealloc(offset, length.into()).await?;
 
-		// Fixup from dir if it has a child for from_index
-		let mut data = self.fs.dir_data(self.id);
-		if let Some(child) = data.children.remove(&from_index) {
-			data.header.reference_count -= 1;
-			drop(data);
+			// Write
+			let offset = to_dir.alloc(length.into()).await?;
+			to_dir.write_heap(offset, &buf).await?;
 
+			// Fixup entry
+			let [offt @ .., _, _] = offset.to_le_bytes();
+			to_map
+				.set_raw(to_index, entry::offset::EMBED_DATA_OFFSET, &offt)
+				.await?;
+
+			Some((offset, length))
+		} else {
+			None
+		};
+
+		if let Some(child) = child {
 			// Fixup to dir
 			let mut data = self.fs.dir_data(to_dir.id);
 			data.children.insert(to_index, child);
@@ -480,8 +534,21 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 			// Fixup child
 			let mut header = match child {
-				Child::File(idx) => RefMut::map(self.fs.file_data(idx), |d| &mut d.header),
-				Child::Dir(id) => RefMut::map(self.fs.dir_data(id), |d| &mut d.header),
+				Child::File(idx) => {
+					let mut data = self.fs.file_data(idx);
+					if let Some((offset, length)) = file_data {
+						// Fixup pointer to embedded data.
+						debug_assert!(matches!(&data.inner, file::Inner::Embed { .. }));
+						data.inner = file::Inner::Embed { offset, length };
+					} else {
+						debug_assert!(matches!(&data.inner, file::Inner::Object { .. }));
+					}
+					RefMut::map(data, |d| &mut d.header)
+				}
+				Child::Dir(id) => {
+					debug_assert!(file_data.is_none(), "dir is never embedded");
+					RefMut::map(self.fs.dir_data(id), |d| &mut d.header)
+				}
 			};
 			header.parent_id = to_dir.id;
 			header.parent_index = to_index;
@@ -1004,7 +1071,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 
 	/// Remove the entry with the given name.
 	///
-	/// Returns `true` if successful.
+	/// Returns `Ok(Ok(()))` if successful.
 	/// It will fail if no entry with the given name could be found.
 	/// It will also fail if the type is unknown to avoid space leaks.
 	///
@@ -1012,12 +1079,12 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	///
 	/// While it does check if the entry is a directory, it does not check whether it's empty.
 	/// It is up to the user to ensure the directory is empty.
-	pub async fn remove(&self, name: &Name) -> Result<bool, Error<D>> {
+	pub async fn remove(&self, name: &Name) -> Result<Result<(), RemoveError>, Error<D>> {
 		trace!("remove {:?}", name);
 		if let Some(e) = self.dir().hashmap().await?.find_index(name).await? {
 			self.dir().remove_at(&e).await
 		} else {
-			Ok(false)
+			Ok(Err(RemoveError::NotFound))
 		}
 	}
 
@@ -1359,4 +1426,19 @@ impl Child {
 			&Self::Dir(id) => RefMut::map(fs.dir_data(id), |d| &mut d.header),
 		}
 	}
+}
+
+/// An error that occured while trying to remove an entry.
+#[derive(Clone, Debug)]
+pub enum RemoveError {
+	/// The entry was not found.
+	NotFound,
+	/// The entry is a directory and was not empty.
+	NotEmpty,
+	/// There are live reference(s).
+	LiveReference,
+	/// The entry was not recognized.
+	///
+	/// Unrecognized entries aren't removed to avoid space leaks.
+	UnknownType,
 }

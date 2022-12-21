@@ -258,9 +258,7 @@ pub trait RawRef<'a, D: Dev>: Sized + 'a {
 	/// Create a reference from raw components.
 	///
 	/// *Must* only be used in combination with [`Self::into_raw`]!
-	fn from_raw(fs: &'a Nrfs<D>, raw: Self::Raw) -> Self
-	where
-		Self: 'a;
+	fn from_raw(fs: &'a Nrfs<D>, raw: Self::Raw) -> Self;
 }
 
 /// Reference to a directory object.

@@ -13,11 +13,11 @@ pub struct FileData {
 	/// Data header.
 	pub(crate) header: DataHeader,
 	/// Reference to file data, which may be a separate object or embedded on a directory's heap.
-	inner: Inner,
+	pub(crate) inner: Inner,
 }
 
 #[derive(Debug)]
-enum Inner {
+pub(crate) enum Inner {
 	/// The data is in a separate object.
 	Object { id: u64 },
 	/// The data is embedded on the parent directory's heap.

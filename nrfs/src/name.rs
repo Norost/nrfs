@@ -68,14 +68,14 @@ macro_rules! from {
 			impl<'a> From<&'a [u8; $n]> for &'a Name {
 				fn from(s: &'a [u8; $n]) -> Self {
 					// SAFETY: Name is repr(transparent)
-					unsafe { &*(<&[u8]>::from(s) as *const _ as *const _) }
+					unsafe { &*(s.as_slice() as *const _ as *const _) }
 				}
 			}
 
 			impl<'a> From<&'a mut [u8; $n]> for &'a mut Name {
 				fn from(s: &'a mut [u8; $n]) -> Self {
 					// SAFETY: Name is repr(transparent)
-					unsafe { &mut *(<&mut [u8]>::from(s) as *mut _ as *mut _) }
+					unsafe { &mut *(s.as_mut_slice() as *mut _ as *mut _) }
 				}
 			}
 		)*
@@ -115,22 +115,21 @@ alloc!(Box Rc Arc);
 
 impl fmt::Debug for Name {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		// TODO use Utf8Lossy when it becomes stable.
 		#[cfg(not(fuzzing))]
 		{
-			format_args!("{:?} @ {:?}", String::from_utf8_lossy(self), &self.0).fmt(f)
+			bstr::BStr::new(&self.0).fmt(f)
 		}
 		#[cfg(fuzzing)]
 		{
-			format_args!("(&{:?}).into()", &self.0).fmt(f)
+			// Cheat a little to make our lives easier.
+			format_args!("b{:?}.into()", &bstr::BStr::new(&self.0)).fmt(f)
 		}
 	}
 }
 
 impl fmt::Display for Name {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		// TODO use Utf8Lossy when it becomes stable.
-		String::from_utf8_lossy(self).fmt(f)
+		bstr::BStr::new(&self.0).fmt(f)
 	}
 }
 

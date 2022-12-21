@@ -1,4 +1,4 @@
-use super::*;
+use {super::*, crate::dir::RemoveError};
 
 #[test]
 fn get_root() {
@@ -144,7 +144,7 @@ fn remove_file() {
 			.unwrap()
 			.unwrap();
 
-		assert!(root.remove(b"file".into()).await.unwrap());
+		root.remove(b"file".into()).await.unwrap().unwrap();
 	})
 }
 
@@ -163,7 +163,7 @@ fn remove_large_file() {
 		file.write_grow(0, &[0; 1 << 16]).await.unwrap();
 		drop(file);
 
-		assert!(root.remove(b"file".into()).await.unwrap());
+		root.remove(b"file".into()).await.unwrap().unwrap();
 	})
 }
 
@@ -182,7 +182,7 @@ fn remove_empty_dir() {
 		.unwrap()
 		.unwrap();
 
-		assert!(root.remove(b"dir".into()).await.unwrap());
+		root.remove(b"dir".into()).await.unwrap().unwrap();
 	})
 }
 
@@ -205,7 +205,10 @@ fn remove_nonempty_dir() {
 		.unwrap()
 		.unwrap();
 
-		assert!(!root.remove(b"dir".into()).await.unwrap());
+		assert!(matches!(
+			root.remove(b"dir".into()).await.unwrap(),
+			Err(RemoveError::NotEmpty)
+		));
 	})
 }
 
@@ -219,7 +222,7 @@ fn remove_sym() {
 			.unwrap()
 			.unwrap();
 
-		assert!(root.remove(b"sym".into()).await.unwrap());
+		root.remove(b"sym".into()).await.unwrap().unwrap();
 	})
 }
 
@@ -236,10 +239,10 @@ fn remove_file_long_name() {
 		.unwrap()
 		.unwrap();
 
-		assert!(root
-			.remove(b"This is a string with len >= 14".into())
+		root.remove(b"This is a string with len >= 14".into())
 			.await
-			.unwrap());
+			.unwrap()
+			.unwrap();
 	})
 }
 
