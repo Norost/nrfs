@@ -599,10 +599,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 			if let Some(child) = children.remove(&index) {
 				let _r = self.fs.dir_data(self.id).children.insert(new_index, child);
 				debug_assert!(_r.is_none());
-				match child {
-					Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
-					Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
-				}
+				child.header(self.fs).parent_index = new_index;
 			}
 		}
 		debug_assert!(

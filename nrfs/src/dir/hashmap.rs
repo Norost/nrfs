@@ -338,10 +338,13 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 					// Insert unconditionally.
 					let index = insert_entry(self, None, entry).await?;
-					if let Some(c) = child.take() {
+					// Insert current child & take next child
+					child = if let Some(c) = child {
 						c.header(self.fs).parent_index = index;
-						child = self.fs.dir_data(self.dir_id).children.insert(index, c);
-					}
+						self.fs.dir_data(self.dir_id).children.insert(index, c)
+					} else {
+						self.fs.dir_data(self.dir_id).children.remove(&index)
+					};
 
 					// We found a free slot.
 					// Free at last!

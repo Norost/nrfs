@@ -837,3 +837,36 @@ fn magically_fixed_no_dirdata_with_id() {
 	)
 	.run()
 }
+
+#[test]
+fn f() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile {
+				dir_idx: 0,
+				name: b"".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Get { dir_idx: 0, name: b"".into() },
+			CreateFile {
+				dir_idx: 0,
+				name: b"5\xB9\0AAC\x13AA\xFF\xFF\xFF\xFF\xFF\xFF\0\0\0\0".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			CreateFile {
+				dir_idx: 0,
+				name: b"\x17\x17\x17\x17\x17\0\0\x17KJOOA\xFF\xFFAAAAA\0AA".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			CreateFile {
+				dir_idx: 0,
+				name: b"\xFF\x0f\0\x80\0/\0\x8D\x8D\x05\x07\0OOQ\x13".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Remove { dir_idx: 0, name: b"".into() },
+		],
+	)
+	.run()
+}
