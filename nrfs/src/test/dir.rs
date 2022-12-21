@@ -308,7 +308,7 @@ fn get_dir_existing_ref() {
 	run(async {
 		let fs = new().await;
 		let root = fs.root_dir().await.unwrap();
-		let dir = root
+		let _dir = root
 			.create_dir(
 				b"dir".into(),
 				&DirOptions::new(&[0; 16]),

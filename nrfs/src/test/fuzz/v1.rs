@@ -2,10 +2,8 @@ use {
 	super::*,
 	crate::dir::{DirSize, Hasher, RemoveError},
 	arbitrary::{Arbitrary, Unstructured},
-	core::mem,
 	rangemap::RangeSet,
-	rustc_hash::{FxHashMap, FxHashSet},
-	std::{collections::hash_map, rc::Rc},
+	rustc_hash::FxHashMap,
 };
 
 // TODO make part of public API.

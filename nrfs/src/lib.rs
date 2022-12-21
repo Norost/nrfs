@@ -97,11 +97,6 @@ struct NrfsData {
 	directories: FxHashMap<u64, DirData>,
 }
 
-impl NrfsData {
-	/// Remove a reference to a parent.
-	fn remove_parent_reference(&mut self) {}
-}
-
 /// NRFS filesystem manager.
 #[derive(Debug)]
 pub struct Nrfs<D: Dev> {

@@ -1,10 +1,10 @@
 use {
 	super::{
-		ext, Child, Dir, DirSize, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM,
-		TY_FILE, TY_NONE, TY_SYM,
+		ext, Dir, DirSize, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM, TY_FILE,
+		TY_NONE, TY_SYM,
 	},
 	crate::{read_exact, write_all},
-	core::{cell::RefMut, fmt},
+	core::fmt,
 	nros::{Dev, Tree},
 	siphasher::sip::SipHasher13,
 };
@@ -63,7 +63,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 						break;
 					}
 
-					// Copy the next entry over the current entry and move on to the next.
+					// Copy the next entry over the curren entry and move on to the next.
 					e.index = index;
 					self.set(&e).await?;
 
@@ -150,7 +150,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		};
 
 		// Get ID or (offset, len)
-		let (&id_or_offset, rem) = rem.split_array_ref::<8>();
+		let (&id_or_offset, _) = rem.split_array_ref::<8>();
 		let id_or_offset = u64::from_le_bytes(id_or_offset);
 
 		// Get extensions
@@ -209,13 +209,13 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		// Set extensions
 
 		// Set unix info
-		let ext_unix = unix_offset
+		unix_offset
 			.map(usize::from)
 			.and_then(|o| entry.ext_unix.map(|e| (o, e)))
 			.map(|(o, e)| buf[o..o + 8].copy_from_slice(&e.into_raw()));
 
 		// Get mtime info
-		let ext_mtime = mtime_offset
+		mtime_offset
 			.map(usize::from)
 			.and_then(|o| entry.ext_mtime.map(|e| (o, e)))
 			.map(|(o, e)| buf[o..o + 8].copy_from_slice(&e.into_raw()));

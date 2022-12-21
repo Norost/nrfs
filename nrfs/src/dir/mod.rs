@@ -13,7 +13,6 @@ use {
 	hashmap::*,
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
-	std::collections::hash_map,
 };
 
 // TODO determine a good load factor.
@@ -38,7 +37,6 @@ mod header {
 mod entry {
 	pub mod offset {
 		pub const EMBED_DATA_OFFSET: u16 = 16;
-		pub const EMBED_DATA_LENGTH: u16 = 22;
 	}
 }
 
@@ -812,7 +810,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		};
 
 		// Create objects.
-		let (slf_obj, heap_obj) = fs.storage.create_pair().await?;
+		let (slf_obj, _) = fs.storage.create_pair().await?;
 		let slf_id = slf_obj.id();
 
 		// Create hashmap

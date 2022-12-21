@@ -226,7 +226,7 @@ async fn dump(args: Dump) {
 
 	async fn list_files(root: nrfs::DirRef<'_, FileDev>, indent: usize) {
 		let mut i = Some(0);
-		while let Some((mut e, next_i)) = async {
+		while let Some((e, next_i)) = async {
 			if let Some(i) = i {
 				root.next_from(i).await.unwrap()
 			} else {
@@ -253,7 +253,8 @@ async fn dump(args: Dump) {
 			if let Some(t) = data.ext_mtime {
 				let secs = (t.mtime / 1000) as i64;
 				let millis = t.mtime.rem_euclid(1000) as u32;
-				let t = chrono::NaiveDateTime::from_timestamp(secs, millis * 1_000_000);
+				let t =
+					chrono::NaiveDateTime::from_timestamp_opt(secs, millis * 1_000_000).unwrap();
 				// Use format!() since NaiveDateTime doesn't respect flags
 				print!("{:<23}", format!("{}", t));
 			}

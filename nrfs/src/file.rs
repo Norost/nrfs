@@ -108,7 +108,6 @@ impl<'a, D: Dev> File<'a, D> {
 				if offset >= length {
 					return Ok(0);
 				}
-				let end = offt + u64::from(length);
 				// Truncate buffer so we don't read out-of-bounds.
 				let l = usize::try_from(length - offset).unwrap();
 				let l = buf.len().min(l);

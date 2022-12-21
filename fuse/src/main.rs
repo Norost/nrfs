@@ -4,25 +4,19 @@
 mod inode;
 
 use {
-	arena::{Arena, Handle},
 	fuser::*,
 	inode::InodeStore,
-	log::{debug, trace},
+	log::trace,
 	nrfs::{
-		dev::{FileDev, FileDevError},
+		dev::FileDev,
 		dir::{Entry, EntryData, RemoveError},
-		DirOptions, DirRef, FileRef, Name, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef, SymRef,
-		TmpRef,
+		DirOptions, DirRef, Name, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef,
 	},
 	std::{
-		collections::{HashMap, HashSet},
 		ffi::OsStr,
 		fs,
-		hash::Hash,
-		io::{self, Read, Seek, SeekFrom, Write},
 		os::unix::ffi::OsStrExt,
 		path::Path,
-		rc::Rc,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	},
 };
