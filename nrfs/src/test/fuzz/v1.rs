@@ -747,3 +747,53 @@ fn set_ext_borrow_error() {
 	)
 	.run()
 }
+
+#[test]
+fn transfer_childless() {
+	Test::new(
+		1 << 16,
+		// Yes, this is actually minimal.
+		// ...
+		// No it isn't, but idgaf
+		[
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			Root,
+			CreateDir {
+				dir_idx: 0,
+				name: (&[]).into(),
+				options: DirOptions::new(&[0; 16]),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Root,
+			Root,
+			Root,
+			Root,
+			Get { dir_idx: 0, name: (&[]).into() },
+			Transfer { from_dir_idx: 0, from: (&[]).into(), to_dir_idx: 0, to: (&[65]).into() },
+			CreateFile {
+				dir_idx: 23,
+				name: (&[]).into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Transfer { from_dir_idx: 23, from: (&[]).into(), to_dir_idx: 0, to: (&[]).into() },
+		],
+	)
+	.run()
+}

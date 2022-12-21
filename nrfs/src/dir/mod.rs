@@ -464,28 +464,26 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 		// Fixup indices & reference counts in corresponding File or DirData
 
-		// Fixup from dir
+		// Fixup from dir if it has a child for from_index
 		let mut data = self.fs.dir_data(self.id);
-		data.header.reference_count -= 1;
-		let child = data
-			.children
-			.remove(&from_index)
-			.expect("child not present");
-		drop(data);
+		if let Some(child) = data.children.remove(&from_index) {
+			data.header.reference_count -= 1;
+			drop(data);
 
-		// Fixup to dir
-		let mut data = self.fs.dir_data(to_dir.id);
-		data.children.insert(to_index, child);
-		data.header.reference_count += 1;
-		drop(data);
+			// Fixup to dir
+			let mut data = self.fs.dir_data(to_dir.id);
+			data.children.insert(to_index, child);
+			data.header.reference_count += 1;
+			drop(data);
 
-		// Fixup child
-		let mut header = match child {
-			Child::File(idx) => RefMut::map(self.fs.file_data(idx), |d| &mut d.header),
-			Child::Dir(id) => RefMut::map(self.fs.dir_data(id), |d| &mut d.header),
-		};
-		header.parent_id = to_dir.id;
-		header.parent_index = to_index;
+			// Fixup child
+			let mut header = match child {
+				Child::File(idx) => RefMut::map(self.fs.file_data(idx), |d| &mut d.header),
+				Child::Dir(id) => RefMut::map(self.fs.dir_data(id), |d| &mut d.header),
+			};
+			header.parent_id = to_dir.id;
+			header.parent_index = to_index;
+		}
 
 		Ok(true)
 	}
