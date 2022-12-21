@@ -354,7 +354,6 @@ impl<D: Dev> Cache<D> {
 
 	/// Finish the current transaction, committing any changes to the underlying devices.
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
-
 		// First flush cache
 		let data = self.data.borrow();
 		let global_max = data.lrus.global.cache_max;

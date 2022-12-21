@@ -8,7 +8,7 @@ members = [
 
 [profile.release]
 debug = true # for flamegraph
-#lto = "fat"
+lto = "fat"
 opt-level = 3
 codegen-units = 1
 

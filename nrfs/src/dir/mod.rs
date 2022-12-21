@@ -2,6 +2,8 @@ pub mod ext;
 
 mod hashmap;
 
+pub use hashmap::Hasher;
+
 use {
 	crate::{
 		read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Idx, Name, Nrfs, SymRef,
@@ -1117,6 +1119,26 @@ impl<'a, D: Dev> Entry<'a, D> {
 				Ok(Box::<Name>::try_from(name.into_boxed_slice()).unwrap())
 			}
 		}
+	}
+
+	/// Get a reference to the parent.
+	///
+	/// May be `None` if this entry is the parent directory.
+	pub fn parent(&self) -> Option<DirRef<'a, D>> {
+		if matches!(self, Self::Dir(d) if d.id == 0) {
+			return None;
+		}
+		let id = self.data_header().parent_id;
+		let fs = self.fs();
+		fs.dir_data(id).header.reference_count += 1;
+		Some(DirRef { fs, id })
+	}
+
+	/// Get the reference count.
+	///
+	/// i.e. the amount of [`Entry`]s referring to the same data.
+	pub fn reference_count(&self) -> usize {
+		self.data_header().reference_count
 	}
 
 	/// Get a reference to the filesystem containing this entry's data.

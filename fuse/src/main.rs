@@ -1,3 +1,6 @@
+#![forbid(unused_must_use)]
+#![forbid(rust_2018_idioms)]
+
 use {
 	arena::{Arena, Handle},
 	fuser::*,
@@ -6,9 +9,10 @@ use {
 		dev::{FileDev, FileDevError},
 		dir::{Entry, EntryData},
 		DirOptions, DirRef, FileRef, Name, Nrfs, RawDirRef, RawFileRef, RawSymRef, SymRef, TmpRef,
+		RawRef,
 	},
 	std::{
-		collections::HashMap,
+		collections::{HashMap, HashSet},
 		ffi::OsStr,
 		fs,
 		hash::Hash,
@@ -47,12 +51,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	Ok(())
 }
 
+#[derive(Debug)]
 struct Fs {
 	fs: Nrfs<FileDev>,
 	ino: InodeStore,
 }
 
 /// "inode" data
+#[derive(Debug)]
 struct InodeData<T> {
 	/// What this "inode" actually points to.
 	value: T,
@@ -60,7 +66,7 @@ struct InodeData<T> {
 	reference_count: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct InodeStore {
 	/// Inode to directory map
 	dir: Arena<InodeData<RawDirRef>, ()>,
@@ -76,6 +82,18 @@ struct InodeStore {
 	sym_rev: HashMap<RawSymRef, Handle<()>>,
 	/// Default value for `unix` extension if not present.
 	unix_default: nrfs::dir::ext::unix::Entry,
+	/// Files to be removed.
+	///
+	/// These may not have been deleted yet due to live references.
+	remove_files: HashSet<RawFileRef>,
+	/// Symbolic links to be removed.
+	///
+	/// These may not have been deleted yet due to live references.
+	remove_syms: HashSet<RawSymRef>,
+	/// Directories to be removed.
+	///
+	/// These may not have been deleted yet due to live references.
+	remove_dirs: HashSet<RawFileRef>,
 }
 
 impl Fs {
@@ -95,8 +113,7 @@ impl Fs {
 
 		// Add root dir now so it's always at ino 1.
 		let root = s.fs.root_dir().await.unwrap();
-		let ino = s.ino.add_dir(root.into_raw(), true);
-		dbg!(ino);
+		s.ino.add_dir(root, true);
 		s
 	}
 
@@ -134,33 +151,99 @@ impl Fs {
 			blksize,
 		}
 	}
+
+	/// Remove an entry.
+	///
+	/// If the entry still has live references it is not immediately deleted but instead made
+	/// "dangling" and removed at a later time.
+	async fn remove(&mut self, parent: u64, name: &Name, rmdir: bool) -> Result<(), i32> {
+		let d = self.ino.get_dir(&self.fs, parent);
+
+		// First try to remove the entry straight away.
+		// TODO return a reason so we can return early.
+		if d.remove(name).await.unwrap() {
+			return Err(libc::ENOENT);
+		}
+
+		// Queue about-to-be renamed entry for removal.
+		let Some(e) = d.find(name).await.unwrap() else { return Err(libc::ENOENT) };
+		match (e, rmdir) {
+			(Entry::Dir(d), true) => {
+				self.ino.remove_dirs.insert(d.as_raw());
+			}
+			(Entry::File(f), false) => {
+				self.ino.remove_files.insert(f.as_raw());
+			}
+			(Entry::Sym(f), false) => {
+				self.ino.remove_syms.insert(f.as_raw());
+			}
+			(Entry::Unknown(_), _) => todo!(),
+			(_, true) => return Err(libc::EISDIR),
+			(_, false) => return Err(todo!("which error?")),
+		}
+		let d = self.ino.get_dir(&self.fs, parent);
+
+		// Rename the entry with a character that is illegal on
+		// UNIX systems, such as '/'.
+		//
+		// Append the time in nanoseconds as a 64-bit little-endian integer
+		// to avoid conflicts with any other "removed" entries.
+		// This is highly unlikely to conflict with any existing entries.
+		let tmp_name = &gen_dangling_name();
+		let tmp_name = tmp_name.into();
+
+		if !d.rename(name, tmp_name).await.unwrap() {
+			// If we can't rename it it's because the entry doesn't exist.
+			return Err(libc::ENOENT);
+		}
+
+		Ok(())
+	}
+
+	/// Remove dangling files or symbolic links.
+	///
+	/// Dangling files/links have names that are exactly 9 bytes long and begin with a '/'.
+	async fn remove_dangling(&self, entry: Entry<'_, FileDev>) {
+		trace!("remove_dangling");
+		// Remove entry.
+		let data = entry.data().await.unwrap();
+		let name = entry.key(&data).await.unwrap();
+		trace!("  name: {:?}", &name);
+		let parent = entry.parent().expect("file or sym has no parent");
+		drop(entry);
+		let r = parent.remove(&name).await.unwrap();
+		assert!(r, "failed to remove entry {:?}\n\n{:#?}", name, self);
+	}
 }
 
 impl InodeStore {
-	fn add_dir(&mut self, dir: RawDirRef, incr: bool) -> u64 {
+	fn add_dir<'f>(&mut self, dir: DirRef<'f, FileDev>, incr: bool) -> u64 {
 		Self::add(&mut self.dir, &mut self.dir_rev, dir, incr) | INO_TY_DIR
 	}
 
-	fn add_file(&mut self, file: RawFileRef, incr: bool) -> u64 {
+	fn add_file<'f>(&mut self, file: FileRef<'f, FileDev>, incr: bool) -> u64 {
 		Self::add(&mut self.file, &mut self.file_rev, file, incr) | INO_TY_FILE
 	}
 
-	fn add_sym(&mut self, sym: RawSymRef, incr: bool) -> u64 {
+	fn add_sym<'f>(&mut self, sym: SymRef<'f, FileDev>, incr: bool) -> u64 {
 		Self::add(&mut self.sym, &mut self.sym_rev, sym, incr) | INO_TY_SYM
 	}
 
-	fn add<T: Clone + Hash + Eq>(
-		m: &mut Arena<InodeData<T>, ()>,
-		rev_m: &mut HashMap<T, Handle<()>>,
+	fn add<'f, T: RawRef<'f, FileDev>>(
+		m: &mut Arena<InodeData<T::Raw>, ()>,
+		rev_m: &mut HashMap<T::Raw, Handle<()>>,
 		t: T,
 		incr: bool,
-	) -> u64 {
-		let h = if let Some(h) = rev_m.get_mut(&t) {
+	) -> u64
+	where
+		T::Raw: Hash + Eq,
+	{
+		let h = if let Some(h) = rev_m.get_mut(&t.as_raw()) {
 			m[*h].reference_count += u64::from(incr);
 			*h
 		} else {
-			let h = m.insert(InodeData { value: t.clone(), reference_count: 1 });
-			rev_m.insert(t, h);
+			let h = m.insert(InodeData { value: t.as_raw(), reference_count: 1 });
+			rev_m.insert(t.into_raw(), h);
 			h
 		};
 		// Because ROOT_ID (1) is reserved for the root dir, but nrfs uses 0 for the root dir
@@ -207,7 +290,16 @@ impl InodeStore {
 			.into_tmp(fs)
 	}
 
-	fn forget(&mut self, fs: &Nrfs<FileDev>, ino: u64, nlookup: u64) {
+	/// Forget an entry.
+	///
+	/// If the entry needs to be removed it is returned.
+	#[must_use = "may need to remove entry"]
+	fn forget<'f>(
+		&mut self,
+		fs: &'f Nrfs<FileDev>,
+		ino: u64,
+		nlookup: u64,
+	) -> Option<Entry<'f, FileDev>> {
 		let h = Handle::from_raw((ino & !INO_TY_MASK) as usize - 1, ());
 		match ino & INO_TY_MASK {
 			INO_TY_DIR => {
@@ -225,9 +317,12 @@ impl InodeStore {
 				*c = c.saturating_sub(nlookup);
 				if *c == 0 {
 					debug!("remove file {:?}", h);
-					let f = self.file.remove(h).unwrap().value;
-					self.file_rev.remove(&f);
-					FileRef::from_raw(fs, f);
+					let f = self.file.remove(h).unwrap();
+					self.file_rev.remove(&f.value);
+					let e = FileRef::from_raw(fs, f.value.clone());
+					if self.remove_files.remove(&f.value) {
+						return Some(e.into());
+					}
 				}
 			}
 			INO_TY_SYM => {
@@ -235,13 +330,17 @@ impl InodeStore {
 				*c = c.saturating_sub(nlookup);
 				if *c == 0 {
 					debug!("remove sym {:?}", h);
-					let f = self.sym.remove(h).unwrap().value;
-					self.sym_rev.remove(&f);
-					SymRef::from_raw(fs, f);
+					let f = self.sym.remove(h).unwrap();
+					self.sym_rev.remove(&f.value);
+					let e = SymRef::from_raw(fs, f.value.clone());
+					if self.remove_syms.remove(&f.value) {
+						return Some(e.into());
+					}
 				}
 			}
 			_ => unreachable!(),
 		}
+		None
 	}
 
 	fn get_unix(&self, entry: &nrfs::dir::EntryData) -> nrfs::dir::ext::unix::Entry {
@@ -277,17 +376,17 @@ impl Filesystem for Fs {
 			let (ty, len, ino) = match entry {
 				Entry::Dir(d) => {
 					let len = d.len().await.unwrap().into();
-					let ino = self.ino.add_dir(d.into_raw(), true);
+					let ino = self.ino.add_dir(d, true);
 					(FileType::Directory, len, ino)
 				}
 				Entry::File(f) => {
 					let len = f.len().await.unwrap();
-					let ino = self.ino.add_file(f.into_raw(), true);
+					let ino = self.ino.add_file(f, true);
 					(FileType::RegularFile, len, ino)
 				}
 				Entry::Sym(f) => {
 					let len = f.len().await.unwrap();
-					let ino = self.ino.add_sym(f.into_raw(), true);
+					let ino = self.ino.add_sym(f, true);
 					(FileType::Symlink, len, ino)
 				}
 				Entry::Unknown(_) => todo!("unknown entry type"),
@@ -299,10 +398,15 @@ impl Filesystem for Fs {
 
 	fn forget(&mut self, _req: &Request<'_>, ino: u64, nlookup: u64) {
 		trace!("forget");
-		self.ino.forget(&self.fs, ino, nlookup)
+		futures_executor::block_on(async move {
+			if let Some(entry) = self.ino.forget(&self.fs, ino, nlookup) {
+				self.remove_dangling(entry).await;
+				self.fs.finish_transaction().await.unwrap();
+			}
+		})
 	}
 
-	fn getattr(&mut self, _: &Request, ino: u64, reply: ReplyAttr) {
+	fn getattr(&mut self, _: &Request<'_>, ino: u64, reply: ReplyAttr) {
 		trace!("getattr");
 		futures_executor::block_on(async move {
 			let entry = self.ino.get(&self.fs, ino);
@@ -398,7 +502,7 @@ impl Filesystem for Fs {
 
 	fn read(
 		&mut self,
-		_req: &Request,
+		_req: &Request<'_>,
 		ino: u64,
 		_fh: u64,
 		offset: i64,
@@ -418,7 +522,7 @@ impl Filesystem for Fs {
 
 	fn write(
 		&mut self,
-		_req: &Request,
+		_req: &Request<'_>,
 		ino: u64,
 		_fh: u64,
 		offset: i64,
@@ -439,7 +543,7 @@ impl Filesystem for Fs {
 		})
 	}
 
-	fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
+	fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
 		trace!("readlink");
 		futures_executor::block_on(async move {
 			let mut buf = [0; 1 << 15];
@@ -488,13 +592,31 @@ impl Filesystem for Fs {
 				let data = e.data().await.unwrap();
 				let name = e.key(&data).await.unwrap();
 
+				// Skip if it's an internal name used for "removing" (unlinking) files the UNIX way.
+				if is_dangling_name(&name) {
+					// Attempt to remove it if it is not in the remove queue,
+					// i.e. it is not referenced.
+					let dangling = match &e {
+						Entry::Dir(_) => unreachable!("directories cannot be unlinked"),
+						Entry::File(f) => !self.ino.remove_files.contains(&f.as_raw()),
+						Entry::Sym(f) => !self.ino.remove_syms.contains(&f.as_raw()),
+						Entry::Unknown(_) => todo!(),
+					};
+					if dangling {
+						self.remove_dangling(e).await;
+					}
+					// Continue with next entry.
+					index = i;
+					continue;
+				}
+
 				let (ty, e_ino) = match e {
-					Entry::Dir(d) => (FileType::Directory, self.ino.add_dir(d.into_raw(), false)),
+					Entry::Dir(d) => (FileType::Directory, self.ino.add_dir(d, false)),
 					Entry::File(f) => (
 						FileType::RegularFile,
-						self.ino.add_file(f.into_raw(), false),
+						self.ino.add_file(f, false),
 					),
-					Entry::Sym(f) => (FileType::Symlink, self.ino.add_sym(f.into_raw(), false)),
+					Entry::Sym(f) => (FileType::Symlink, self.ino.add_sym(f, false)),
 					Entry::Unknown(_) => todo!("miscellaneous file type"),
 				};
 				d = self.ino.get_dir(&self.fs, ino);
@@ -512,7 +634,7 @@ impl Filesystem for Fs {
 
 	fn create(
 		&mut self,
-		req: &Request,
+		req: &Request<'_>,
 		parent: u64,
 		name: &OsStr,
 		mode: u32,
@@ -533,7 +655,7 @@ impl Filesystem for Fs {
 				..Default::default()
 			};
 			let Some(f) = d.create_file(name, &ext).await.unwrap() else { return reply.error(libc::EEXIST) };
-			let ino = self.ino.add_file(f.into_raw(), false);
+			let ino = self.ino.add_file(f, false);
 			let data = self.ino.get(&self.fs, ino).data().await.unwrap();
 			reply.created(
 				&TTL,
@@ -589,7 +711,7 @@ impl Filesystem for Fs {
 			if let Some(f) = d.create_sym(name, &ext).await.unwrap() {
 				let link = link.as_os_str().as_bytes();
 				f.write_grow(0, link).await.unwrap();
-				let ino = self.ino.add_sym(f.into_raw(), false);
+				let ino = self.ino.add_sym(f, false);
 				let data = self.ino.get(&self.fs, ino).data().await.unwrap();
 				let attr = self.attr(ino, FileType::Symlink, link.len() as _, &data);
 				reply.entry(&TTL, &attr, 0);
@@ -616,7 +738,11 @@ impl Filesystem for Fs {
 
 			let unix = nrfs::dir::ext::unix::Entry::new(mode as _, req.uid(), req.gid());
 			let mtime = mtime_now();
-			let ext = nrfs::dir::Extensions { unix: Some(unix), ..Default::default() };
+			let ext = nrfs::dir::Extensions {
+				unix: Some(unix),
+				mtime: Some(mtime),
+				..Default::default()
+			};
 			let opt = nrfs::DirOptions {
 				extensions: *nrfs::dir::EnableExtensions::default()
 					.add_unix()
@@ -624,7 +750,7 @@ impl Filesystem for Fs {
 				..nrfs::dir::DirOptions::new(&[0; 16]) // FIXME randomize
 			};
 			if let Some(dd) = d.create_dir(name, &opt, &ext).await.unwrap() {
-				let ino = self.ino.add_dir(dd.into_raw(), false);
+				let ino = self.ino.add_dir(dd, false);
 				let data = self.ino.get(&self.fs, ino).data().await.unwrap();
 				let attr = self.attr(ino, FileType::Directory, 0, &data);
 				reply.entry(&TTL, &attr, 0);
@@ -644,10 +770,19 @@ impl Filesystem for Fs {
 		_flags: u32,
 		reply: ReplyEmpty,
 	) {
-		trace!("rename");
 		futures_executor::block_on(async move {
 			let (Ok(from_name), Ok(to_name)) = (name.as_bytes().try_into(), newname.as_bytes().try_into())
 				else { return reply.error(libc::ENAMETOOLONG) };
+
+			// FIXME for gods sake do it properly.
+
+			// Delete entry at original location first.
+			if let Err(e) = self.remove(newparent, to_name, ).await {
+				if e != libc::ENOENT {
+					reply.error(e);
+					return;
+				}
+			}
 
 			let from_d = self.ino.get_dir(&self.fs, parent);
 			let to_d = self.ino.get_dir(&self.fs, newparent);
@@ -661,24 +796,24 @@ impl Filesystem for Fs {
 		})
 	}
 
+	/// Unlink a file or directory,
+	/// i.e. remove it from the directory but keep it alive until all references
+	/// to it are gone.
 	fn unlink(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-		trace!("unlink");
 		futures_executor::block_on(async move {
-			let d = self.ino.get_dir(&self.fs, parent);
-
 			let Ok(name) = name.as_bytes().try_into() else { return reply.error(libc::ENAMETOOLONG) };
-			if d.remove(name).await.unwrap() {
-				reply.ok()
-			} else {
-				// TODO can also be because dir is not empty or something.
-				reply.error(libc::ENOENT)
+
+			match self.remove(parent, name).await {
+				Ok(()) => {
+					reply.ok();
+					self.fs.finish_transaction().await.unwrap();
+				}
+				Err(e) => reply.error(e),
 			}
-			self.fs.finish_transaction().await.unwrap();
 		});
 	}
 
 	fn rmdir(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-		trace!("rmdir");
 		futures_executor::block_on(async move {
 			let d = self.ino.get_dir(&self.fs, parent);
 			let Ok(name) = name.as_bytes().try_into() else { return reply.error(libc::ENAMETOOLONG) };
@@ -693,7 +828,6 @@ impl Filesystem for Fs {
 	}
 
 	fn destroy(&mut self) {
-		trace!("destroy");
 		futures_executor::block_on(self.fs.finish_transaction()).unwrap();
 	}
 }
@@ -709,4 +843,17 @@ fn mtime_sys(t: SystemTime) -> nrfs::dir::ext::mtime::Entry {
 			|t| t.as_millis().try_into().unwrap_or(i64::MAX),
 		),
 	}
+}
+
+/// Generate a name for a new dangling entry.
+fn gen_dangling_name() -> [u8; 12] {
+	let mut buf = [0; 12];
+	buf[..4].copy_from_slice(b"/DEL");
+	buf[4..].copy_from_slice(&mtime_now().mtime.to_le_bytes());
+	buf
+}
+
+/// Check if the given name is for a dangling entry.
+fn is_dangling_name(name: &Name) -> bool {
+	name.len() == b"/DEL".len() + 8 && name.starts_with(b"/DEL")
 }

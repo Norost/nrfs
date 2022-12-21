@@ -240,6 +240,29 @@ impl<D: Dev> Nrfs<D> {
 	}
 }
 
+/// Trait to convert between "raw" and "complete" references,
+/// i.e. references without direct access to the filesystem
+/// and references with.
+pub trait RawRef<'a, D: Dev>: Sized + 'a {
+	/// The type of the raw reference.
+	type Raw;
+
+	/// Turn this reference into raw components.
+	fn into_raw(self) -> Self::Raw {
+		mem::ManuallyDrop::new(self).as_raw()
+	}
+
+	/// Get a raw reference.
+	fn as_raw(&self) -> Self::Raw;
+
+	/// Create a reference from raw components.
+	///
+	/// *Must* only be used in combination with [`Self::into_raw`]!
+	fn from_raw(fs: &'a Nrfs<D>, raw: Self::Raw) -> Self
+	where
+		Self: 'a;
+}
+
 /// Reference to a directory object.
 #[derive(Debug)]
 pub struct DirRef<'a, D: Dev> {
@@ -259,18 +282,15 @@ pub struct RawDirRef {
 	id: u64,
 }
 
-impl<'a, D: Dev> DirRef<'a, D> {
-	/// Turn this reference into raw components.
-	pub fn into_raw(self) -> RawDirRef {
-		let Self { fs: _, id } = self;
-		mem::forget(self);
-		RawDirRef { id }
+impl<'a, D: Dev> RawRef<'a, D> for DirRef<'a, D> {
+	type Raw = RawDirRef;
+
+	fn as_raw(&self) -> RawDirRef {
+		RawDirRef { id: self.id }
 	}
 
-	/// Create a reference from raw components.
-	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawDirRef) -> Self {
-		let RawDirRef { id } = raw;
-		DirRef { fs, id }
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawDirRef) -> Self {
+		Self { fs, id: raw.id }
 	}
 }
 
@@ -334,18 +354,15 @@ pub struct RawFileRef {
 	idx: Idx,
 }
 
-impl<'a, D: Dev> FileRef<'a, D> {
-	/// Turn this reference into raw components.
-	pub fn into_raw(self) -> RawFileRef {
-		let Self { fs: _, idx } = self;
-		mem::forget(self);
-		RawFileRef { idx }
+impl<'a, D: Dev> RawRef<'a, D> for FileRef<'a, D> {
+	type Raw = RawFileRef;
+
+	fn as_raw(&self) -> RawFileRef {
+		RawFileRef { idx: self.idx }
 	}
 
-	/// Create a reference from raw components.
-	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawFileRef) -> Self {
-		let RawFileRef { idx } = raw;
-		FileRef { fs, idx }
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawFileRef) -> Self {
+		Self { fs, idx: raw.idx }
 	}
 }
 
@@ -400,14 +417,14 @@ pub struct SymRef<'a, D: Dev>(FileRef<'a, D>);
 #[must_use = "value must be used to avoid reference leaks"]
 pub struct RawSymRef(RawFileRef);
 
-impl<'a, D: Dev> SymRef<'a, D> {
-	/// Turn this reference into raw components.
-	pub fn into_raw(self) -> RawSymRef {
-		RawSymRef(self.0.into_raw())
+impl<'a, D: Dev> RawRef<'a, D> for SymRef<'a, D> {
+	type Raw = RawSymRef;
+
+	fn as_raw(&self) -> RawSymRef {
+		RawSymRef(self.0.as_raw())
 	}
 
-	/// Create a reference from raw components.
-	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawSymRef) -> Self {
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawSymRef) -> Self {
 		SymRef(FileRef::from_raw(fs, raw.0))
 	}
 }
@@ -423,14 +440,14 @@ pub struct UnknownRef<'a, D: Dev>(FileRef<'a, D>);
 #[must_use = "value must be used to avoid reference leaks"]
 pub struct RawUnknownRef(RawFileRef);
 
-impl<'a, D: Dev> UnknownRef<'a, D> {
-	/// Turn this reference into raw components.
-	pub fn into_raw(self) -> RawUnknownRef {
-		RawUnknownRef(self.0.into_raw())
+impl<'a, D: Dev> RawRef<'a, D> for UnknownRef<'a, D> {
+	type Raw = RawUnknownRef;
+
+	fn as_raw(&self) -> RawUnknownRef {
+		RawUnknownRef(self.0.as_raw())
 	}
 
-	/// Create a reference from raw components.
-	pub fn from_raw(fs: &'a Nrfs<D>, raw: RawUnknownRef) -> Self {
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawUnknownRef) -> Self {
 		UnknownRef(FileRef::from_raw(fs, raw.0))
 	}
 }
@@ -473,6 +490,12 @@ macro_rules! impl_tmpref {
 			fn from(TmpRef { inner, _marker }: TmpRef<'s, $ref<'f, D>>) -> Self {
 				let inner = mem::ManuallyDrop::into_inner(inner);
 				Self { inner: mem::ManuallyDrop::new(Entry::$var(inner)), _marker }
+			}
+		}
+
+		impl<'f, D: Dev> From<$ref<'f, D>> for Entry<'f, D> {
+			fn from(r: $ref<'f, D>) -> Self {
+				Self::$var(r)
 			}
 		}
 	};
