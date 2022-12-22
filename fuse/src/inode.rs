@@ -209,4 +209,25 @@ impl InodeStore {
 		}
 		None
 	}
+
+	/// Drop all references and inodes.
+	pub fn remove_all(&mut self, fs: &Nrfs<FileDev>) {
+		self.dir.drain().for_each(|(_, r)| {
+			DirRef::from_raw(fs, r.value);
+		});
+		self.file.drain().for_each(|(_, r)| {
+			FileRef::from_raw(fs, r.value);
+		});
+		self.sym.drain().for_each(|(_, r)| {
+			SymRef::from_raw(fs, r.value);
+		});
+
+		self.dir_rev.clear();
+		self.file_rev.clear();
+		self.sym_rev.clear();
+
+		self.remove_dirs.clear();
+		self.remove_files.clear();
+		self.remove_syms.clear();
+	}
 }

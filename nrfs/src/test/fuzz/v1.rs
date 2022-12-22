@@ -398,16 +398,21 @@ impl<'a> Test<'a> {
 							// Remove failed:
 							// - the entry doesn't exist.
 							Err(RemoveError::NotFound) => assert!(d.get(name).is_none()),
-							// - the entry exists and there are active refs.
-							Err(RemoveError::LiveReference) => {
-								assert!(!d.get_mut(name).unwrap().indices_mut().is_empty())
-							}
 							// - the entry is a non-empty directory.
 							Err(RemoveError::NotEmpty) => {
 								let State::Dir { children, .. } = d.get(name).unwrap() else {
 									panic!()
 								};
 								assert!(!children.is_empty());
+							}
+							// - the entry exists and there are active refs.
+							Err(RemoveError::LiveReference) => {
+								// This error should only be returned if no other
+								// errors were detected (e.g. directory not empty).
+								assert!(
+									!matches!(d.get_mut(name).unwrap(), State::Dir { children, .. } if !children.is_empty())
+								);
+								assert!(!d.get_mut(name).unwrap().indices_mut().is_empty())
 							}
 							Err(RemoveError::UnknownType) => unreachable!(),
 						}

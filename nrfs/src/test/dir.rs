@@ -322,3 +322,31 @@ fn get_dir_existing_ref() {
 		assert!(matches!(dir2, Entry::Dir(_)));
 	})
 }
+
+/// `NotEmpty` & other errors must be returned before `LiveReference` to avoid confusion.
+#[test]
+fn error_priority() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+
+		let dir = root
+			.create_dir(
+				b"dir".into(),
+				&DirOptions::new(&[0; 16]),
+				&Default::default(),
+			)
+			.await
+			.unwrap()
+			.unwrap();
+
+		let _file = dir
+			.create_file(b"file".into(), &Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+
+		let err = root.remove(b"dir".into()).await.unwrap().unwrap_err();
+		assert!(matches!(err, RemoveError::NotEmpty));
+	})
+}

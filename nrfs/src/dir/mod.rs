@@ -303,6 +303,18 @@ impl<'a, D: Dev> Dir<'a, D> {
 		// Only destroy types we recognize
 		let Ok(ty) = entry.ty() else { return Ok(Err(RemoveError::UnknownType)) };
 
+		// If the entry is a directory, first check if it is empty or not.
+		if let Type::Dir { id } = ty {
+			// Ensure the directory is empty to avoid space leaks.
+			let map = self.fs.storage.get(id).await?;
+			let buf = &mut [0; 4];
+			read_exact(&map, header::offset::ENTRY_COUNT.into(), buf).await?;
+			let entry_count = u32::from_le_bytes(*buf);
+			if entry_count > 0 {
+				return Ok(Err(RemoveError::NotEmpty));
+			}
+		}
+
 		// If a child is present, don't remove as we don't want dangling references.
 		if self
 			.fs
@@ -334,16 +346,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 					.await?;
 			}
 			Type::Dir { id } => {
-				// Ensure the directory is empty to avoid space leaks.
-				let map = self.fs.storage.get(id).await?;
-				let buf = &mut [0; 4];
-				read_exact(&map, header::offset::ENTRY_COUNT.into(), buf).await?;
-				let entry_count = u32::from_le_bytes(*buf);
-				if entry_count > 0 {
-					return Ok(Err(RemoveError::NotEmpty));
-				}
-
 				// Dereference map and heap.
+				let map = self.fs.storage.get(id).await?;
 				map.decrease_reference_count().await?;
 				self.fs
 					.storage

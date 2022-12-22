@@ -126,6 +126,20 @@ impl Fs {
 		let name = entry.key(&data).await.unwrap();
 		trace!("  name: {:?}", &name);
 		let parent = entry.parent().expect("entry has no parent");
+		if let Entry::Dir(d) = &entry {
+			let mut index = 0;
+			let mut v = vec![];
+			while let Some((e, i)) = d.next_from(index).await.unwrap() {
+				let data = e.data().await.unwrap();
+				let name = e.key(&data).await.unwrap();
+				v.push(name);
+				if let Some(i) = i {
+					index = i;
+				} else {
+					break;
+				}
+			}
+		}
 		drop(entry);
 		parent
 			.remove(&name)
@@ -662,9 +676,13 @@ impl Filesystem for Fs {
 
 	fn destroy(&mut self) {
 		futures_executor::block_on(async move {
-			// Remove /FUSE/ directory to keep things clean, which *should* succeed
-			drop(DirRef::from_raw(&self.fs, self.fuse_dir.clone()));
+			// Remove /FUSE/ directory to keep things clean
+			let fuse_dir = DirRef::from_raw(&self.fs, self.fuse_dir.clone());
+
+			// First drop all other refs just in case the kernel didn't.
+
 			let root = self.fs.root_dir().await.unwrap();
+			drop(fuse_dir);
 			root.remove(b"/FUSE/".into()).await.unwrap().unwrap();
 
 			self.fs.finish_transaction().await.unwrap();
