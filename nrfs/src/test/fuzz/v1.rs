@@ -839,7 +839,7 @@ fn magically_fixed_no_dirdata_with_id() {
 }
 
 #[test]
-fn f() {
+fn insert_child_unmoved() {
 	Test::new(
 		1 << 16,
 		[
@@ -866,6 +866,65 @@ fn f() {
 				ext: Extensions { unix: None, mtime: None },
 			},
 			Remove { dir_idx: 0, name: b"".into() },
+		],
+	)
+	.run()
+}
+
+/// Also magically fixed...
+#[test]
+fn magically_fixed_resize_child_move() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			Get { dir_idx: 0, name: b"".into() },
+			CreateFile {
+				dir_idx: 0,
+				name: b"AAA\xFD".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Rename { dir_idx: 0, from: b"".into(), to: b"".into() },
+		],
+	)
+	.run()
+}
+
+/// Don't forget to apply the mask to indices!
+#[test]
+fn remove_next_index_mask() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile {
+				dir_idx: 0,
+				name: b"".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Get { dir_idx: 0, name: b"".into() },
+			CreateFile {
+				dir_idx: 0,
+				name: b"\0C".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			CreateFile {
+				dir_idx: 0,
+				name: b"\xFF\0\0\0\0\0\0\0".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Transfer { from_dir_idx: 0, from: b"".into(), to_dir_idx: 0, to: b"\0\0\x19C".into() },
+			CreateFile {
+				dir_idx: 0,
+				name: b"".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			CreateFile {
+				dir_idx: 0,
+				name: b"\xFF\0\0Q\x08\0 \0".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Transfer { from_dir_idx: 0, from: b"".into(), to_dir_idx: 0, to: b"".into() },
 		],
 	)
 	.run()

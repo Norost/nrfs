@@ -54,7 +54,8 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				// We should inspect other such infinite loops.
 				loop {
 					// Get the next entry.
-					let mut e = self.get((index + 1) & self.mask).await?;
+					let next_index = (index + 1) & self.mask;
+					let mut e = self.get(next_index).await?;
 					// No need to shift anything else because:
 					// - if e.ty == 0, the next entry is empty.
 					//   We will clear the current entry below anyways.
@@ -68,7 +69,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 					self.set(&e).await?;
 
 					let mut data = self.fs.dir_data(self.dir_id);
-					if let Some(child) = data.children.remove(&(index + 1)) {
+					if let Some(child) = data.children.remove(&next_index) {
 						let _r = data.children.insert(index, child);
 						assert!(_r.is_none(), "a child was already present");
 						drop(data);
@@ -84,6 +85,10 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		}
 
 		// Mark last shifted entry as empty
+		debug_assert!(
+			!self.fs.dir_data(self.dir_id).children.contains_key(&index),
+			"empty entry contains child",
+		);
 		let offt = self.fs.dir_data(self.dir_id).get_offset(index);
 		write_all(&self.map, offt, &[TY_NONE]).await?;
 
