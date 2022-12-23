@@ -811,8 +811,8 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		};
 
 		// Create objects.
-		let (slf_obj, _) = fs.storage.create_pair().await?;
-		let slf_id = slf_obj.id();
+		let slf_id = fs.storage.create_many::<2>().await?;
+		let slf_obj = fs.storage.get(slf_id).await?;
 
 		// Create hashmap
 		Dir::new(fs, slf_id)
