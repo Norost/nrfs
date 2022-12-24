@@ -54,7 +54,9 @@ fn create_file_long_name() {
 		let fs = new().await;
 		let root = fs.root_dir().await.unwrap();
 		root.create_file(
-			b"This is a string with len >= 14".into(),
+			b"This is a string with len equal to 37"[..]
+				.try_into()
+				.unwrap(),
 			&Default::default(),
 		)
 		.await
@@ -74,7 +76,7 @@ fn get_file() {
 			.unwrap();
 
 		let file = root.find(b"file".into()).await.unwrap().unwrap();
-		assert!(matches!(file, Entry::File(_)));
+		assert!(matches!(file, ItemRef::File(_)));
 	})
 }
 
@@ -93,7 +95,7 @@ fn get_dir() {
 		.unwrap();
 
 		let dir = root.find(b"dir".into()).await.unwrap().unwrap();
-		assert!(matches!(dir, Entry::Dir(_)));
+		assert!(matches!(dir, ItemRef::Dir(_)));
 	})
 }
 
@@ -108,7 +110,7 @@ fn get_sym() {
 			.unwrap();
 
 		let sym = root.find(b"sym".into()).await.unwrap().unwrap();
-		assert!(matches!(sym, Entry::Sym(_)));
+		assert!(matches!(sym, ItemRef::Sym(_)));
 	})
 }
 
@@ -118,7 +120,7 @@ fn get_file_long_name() {
 		let fs = new().await;
 		let root = fs.root_dir().await.unwrap();
 		root.create_file(
-			b"This is a string with len >= 14".into(),
+			b"This is a string with len >= 27".into(),
 			&Default::default(),
 		)
 		.await
@@ -126,11 +128,11 @@ fn get_file_long_name() {
 		.unwrap();
 
 		let file = root
-			.find(b"This is a string with len >= 14".into())
+			.find(b"This is a string with len >= 27".into())
 			.await
 			.unwrap()
 			.unwrap();
-		assert!(matches!(file, Entry::File(_)));
+		assert!(matches!(file, ItemRef::File(_)));
 	})
 }
 
@@ -258,11 +260,10 @@ fn rename() {
 			.unwrap()
 			.unwrap();
 
-		let moved = root
-			.rename(b"file".into(), b"same_file".into())
+		root.rename(b"file".into(), b"same_file".into())
 			.await
+			.unwrap()
 			.unwrap();
-		assert!(moved);
 
 		// Check if the associated FileData is still correct.
 		file.write_grow(0, b"panic in the disco").await.unwrap();
@@ -291,11 +292,10 @@ fn transfer() {
 			.unwrap()
 			.unwrap();
 
-		let moved = root
-			.transfer(b"file".into(), &dir, b"same_file".into())
+		root.transfer(b"file".into(), &dir, b"same_file".into())
 			.await
+			.unwrap()
 			.unwrap();
-		assert!(moved);
 
 		// Check if the associated FileData is still correct.
 		file.write_grow(0, b"panic in the disco").await.unwrap();
@@ -319,7 +319,7 @@ fn get_dir_existing_ref() {
 			.unwrap();
 
 		let dir2 = root.find(b"dir".into()).await.unwrap().unwrap();
-		assert!(matches!(dir2, Entry::Dir(_)));
+		assert!(matches!(dir2, ItemRef::Dir(_)));
 	})
 }
 

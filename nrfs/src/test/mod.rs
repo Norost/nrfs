@@ -107,7 +107,7 @@ fn create_file() {
 		assert!(data.ext_mtime.is_none());
 
 		let mut buf = [0; 32];
-		let Entry::File(file) = file else { panic!("expected file") };
+		let ItemRef::File(file) = file else { panic!("expected file") };
 		let l = file.read(0, &mut buf).await.unwrap();
 		assert_eq!(core::str::from_utf8(&buf[..l]), Ok("Hello, world!"));
 	})
@@ -134,7 +134,7 @@ fn create_many_files() {
 			let file = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
 
 			let mut buf = [0; 32];
-			let Entry::File(file) = file else { panic!("expected file") };
+			let ItemRef::File(file) = file else { panic!("expected file") };
 			let l = file.read(0, &mut buf).await.unwrap();
 			assert_eq!(core::str::from_utf8(&buf[..l]), Ok(&*contents),);
 
@@ -147,7 +147,7 @@ fn create_many_files() {
 		let mut count = 0;
 		while let Some((_, ni)) = d.next_from(i).await.unwrap() {
 			count += 1;
-			i = if let Some(i) = ni { i } else { break };
+			i = ni;
 		}
 		assert_eq!(count, 100);
 
@@ -161,7 +161,7 @@ fn create_many_files() {
 			let file = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
 
 			let mut buf = [0; 32];
-			let Entry::File(file) = file else { panic!("expected file") };
+			let ItemRef::File(file) = file else { panic!("expected file") };
 			let l = file.read(0, &mut buf).await.unwrap();
 			assert_eq!(
 				core::str::from_utf8(&buf[..l]),
@@ -202,7 +202,7 @@ fn create_file_ext() {
 		assert_eq!(data.ext_mtime.unwrap().mtime, 0xdead);
 
 		let mut buf = [0; 32];
-		let Entry::File(file) = file else { panic!("expected file") };
+		let ItemRef::File(file) = file else { panic!("expected file") };
 		let l = file.read(0, &mut buf).await.unwrap();
 		assert_eq!(core::str::from_utf8(&buf[..l]), Ok("Hello, world!"));
 	})
@@ -218,16 +218,19 @@ fn remove_file() {
 
 		d.create_file(b"hello".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 1);
 
 		d.create_file(b"world".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 2);
 
 		d.create_file(b"exist".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 3);
 
@@ -235,16 +238,11 @@ fn remove_file() {
 		assert_eq!(d.len().await.unwrap(), 2);
 
 		// Ensure no spooky entries appear when iterating
-		let mut i = Some(0);
-		while let Some((e, ni)) = async {
-			let i = i?;
-			d.next_from(i).await.unwrap()
-		}
-		.await
-		{
+		let mut i = 0;
+		while let Some((e, ni)) = d.next_from(i).await.unwrap() {
 			let data = e.data().await.unwrap();
 			let key = e.key(&data).await.unwrap();
-			assert!(matches!(&**key, b"world" | b"exist"));
+			assert!(matches!(&**key.unwrap(), b"world" | b"exist"));
 			i = ni;
 		}
 	})
@@ -258,14 +256,17 @@ fn shrink() {
 		assert_eq!(d.len().await.unwrap(), 0);
 		d.create_file(b"hello".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 1);
 		d.create_file(b"world".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 2);
 		d.create_file(b"exist".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 3);
 		d.remove(b"hello".into()).await.unwrap().unwrap();
@@ -274,16 +275,11 @@ fn shrink() {
 		assert_eq!(d.len().await.unwrap(), 1);
 
 		// Ensure no spooky entries appear when iterating
-		let mut i = Some(0);
-		while let Some((e, ni)) = async {
-			let i = i?;
-			d.next_from(i).await.unwrap()
-		}
-		.await
-		{
+		let mut i = 0;
+		while let Some((e, ni)) = d.next_from(i).await.unwrap() {
 			let data = e.data().await.unwrap();
 			let key = e.key(&data).await.unwrap();
-			assert_eq!(&**key, b"world");
+			assert_eq!(&**key.unwrap(), b"world");
 			i = ni;
 		}
 	})
@@ -300,13 +296,16 @@ fn find_colllision() {
 		for i in 0..5 {
 			d.create_file((&[i]).into(), &Default::default())
 				.await
+				.unwrap()
 				.unwrap();
 		}
 		d.create_file(b"d".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap(); // c4eafac0
 		d.create_file(b"g".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap(); // e57630a8
 
 		assert!(d.find(b"\x00".into()).await.unwrap().is_some());
@@ -329,13 +328,16 @@ fn remove_collision() {
 		for i in 0..5 {
 			d.create_file((&[i]).into(), &Default::default())
 				.await
+				.unwrap()
 				.unwrap();
 		}
 		d.create_file(b"d".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap(); // c4eafac0
 		d.create_file(b"g".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap(); // e57630a8
 		d.remove(b"d".into()).await.unwrap().unwrap();
 		// If the hashmap is improperly implemented, the empty slot makes
@@ -351,15 +353,19 @@ fn real_case_find_000_minified() {
 		let d = fs.root_dir().await.unwrap();
 		d.create_dir(b"d".into(), &DirOptions::new(&[0; 16]), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		d.create_file(b"C".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		d.create_file(b".rustc_info.json".into(), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		d.create_dir(b"p".into(), &DirOptions::new(&[0; 16]), &Default::default())
 			.await
+			.unwrap()
 			.unwrap();
 		assert_eq!(
 			d.len().await.unwrap(),

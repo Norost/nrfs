@@ -1,13 +1,13 @@
 use {
-	super::{
-		ext, Dir, DirSize, Error, Name, Nrfs, Type, TY_DIR, TY_EMBED_FILE, TY_EMBED_SYM, TY_FILE,
-		TY_NONE, TY_SYM,
-	},
-	crate::{read_exact, write_all},
-	core::fmt,
+	super::{Dir, DirSize, Error, Hasher, Key, Name, Nrfs},
+	crate::{read_exact, write_all, DirData},
+	core::{cell::RefMut, fmt, num::NonZeroU8},
 	nros::{Dev, Tree},
-	siphasher::sip::SipHasher13,
+	rangemap::RangeSet,
 };
+
+/// The size of a single hashmap entry.
+const ENTRY_SIZE: u16 = 32;
 
 pub(super) struct HashMap<'a, D: Dev> {
 	/// The filesystem containing the hashmap's data.
@@ -21,25 +21,44 @@ pub(super) struct HashMap<'a, D: Dev> {
 	/// The ID of this tree may be different from `Self::dir_id` if this hashmap is a new map
 	/// created in a resize.
 	pub(super) map: Tree<'a, D>,
-	/// Mask applied to indices while iterating.
-	mask: u32,
+	/// Size of this hashmap
+	size: DirSize,
+	/// The [`Hasher`] used to index this hashmap.
+	hasher: Hasher,
 }
 
 impl<'a, D: Dev> HashMap<'a, D> {
 	/// Create a [`HashMap`] helper structure.
-	pub fn new(dir: &Dir<'a, D>, map: Tree<'a, D>, size: DirSize) -> Self {
-		let &Dir { fs, id: dir_id } = dir;
-		Self {
-			fs,
-			dir_id,
-			map,
-			mask: 1u32.wrapping_shl(size.to_raw().into()).wrapping_sub(1),
-		}
+	pub fn new(dir: &Dir<'a, D>, data: &DirData, map: Tree<'a, D>, size: DirSize) -> Self {
+		Self { fs: dir.fs, dir_id: dir.id, map, size, hasher: data.hasher }
+	}
+
+	/// Initialize a new hashmap structure.
+	///
+	/// This will create a new object.
+	pub async fn create(dir: &Dir<'a, D>, size: DirSize) -> Result<HashMap<'a, D>, Error<D>> {
+		trace!("hashmap::create {:?}", size);
+		// Get entry size and current alloc log.
+		let data = dir.fs.dir_data(dir.id);
+		let hasher = data.hasher;
+		drop(data);
+		let log = dir.heap_alloc_log().await?.clone();
+
+		// Create object.
+		let map = dir.fs.storage.create().await?;
+		map.resize((1u64 << size) * u64::from(ENTRY_SIZE)).await?;
+
+		// Save allocation log.
+		let s = Self { fs: dir.fs, dir_id: dir.id, map, size, hasher };
+		s.save_heap_alloc_log(&log).await?;
+
+		// Done
+		Ok(s)
 	}
 
 	/// Remove an entry.
 	///
-	/// This does not free heap data nor does it remove the corresponding child!
+	/// This does not free heap data!
 	pub async fn remove_at(&self, mut index: u32) -> Result<(), Error<D>> {
 		trace!("remove_at {:?}", index);
 		let hasher = self.fs.dir_data(self.dir_id).hasher;
@@ -47,20 +66,22 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		match hasher {
 			// shift entries if using Robin Hood hashing
 			Hasher::SipHasher13(_) => {
-				let calc_psl = |i: u32, h| i.wrapping_sub(h) & self.mask;
+				let calc_psl = |i: u32, h| i.wrapping_sub(h as u32) & self.mask();
 
 				// FIXME this can get stuck if the hashmap is malformed.
 				//
 				// We should inspect other such infinite loops.
 				loop {
 					// Get the next entry.
-					let next_index = (index + 1) & self.mask;
+					let next_index = (index + 1) & self.mask();
 					let mut e = self.get(next_index).await?;
 					// No need to shift anything else because:
 					// - if e.ty == 0, the next entry is empty.
 					//   We will clear the current entry below anyways.
 					// - if psl == 0 we don't want to shift it from its ideal position.
-					if e.ty == 0 || calc_psl(index + 1, e.hash(&hasher)) == 0 {
+					if e.hash(&hasher)
+						.map_or(true, |hash| calc_psl(index + 1, hash) == 0)
+					{
 						break;
 					}
 
@@ -68,29 +89,15 @@ impl<'a, D: Dev> HashMap<'a, D> {
 					e.index = index;
 					self.set(&e).await?;
 
-					let mut data = self.fs.dir_data(self.dir_id);
-					if let Some(child) = data.children.remove(&next_index) {
-						let _r = data.children.insert(index, child);
-						assert!(_r.is_none(), "a child was already present");
-						drop(data);
-						child.header(self.fs).parent_index = index;
-					} else {
-						drop(data);
-					}
-
 					index += 1;
-					index &= self.mask;
+					index &= self.mask();
 				}
 			}
 		}
 
 		// Mark last shifted entry as empty
-		debug_assert!(
-			!self.fs.dir_data(self.dir_id).children.contains_key(&index),
-			"empty entry contains child",
-		);
-		let offt = self.fs.dir_data(self.dir_id).get_offset(index);
-		write_all(&self.map, offt, &[TY_NONE]).await?;
+		let offt = self.get_offset(index);
+		write_all(&self.map, offt, &[0; ENTRY_SIZE as usize]).await?;
 
 		Ok(())
 	}
@@ -100,20 +107,26 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		trace!("find_index {:?}", name);
 		let hasher = self.fs.dir_data(self.dir_id).hasher;
 		let hash = hasher.hash(name);
-		let mut index = hash & self.mask;
+		let mut index = hash as u32 & self.mask();
 		let dir = Dir::new(self.fs, self.dir_id);
 
 		match hasher {
 			Hasher::SipHasher13(_) => loop {
-				let e = self.get(index).await?;
-				if e.ty == 0 {
+				let entry = self.get(index).await?;
+				let Some(key) = entry.key.as_ref() else {
+					// We encountered an empty entry,
+					// which means the entry we seek does not exist.
 					return Ok(None);
+				};
+				if dir.compare_names(key, name, hash).await? {
+					// We found the entry we were looking for.
+					break Ok(Some(entry));
 				}
-				if dir.compare_names(&e, name, hash).await? {
-					break Ok(Some(e));
-				}
+
+				// TODO terminate early if PSL differs
+
 				index += 1;
-				index &= self.mask;
+				index &= self.mask();
 			},
 		}
 	}
@@ -128,49 +141,33 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	pub async fn get(&self, index: u32) -> Result<RawEntry, Error<D>> {
 		trace!("get {:?}", index);
 		// Get data necessary to extract entry.
-		let data = self.fs.dir_data(self.dir_id);
-		let offt = data.get_offset(index);
-		let len = data.entry_size();
-		let unix_offset = data.unix_offset;
-		let mtime_offset = data.mtime_offset;
-		drop(data);
+		let offt = self.get_offset(index);
 
 		// Read entry.
-		let mut buf = vec![0; len.into()];
+		let mut buf = [0; ENTRY_SIZE as usize];
 		read_exact(&self.map, offt, &mut buf).await?;
 
 		// Get ty, key
-		let (header, rem) = buf.split_array_ref::<16>();
-		let &[ty, key_len, data @ ..] = header;
-		let key = if key_len <= 14 {
-			RawEntryKey::Embed { len: key_len, data }
-		} else {
-			let [a, b, c, d, e, f, data @ ..] = data;
-			let (&hash, _) = data.split_array_ref::<4>();
-			RawEntryKey::Heap {
-				len: key_len,
-				offset: u64::from_le_bytes([a, b, c, d, e, f, 0, 0]),
-				hash: u32::from_le_bytes(hash),
+		let [key_len, data @ ..] = buf;
+		let [data @ .., a, b, c, d] = data;
+		let item_index = u32::from_le_bytes([a, b, c, d]);
+
+		let key = NonZeroU8::new(key_len).map(|len| {
+			if len.get() <= 27 {
+				Key::Embed { len, data }
+			} else {
+				let [_, _, _, _, _, _, _, data @ ..] = data;
+				let [a, b, c, d, e, f, g, h, data @ ..] = data;
+				let [hash @ .., _, _, _, _] = data;
+				Key::Heap {
+					len,
+					offset: u64::from_le_bytes([a, b, c, d, e, f, g, h]),
+					hash: u64::from_le_bytes(hash),
+				}
 			}
-		};
+		});
 
-		// Get ID or (offset, len)
-		let (&id_or_offset, _) = rem.split_array_ref::<8>();
-		let id_or_offset = u64::from_le_bytes(id_or_offset);
-
-		// Get extensions
-
-		// Get unix info
-		let ext_unix = unix_offset
-			.map(usize::from)
-			.map(|o| ext::unix::Entry::from_raw(buf[o..o + 8].try_into().unwrap()));
-
-		// Get mtime info
-		let ext_mtime = mtime_offset
-			.map(usize::from)
-			.map(|o| ext::mtime::Entry::from_raw(buf[o..o + 8].try_into().unwrap()));
-
-		Ok(RawEntry { ty, key, id_or_offset, ext_unix, ext_mtime, index })
+		Ok(RawEntry { key, index, item_index })
 	}
 
 	/// Set the raw standard info for an entry.
@@ -182,48 +179,27 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	/// If the index is out of range.
 	pub async fn set(&self, entry: &RawEntry) -> Result<(), Error<D>> {
 		trace!("set {:?}", entry);
-		debug_assert!(entry.ty != 0, "trying to set empty entry");
 		// Get data necessary to write entry.
-		let data = self.fs.dir_data(self.dir_id);
-		let offt = data.get_offset(entry.index);
-		let len = data.entry_size();
-		let unix_offset = data.unix_offset;
-		let mtime_offset = data.mtime_offset;
-		drop(data);
+		let offt = self.get_offset(entry.index);
 
 		// Serialize entry.
-		let mut buf = vec![0; len.into()];
+		let mut buf = [0; ENTRY_SIZE as usize];
 
 		// Set ty, key
-		buf[0] = entry.ty;
 		match entry.key {
-			RawEntryKey::Embed { len, data } => {
-				buf[1] = len;
-				buf[2..16].copy_from_slice(&data);
+			None => debug_assert_eq!(entry.item_index, 0),
+			Some(Key::Embed { len, data }) => {
+				buf[0] = len.into();
+				buf[1..28].copy_from_slice(&data);
+				buf[28..].copy_from_slice(&entry.item_index.to_le_bytes());
 			}
-			RawEntryKey::Heap { len, offset, hash } => {
-				buf[1] = len;
-				buf[2..8].copy_from_slice(&offset.to_le_bytes()[..6]);
-				buf[8..12].copy_from_slice(&hash.to_le_bytes());
+			Some(Key::Heap { len, offset, hash }) => {
+				buf[0] = len.into();
+				buf[8..16].copy_from_slice(&offset.to_le_bytes());
+				buf[16..24].copy_from_slice(&hash.to_le_bytes());
+				buf[28..].copy_from_slice(&entry.item_index.to_le_bytes());
 			}
 		}
-
-		// Set ID or (offset, len)
-		buf[16..24].copy_from_slice(&entry.id_or_offset.to_le_bytes());
-
-		// Set extensions
-
-		// Set unix info
-		unix_offset
-			.map(usize::from)
-			.and_then(|o| entry.ext_unix.map(|e| (o, e)))
-			.map(|(o, e)| buf[o..o + 8].copy_from_slice(&e.into_raw()));
-
-		// Get mtime info
-		mtime_offset
-			.map(usize::from)
-			.and_then(|o| entry.ext_mtime.map(|e| (o, e)))
-			.map(|(o, e)| buf[o..o + 8].copy_from_slice(&e.into_raw()));
 
 		// Write out entry.
 		write_all(&self.map, offt, &buf).await
@@ -231,7 +207,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 	/// Set arbitrary data.
 	pub async fn set_raw(&self, index: u32, offset: u16, data: &[u8]) -> Result<(), Error<D>> {
-		let offt = self.fs.dir_data(self.dir_id).get_offset(index) + u64::from(offset);
+		let offt = self.get_offset(index) + u64::from(offset);
 		write_all(&self.map, offt, data).await
 	}
 
@@ -239,11 +215,13 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	///
 	/// Optionally, a new name can be specified.
 	/// The `key` present in `entry` will be ignored in that case.
+	///
+	/// Returns a [`Key`] on success.
 	pub async fn insert(
 		&self,
 		mut entry: RawEntry,
 		name: Option<&Name>,
-	) -> Result<Option<u32>, Error<D>> {
+	) -> Result<Option<Key>, Error<D>> {
 		trace!("insert {:?} {:?}", (entry.index, &entry.key), &name);
 		let data = self.fs.dir_data(self.dir_id);
 
@@ -253,39 +231,41 @@ impl<'a, D: Dev> HashMap<'a, D> {
 			data.hasher.hash(name)
 		} else {
 			// Take or calculate the hash from the existing key.
-			entry.hash(&data.hasher)
+			entry.hash(&data.hasher).expect("entry has no name")
 		};
 		let name = name.map(|name| (name, hash));
 
 		// Update index
-		entry.index = hash & self.mask;
+		entry.index = hash as u32 & self.mask();
 
 		/// Set the key & insert the entry.
 		async fn insert_entry<'a, D: Dev>(
 			slf: &HashMap<'a, D>,
-			name: Option<(&Name, u32)>,
+			name: Option<(&Name, u64)>,
 			mut entry: RawEntry,
-		) -> Result<u32, Error<D>> {
+		) -> Result<Key, Error<D>> {
 			trace!("insert::insert_entry {:?} {:?}", name, &entry);
 			let dir = Dir::new(slf.fs, slf.dir_id);
 
 			// Store name if necessary.
 			if let Some((name, hash)) = name {
-				entry.key = if name.len_u8() <= 14 {
+				entry.key = Some(if name.len_u8() <= 27 {
 					// Embed key
-					let mut data = [0; 14];
+					let mut data = [0; 27];
 					data[..name.len()].copy_from_slice(name.as_ref());
-					RawEntryKey::Embed { len: name.len_u8(), data }
+					Key::Embed { len: name.len_nonzero_u8(), data }
 				} else {
 					// Store key on heap
-					let offset = dir.alloc(name.len_u8().into()).await?;
+					let offset = dir.alloc_heap(name.len_u8().into()).await?;
 					dir.write_heap(offset, name).await?;
-					RawEntryKey::Heap { len: name.len_u8(), offset, hash }
-				};
+					Key::Heap { len: name.len_nonzero_u8(), offset, hash }
+				});
 			}
 
 			// Store entry data at index.
-			slf.set(&entry).await.map(|()| entry.index)
+			slf.set(&entry)
+				.await
+				.map(|()| entry.key.expect("expected key on non-empty entry"))
 		}
 
 		let hasher = data.hasher;
@@ -294,7 +274,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 		// Start with default PSL ("poorness")
 		let mut entry_psl = 0u32;
-		let calc_psl = |i: u32, h| i.wrapping_sub(h) & self.mask;
+		let calc_psl = |i: u32, h: u64| i.wrapping_sub(h as u32) & self.mask();
 
 		match hasher {
 			Hasher::SipHasher13(_) => {
@@ -303,33 +283,34 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				// - Then, shift every other entry forward until we hit an empty slot.
 
 				// Insert current entry.
-				let (entry_index, mut entry, mut child) = loop {
+				let (entry_index, mut entry, key) = loop {
 					let e = self.get(entry.index).await?;
 
-					// We found a free slot.
-					// Insert and return.
-					if e.ty == 0 {
-						return insert_entry(self, name, entry).await.map(Some);
-					}
+					let Some(key) = e.key.as_ref() else {
+						// If None, we found a free slot.
+						// Insert and return.
+						let key = insert_entry(self, name, entry).await?;
+						return Ok(Some(key));
+					};
 
 					// If the entry has the same name as us, exit.
 					if let Some((name, hash)) = name {
-						if dir.compare_names(&e, name, hash).await? {
+						if dir.compare_names(&key, name, hash).await? {
 							return Ok(None);
 						}
 					}
 
 					// Check if the PSL (Probe Sequence Length) is lower than that of ours
 					// If yes, swap with it and begin shifting forward.
-					if entry_psl > calc_psl(entry.index, e.hash(&hasher)) {
-						let index = insert_entry(self, name, entry).await?;
-						let child = self.fs.dir_data(self.dir_id).children.remove(&index);
-						break (index, e, child);
+					if entry_psl > calc_psl(entry.index, key.hash(&hasher)) {
+						let index = entry.index;
+						let key = insert_entry(self, name, entry).await?;
+						break (index, e, key);
 					}
 
 					// Try next slot
 					entry.index += 1;
-					entry.index &= self.mask;
+					entry.index &= self.mask();
 					entry_psl += 1;
 				};
 
@@ -337,25 +318,18 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				// until an empty slot is found.
 				loop {
 					entry.index += 1;
-					entry.index &= self.mask;
+					entry.index &= self.mask();
 
 					let e = self.get(entry.index).await?;
 
 					// Insert unconditionally.
-					let index = insert_entry(self, None, entry).await?;
-					// Insert current child & take next child
-					child = if let Some(c) = child {
-						c.header(self.fs).parent_index = index;
-						self.fs.dir_data(self.dir_id).children.insert(index, c)
-					} else {
-						self.fs.dir_data(self.dir_id).children.remove(&index)
-					};
+					let index = entry.index;
+					insert_entry(self, None, entry).await?;
 
 					// We found a free slot.
 					// Free at last!
-					if e.ty == 0 {
-						debug_assert!(child.is_none(), "empty entry has child");
-						return Ok(Some(entry_index));
+					if e.key.is_none() {
+						return Ok(Some(key));
 					}
 
 					// Continue with swapped out entry.
@@ -364,148 +338,107 @@ impl<'a, D: Dev> HashMap<'a, D> {
 			}
 		}
 	}
+
+	/// Write a full, minimized heap allocation log.
+	pub(super) async fn save_heap_alloc_log(&self, log: &RangeSet<u64>) -> Result<(), Error<D>> {
+		// Get log.
+		let mut log_offt = self.heap_alloc_log_base();
+		let log_len = log.iter().count();
+
+		// Ensure there is enough capacity.
+		self.map
+			.resize(log_offt + 16 * u64::try_from(log_len).unwrap())
+			.await?;
+
+		// Write log.
+		for r in log.iter() {
+			let mut buf = [0; 16];
+			buf[..8].copy_from_slice(&r.start.to_le_bytes());
+			buf[8..].copy_from_slice(&(r.end - r.start).to_le_bytes());
+			write_all(&self.map, log_offt, &buf).await?;
+			log_offt += 16;
+		}
+
+		Ok(())
+	}
+
+	/// Get or load the heap allocation map.
+	pub(super) async fn heap_alloc_log(&self) -> Result<RefMut<'a, RangeSet<u64>>, Error<D>> {
+		// Check if the map has already been loaded.
+		let data = self.fs.dir_data(self.dir_id);
+		if let Ok(r) = RefMut::filter_map(data, |data| data.heap_alloc_map.as_mut()) {
+			return Ok(r);
+		}
+
+		// Load the allocation log
+		let mut log = RangeSet::new();
+		let alloc_log_base = self.heap_alloc_log_base();
+		let l = self.map.len().await?;
+
+		for offt in (alloc_log_base..l).step_by(16) {
+			let mut buf = [0; 16];
+			read_exact(&self.map, offt, &mut buf).await?;
+			let [a, b, c, d, e, f, g, h, buf @ ..] = buf;
+			let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+			let length = u64::from_le_bytes(buf);
+			assert!(length > 0, "todo: return error when length == 0");
+			if length > 0 {
+				if log.contains(&offset) {
+					// Deallocation
+					log.remove(offset..offset + length);
+				} else {
+					// Allocation
+					log.insert(offset..offset + length);
+				}
+			}
+		}
+
+		Ok(RefMut::map(self.fs.dir_data(self.dir_id), |data| {
+			data.heap_alloc_map.insert(log)
+		}))
+	}
+
+	/// Determine the offset of an entry.
+	///
+	/// This does *not* check if the index is in range.
+	fn get_offset(&self, index: u32) -> u64 {
+		u64::from(index) * u64::from(ENTRY_SIZE)
+	}
+
+	/// Offset of the base of the heap allocation log.
+	fn heap_alloc_log_base(&self) -> u64 {
+		(1u64 << self.size) * u64::from(ENTRY_SIZE)
+	}
+
+	/// Mask to apply to indices.
+	fn mask(&self) -> u32 {
+		1u32.wrapping_shl(self.size.to_raw().into()).wrapping_sub(1)
+	}
 }
 
 /// Raw entry data.
 #[derive(Clone, Debug)]
 pub(super) struct RawEntry {
-	// Header
-	/// Entry type.
-	pub ty: u8,
 	/// Key data.
 	///
 	/// The variant depends on whether it is embedded or not.
 	/// If the length is `<= 14` the key is embedded.
 	/// If the length is `> 14` the key is stored on the heap.
-	pub key: RawEntryKey,
-
-	// Regular data
-	/// Entry regular data.
 	///
-	/// The meaning of the value depends on entry type.
-	/// Use [`Self::ty`] to determine.
-	pub id_or_offset: u64,
-
-	// Extension data
-	/// `unix` extension data.
-	pub ext_unix: Option<ext::unix::Entry>,
-	/// `mtime` extension data.
-	pub ext_mtime: Option<ext::mtime::Entry>,
-
-	// Other
+	/// If the key length is 0, this entry is [`None`].
+	/// In that case the entry is empty.
+	pub key: Option<Key>,
 	/// The index of the entry.
 	pub index: u32,
+	/// The index of the corresponding item.
+	pub item_index: u32,
 }
 
 impl RawEntry {
-	pub fn ty(&self) -> Result<Type, u8> {
-		match self.ty {
-			TY_DIR => Ok(Type::Dir { id: self.id_or_offset }),
-			TY_FILE => Ok(Type::File { id: self.id_or_offset }),
-			TY_SYM => Ok(Type::Sym { id: self.id_or_offset }),
-			TY_EMBED_FILE => Ok(Type::EmbedFile {
-				offset: self.id_or_offset & 0xff_ffff,
-				length: (self.id_or_offset >> 48) as _,
-			}),
-			TY_EMBED_SYM => Ok(Type::EmbedSym {
-				offset: self.id_or_offset & 0xff_ffff,
-				length: (self.id_or_offset >> 48) as _,
-			}),
-			n => Err(n),
-		}
-	}
-
 	/// Take or calculate the hash from the existing key.
-	fn hash(&self, hasher: &Hasher) -> u32 {
-		match self.key {
-			RawEntryKey::Embed { len, data: d } => hasher.hash(&d[..len.into()]),
-			RawEntryKey::Heap { len: _, offset: _, hash } => hash,
-		}
-	}
-}
-
-/// Entry key, which may be embedded or on the heap.
-#[derive(Clone)]
-pub(super) enum RawEntryKey {
-	Embed {
-		/// The length of the key.
-		///
-		/// Must be `<= 14`.
-		len: u8,
-		/// The data of the key.
-		data: [u8; 14],
-	},
-	Heap {
-		/// The length of the key.
-		///
-		/// Must be `> 14`.
-		len: u8,
-		/// The offset of the key on the heap.
-		offset: u64,
-		/// The hash of the key, unless [`Self::key_len`] is `<= 14`.
-		///
-		/// Used to avoid heap fetches when moving or comparing entries.
-		hash: u32,
-	},
-}
-
-impl fmt::Debug for RawEntryKey {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			&Self::Embed { len, data } => f
-				.debug_struct(stringify!(Embed))
-				.field("len", &len)
-				.field("data", &<&Name>::try_from(&data[..len.into()]).unwrap())
-				.finish(),
-			&Self::Heap { len, offset, hash } => f
-				.debug_struct(stringify!(Heap))
-				.field("len", &len)
-				.field("offset", &offset)
-				.field("hash", &format_args!("{:#10x}", &hash))
-				.finish(),
-		}
-	}
-}
-
-/// Hasher helper structure.
-///
-/// Avoids the need to borrow `DirData` redundantly.
-#[derive(Clone, Copy, Debug)]
-#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
-pub enum Hasher {
-	SipHasher13([u8; 16]),
-}
-
-impl Hasher {
-	/// Turn this hasher into raw components for storage.
 	///
-	/// The first element represents the type,
-	/// the second element represents the key.
-	pub fn to_raw(self) -> (u8, [u8; 16]) {
-		match self {
-			Self::SipHasher13(h) => (1, h),
-		}
-	}
-
-	/// Create a hasher from raw components.
-	///
-	/// Fails if the hasher type is unknown.
-	pub fn from_raw(ty: u8, key: &[u8; 16]) -> Option<Self> {
-		Some(match ty {
-			1 => Self::SipHasher13(*key),
-			_ => return None,
-		})
-	}
-
-	/// Hash an arbitrary-sized key.
-	fn hash(&self, data: &[u8]) -> u32 {
-		use core::hash::Hasher;
-		match self {
-			Self::SipHasher13(key) => {
-				let mut h = SipHasher13::new_with_key(key);
-				h.write(data);
-				h.finish() as _
-			}
-		}
+	/// Returns [`None`] if the key is [`None`]
+	fn hash(&self, hasher: &Hasher) -> Option<u64> {
+		self.key.as_ref().map(|key| key.hash(hasher))
 	}
 }

@@ -234,12 +234,12 @@ impl<'a, D: Dev> File<'a, D> {
 				// Take data off the directory's heap and deallocate.
 				let mut buf = vec![0; usize::from(length)];
 				dir.read_heap(offt, &mut buf).await?;
-				dir.dealloc(offt, u64::from(length)).await?;
+				dir.dealloc_heap(offt, u64::from(length)).await?;
 
 				// Determine whether we should keep the data embedded.
 				let bs = 1u64 << self.fs.block_size();
 				let new_inner = if end <= u64::from(u16::MAX).min(bs * EMBED_FACTOR) {
-					let o = dir.alloc(end).await?;
+					let o = dir.alloc_heap(end).await?;
 					// TODO avoid redundant tail write
 					dir.write_heap(o, &buf).await?;
 					dir.write_heap(o + offset, &data).await?;
@@ -300,13 +300,13 @@ impl<'a, D: Dev> File<'a, D> {
 				drop(data);
 				let mut buf = vec![0; new_len.min(u64::from(length)) as _];
 				dir.read_heap(offt, &mut buf).await?;
-				dir.dealloc(offt, u64::from(length)).await?;
+				dir.dealloc_heap(offt, u64::from(length)).await?;
 
 				// Determine whether we should keep the data embedded.
 				let bs = 1u64 << self.fs.block_size();
 				let new_inner = if new_len <= u64::from(u16::MAX).min(bs * EMBED_FACTOR) {
 					// Keep it embedded, write to
-					let o = dir.alloc(new_len).await?;
+					let o = dir.alloc_heap(new_len).await?;
 					dir.write_heap(o, &buf).await?;
 					Inner::Embed { offset: o, length: new_len.try_into().unwrap() }
 				} else {
@@ -334,7 +334,7 @@ impl<'a, D: Dev> File<'a, D> {
 		match &data.inner {
 			&Inner::Object { id } => {
 				drop(data);
-				self.fs.length(id).await
+				Ok(self.fs.storage.get(id).await?.len().await?)
 			}
 			&Inner::Embed { length, .. } => Ok(length.into()),
 		}

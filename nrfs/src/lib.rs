@@ -75,7 +75,7 @@ use {
 		mem,
 		ops::{Deref, DerefMut},
 	},
-	dir::{Child, DirData, Entry},
+	dir::{Child, DirData, ItemRef},
 	file::FileData,
 	rustc_hash::FxHashMap,
 	std::collections::hash_map,
@@ -164,9 +164,8 @@ impl<D: Dev> Nrfs<D> {
 	}
 
 	async fn read_exact(&self, id: u64, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
-		self.read(id, offset, buf)
-			.await
-			.and_then(|l| (l == buf.len()).then_some(()).ok_or(Error::Truncated))
+		let obj = self.storage.get(id).await?;
+		Ok(read_exact(&obj, offset, buf).await?)
 	}
 
 	async fn write(&self, id: u64, offset: u64, data: &[u8]) -> Result<usize, Error<D>> {
@@ -179,17 +178,17 @@ impl<D: Dev> Nrfs<D> {
 	}
 
 	async fn write_all(&self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
-		self.write(id, offset, data)
-			.await
-			.and_then(|l| (l == data.len()).then_some(()).ok_or(Error::Truncated))
+		let obj = self.storage.get(id).await?;
+		Ok(write_all(&obj, offset, data).await?)
 	}
 
 	/// This function automatically grows the object if it can't contain the data.
 	async fn write_grow(&self, id: u64, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
-		if self.length(id).await? < offset + data.len() as u64 {
-			self.resize(id, offset + data.len() as u64).await?;
+		let obj = self.storage.get(id).await?;
+		if obj.len().await? < offset + data.len() as u64 {
+			obj.resize(offset + data.len() as u64).await?;
 		}
-		self.write_all(id, offset, data).await
+		write_all(&obj, offset, data).await
 	}
 
 	async fn resize(&self, id: u64, len: u64) -> Result<(), Error<D>> {
@@ -199,11 +198,6 @@ impl<D: Dev> Nrfs<D> {
 			.resize(len)
 			.await
 			.map_err(Error::Nros)
-	}
-
-	/// Get the length of an object.
-	async fn length(&self, id: u64) -> Result<u64, Error<D>> {
-		self.storage.get(id).await?.len().await.map_err(Error::Nros)
 	}
 
 	/// Unmount the object store.
@@ -479,14 +473,14 @@ macro_rules! impl_tmpref {
 			}
 		}
 
-		impl<'s, 'f, D: Dev> From<TmpRef<'s, $ref<'f, D>>> for TmpRef<'s, Entry<'f, D>> {
+		impl<'s, 'f, D: Dev> From<TmpRef<'s, $ref<'f, D>>> for TmpRef<'s, ItemRef<'f, D>> {
 			fn from(TmpRef { inner, _marker }: TmpRef<'s, $ref<'f, D>>) -> Self {
 				let inner = mem::ManuallyDrop::into_inner(inner);
-				Self { inner: mem::ManuallyDrop::new(Entry::$var(inner)), _marker }
+				Self { inner: mem::ManuallyDrop::new(ItemRef::$var(inner)), _marker }
 			}
 		}
 
-		impl<'f, D: Dev> From<$ref<'f, D>> for Entry<'f, D> {
+		impl<'f, D: Dev> From<$ref<'f, D>> for ItemRef<'f, D> {
 			fn from(r: $ref<'f, D>) -> Self {
 				Self::$var(r)
 			}
@@ -546,6 +540,8 @@ async fn write_all<'a, D: Dev>(
 	data: &[u8],
 ) -> Result<(), Error<D>> {
 	let l = obj.write(offset, data).await?;
+	#[cfg(test)]
+	debug_assert_eq!(l, data.len());
 	(l == data.len()).then_some(()).ok_or(Error::Truncated)
 }
 
@@ -558,6 +554,8 @@ async fn read_exact<'a, D: Dev>(
 	buf: &mut [u8],
 ) -> Result<(), Error<D>> {
 	let l = obj.read(offset, buf).await?;
+	#[cfg(test)]
+	debug_assert_eq!(l, buf.len());
 	(l == buf.len()).then_some(()).ok_or(Error::Truncated)
 }
 

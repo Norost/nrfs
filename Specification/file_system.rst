@@ -23,9 +23,9 @@ File types
   +======+=============================+
   |    0 | Invalid / empty             |
   +------+-----------------------------+
-  |    1 | Regular file                |
+  |    1 | Directory                   |
   +------+-----------------------------+
-  |    2 | Directory                   |
+  |    2 | Regular file                |
   +------+-----------------------------+
   |    3 | Symbolic link               |
   +------+-----------------------------+
@@ -68,20 +68,47 @@ Directory
 
 A directory is a special type of file that points to other files.
 
-It consists of two objects: one object with a header and hashmap at ID
-and one object for "heap" data at ID + 1 [#]_
+It consists of three objects [#]_, where ID is the ID of the first object:
+
+* The first object at ID + 0 contains the header and directory entries.
+* The second object at ID + 1 contains the hashmap and allocation log.
+* The third object at ID + 2 contains the heap.
+
+::
+
+                   +-----------+
+           +-------+ Directory +-------+
+          /        +-----+-----+        \
+         /               |               \
+  +-----+-----+    +-----+-----+    +-----+-----+
+  |   Items   |    |  Hashmap  |    |   Heap    |
+  +===========+    +===========+    +===========+
+  |  Header   |    |  Entry 0  |    |    ...    |
+  +-----------+    +-----------+    +-----------+
+  |  Item 0   |    |  Entry 1  |
+  +-----------+    +-----------+
+  |  Item 1   |    |    ...    |
+  +-----------+    +-----------+
+  |    ...    |    | Heap log  |
+  +-----------+    +-----------+
+  | Item log  |
+  +-----------+
 
 .. [#]
 
-  The map and heap are split so the map can grow without needing to shift the
-  heap data or leave large holes.
-  Fixing the heap ID relative to the map's ID allows loading it concurrently.
+  The directory's data is split so each object can grow without needing to
+  shift directory, hashmap, heap data or leave large holes.
+  Fixing the ID's offsets allows loading them concurrently.
 
-A hashmap [#]_ is used to keep track of files.
+  To allow efficient iteration while modifying the directory,
+  by adding and/or removing items,
+  items aren't stored directly in the hashmap but are stored separately.
+
+A hashmap [#]_ is used to index file in constant time.
 
 .. [#]
 
-  Hashmaps are used as they are very simple to implement.
+  Hashmaps are used as they are relatively simple to implement.
   They also scale and perform well.
   Two situations were considered:
 
@@ -119,11 +146,13 @@ Every directory begins with a variable-sized byte header.
   +======+======+======+======+======+======+======+======+======+
   |    0 |        Entry count        | MLen | HAlg | ELen | HLen |
   +------+---------------------------+------+------+------+------+
-  |    8 |                                                       |
-  +------+                          Key                          |
+  |    8 |                           |      Entry capacity       |
+  +------+---------------------------+---------------------------+
   |   16 |                                                       |
+  +------+                          Key                          |
+  |   24 |                                                       |
   +------+-------------------------------------------------------+
-  |   24 |                      Extensions                       |
+  |   32 |                      Extensions                       |
   +------+-------------------------------------------------------+
   |  ... |                          ...                          |
   +------+-------------------------------------------------------+
@@ -158,45 +187,47 @@ Hash algorithms are [#]_:
   |  N+2 |    Data     |
   +------+-------------+
 
-Hashmap entry
-~~~~~~~~~~~~~
-
-.. table:: Entry header if KLen <= 16
-  :align: center
-  :widths: grid
+.. table:: Item / entry header if KLen <= 27
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |              Key (0 to 5)               | KLen | Type |
-  +------+-----------------------------------------+------+------+
-  |    8 |                     Key (6 to 13)                     |
+  |    0 |                  Key (0 to 6)                  | KLen |
+  +------+------------------------------------------------+------+
+  |    8 |                     Key (7 to 14)                     |
   +------+-------------------------------------------------------+
-
-.. table:: Entry header if KLen > 16
-  :align: center
-  :widths: grid
-
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |               Key offset                | KLen | Type |
-  +------+---------------------------+-------------+------+------+
-  |    8 |                           |           Hash            |
+  |   16 |                    Key (15 to 22)                     |
+  +------+---------------------------+---------------------------+
+  |   24 |            ...            |      Key (23 to 26)       |
   +------+---------------------------+---------------------------+
 
-* Type: The type of the entry.
-  If 0, it is empty / invalid.
+.. table:: Item / entry header if KLen > 27
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                                                | KLen |
+  +------+------------------------------------------------+------+
+  |    8 |                      Key offset                       |
+  +------+-------------------------------------------------------+
+  |   16 |                          Hash                         |
+  +------+---------------------------+---------------------------+
+  |   24 |            ...            |                           |
+  +------+---------------------------+---------------------------+
 
 * KLen: The length of the key.
+  If it 0, the entry is unused.
 
 * Key: The key string.
-  Only valid if KLen is 16 or less [#]_.
+  Only valid if KLen is 27 or less [#]_.
 
 * Key offset: Pointer to the key in the heap
+  Only valid if KLen is larger than 27.
 
-* Hash: The 32-bit hash of the key.
-  Only valid if KLen is larger than 16.
+* Hash: The 64-bit hash of the key.
+  Only valid if KLen is larger than 27.
 
 .. [#]
 
@@ -233,7 +264,10 @@ Hashmap entry
   ================ ======= ================ ============
 
 
-.. table:: Regular entry
+Directory item
+~~~~~~~~~~~~~~
+
+.. table:: Directory item with object ID.
   :align: center
   :widths: grid
 
@@ -241,17 +275,21 @@ Hashmap entry
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
   |    0 |                                                       |
-  +------+                        Header                         |
+  +------+                                                       |
   |    8 |                                                       |
+  +------+                        Header                         |
+  |   16 |                                                       |
+  +------+--------------------+------+                           |
+  |   24 |                    | Type |                           |
+  +------+--------------------+------+---------------------------+
+  |   32 |                       Object ID                       |
   +------+-------------------------------------------------------+
-  |   16 |                       Object ID                       |
-  +------+-------------------------------------------------------+
-  |   24 |                    Extension data                     |
-  +------+-------------------------------------------------------+
-  |  ... |                          ...                          |
+  |   40 |                                                       |
+  +------+                    Extension data                     |
+  |  ... |                                                       |
   +------+-------------------------------------------------------+
 
-.. table:: Embedded entry
+.. table:: Directory item with embedded data.
   :align: center
   :widths: grid
 
@@ -259,27 +297,65 @@ Hashmap entry
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
   |    0 |                                                       |
-  +------+                        Header                         |
+  +------+                                                       |
   |    8 |                                                       |
-  +------+-------------+-----------------------------------------+
-  |   16 | Data Length |               Data offset               |
-  +------+-------------+-----------------------------------------+
-  |   24 |                    Extension data                     |
+  +------+                        Header                         |
+  |   16 |                                                       |
+  +------+-------------+------+------+                           |
+  |   24 | Data length |      | Type |                           |
+  +------+-------------+------+------+---------------------------+
+  |   16 |                      Data offset                      |
   +------+-------------------------------------------------------+
-  |  ... |                          ...                          |
+  |   40 |                                                       |
+  +------+                    Extension data                     |
+  |  ... |                                                       |
   +------+-------------------------------------------------------+
 
-* Object index: The ID of the corresponding object.
-  Only valid if the type is 1, 2 or 3.
+* Type: The type of the entry [#]_.
+
+.. [#] 
+
+   KLen may be zero while having a non-zero type if an entry was removed while
+   still having a live reference.
+
+   This makes it easier to support ``unlink()`` on UNIX systems.
+
+* Object ID: The ID of the corresponding object.
+  Only valid if the type is Directory, File or Symbolic Link.
 
 * Data offset: The offset of the entry's data in the heap.
-  Only valid if the type is 4 or 5.
+  Only valid if the type is Embedded File or Embedded Symbolic Link.
 
 * Data length: The offset of the entry's data in the heap.
-  Only valid if the type is 4 or 5.
+  Only valid if the type is Embedded File or Embedded Symbolic Link.
 
 * Extension data: Optional metadata associated with the entry.
   See Extensions_.
+
+
+Hashmap entry
+~~~~~~~~~~~~~
+
+.. table:: Hashmap entry
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                                                       |
+  +------+                                                       |
+  |    8 |                                                       |
+  +------+                        Header                         |
+  |   16 |                                                       |
+  +------+---------------------------+                           |
+  |   24 |           Index           |                           |
+  +------+---------------------------+---------------------------+
+
+* Index: the index of the corresponding directory item.
+
+If the key is heap-allocated, the same allocation is shared with the directory
+item.
 
 
 Allocation log
@@ -288,7 +364,7 @@ Allocation log
 After the hashmap comes an allocation log.
 Each entry in the log indicates a single allocation or deallocation.
 
-.. table:: Log entry
+.. table:: Heap log entry
   :align: center
   :widths: grid
 
@@ -300,8 +376,20 @@ Each entry in the log indicates a single allocation or deallocation.
   |    8 |                        Length                         |
   +------+-------------------------------------------------------+
 
-The high bit of length indicates whether the entry is an allocation (0)
-or deallocation (1).
+.. table:: Heap log entry
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |          Length           |          Offset           |
+  +------+---------------------------+---------------------------+
+
+Each log entry inverts the status of the range covered (i.e. ``xor``).
+Each log entry indicates either an allocation or deallocation,
+never both partially.
+The length of each entry may never be 0.
 
 The size of the log is determined by the total size of the map object.
 
