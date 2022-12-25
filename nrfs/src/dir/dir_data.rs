@@ -10,13 +10,17 @@ use {
 /// The map is located at ID.
 /// The heap is located at ID + 1.
 #[derive(Debug)]
-pub struct DirData {
+pub(crate) struct DirData {
 	/// Data header.
 	pub(crate) header: DataHeader,
 	/// Live [`FileRef`] and [`DirRef`]s that point to files which are a child of this directory.
 	///
 	/// Index corresponds to the position in the item list.
 	pub(crate) children: FxHashMap<u32, Child>,
+	/// Whether this directory has been removed and the corresponding item is dangling.
+	///
+	/// If `true`, no modifications may be made to this directory.
+	pub(super) is_dangling: bool,
 	/// The length of the header, in multiples of 8 bytes.
 	pub(super) header_len8: u8,
 	/// The length of a single item, in multiples of 8 bytes.
@@ -41,10 +45,6 @@ pub struct DirData {
 	///
 	/// It is lazily loaded to save time when only reading the directory.
 	pub(super) heap_alloc_map: Option<RangeSet<u64>>,
-	/// Whether this directory has been removed and the corresponding item is dangling.
-	///
-	/// If `true`, no modifications may be made to this directory.
-	pub(super) is_dangling: bool,
 }
 
 impl DirData {

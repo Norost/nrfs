@@ -16,11 +16,12 @@ use {
 	crate::{
 		file, read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Name, Nrfs, SymRef,
 	},
-	core::cell::RefMut,
+	core::{cell::RefMut, mem},
 	hashmap::*,
 	item::Item,
 	key::Key,
 	rangemap::RangeSet,
+	std::collections::hash_map,
 };
 
 // TODO determine a good load factor.
@@ -144,7 +145,11 @@ impl<'a, D: Dev> Dir<'a, D> {
 			// If loaded, mark as dangling.
 			match data.children.get(&item.index) {
 				None => drop(data),
-				Some(&Child::File(_)) => drop(data),
+				Some(&Child::File(idx)) => {
+					drop(data);
+					debug_assert!(!self.fs.file_data(idx).is_dangling, "already dangling");
+					self.fs.file_data(idx).is_dangling = true;
+				}
 				Some(&Child::Dir(id)) => {
 					drop(data);
 					debug_assert!(!self.fs.dir_data(id).is_dangling, "already dangling");
@@ -648,6 +653,18 @@ impl<'a, D: Dev> Dir<'a, D> {
 		}
 		Ok(())
 	}
+
+	/// Clear the given item.
+	/// This is used to clean up removed items after all references are destroyed.
+	///
+	/// # Note
+	///
+	/// This function does *not* free up space!
+	pub(crate) async fn clear_item(&self, index: u32) -> Result<(), Error<D>> {
+		trace!("clear_item {:?}", index);
+		let len = self.fs.dir_data(self.id).item_size() - 28;
+		self.set(index, 28, &vec![0; len.into()]).await
+	}
 }
 
 impl<'a, D: Dev> DirRef<'a, D> {
@@ -1039,6 +1056,9 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	/// Returns `Ok(Ok(()))` if successful.
 	/// It will fail if no entry with the given name could be found.
 	/// It will also fail if the type is unknown to avoid space leaks.
+	///
+	/// If there is a live reference to the removed item,
+	/// the item is kept intact until all references are dropped.
 	pub async fn remove(&self, name: &Name) -> Result<Result<(), RemoveError>, Error<D>> {
 		trace!("remove {:?}", name);
 		if let Some(e) = self.dir().hashmap().await?.find_index(name).await? {
@@ -1048,13 +1068,88 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		}
 	}
 
+	/// Destroy the reference to this directory.
+	///
+	/// This will perform cleanup if the directory is dangling
+	/// and this was the last reference.
+	pub async fn drop(mut self) -> Result<(), Error<D>> {
+		trace!("drop");
+		// Loop so we can drop references to parent directories
+		// without recursion and avoid a potential stack overflow.
+		loop {
+			// Don't run the Drop impl
+			let DirRef { id, fs } = self;
+			mem::forget(self);
+
+			let mut fs_ref = fs.data.borrow_mut();
+			let hash_map::Entry::Occupied(mut data) = fs_ref.directories.entry(id) else {
+				unreachable!()
+			};
+			data.get_mut().header.reference_count -= 1;
+			if data.get().header.reference_count == 0 {
+				// Remove DirData.
+				let header = data.get().header.clone();
+				let data = data.remove();
+
+				// If this is the root dir there is no parent dir,
+				// so check first.
+				if id != 0 {
+					// Remove itself from parent directory.
+					let dir = fs_ref
+						.directories
+						.get_mut(&header.parent_id)
+						.expect("parent dir is not loaded");
+					let _r = dir.children.remove(&header.parent_index);
+					debug_assert!(
+						matches!(_r, Some(Child::Dir(i)) if i == id),
+						"child not present in parent"
+					);
+
+					drop(fs_ref);
+
+					// Reconstruct DirRef to adjust reference count of dir appropriately.
+					self = DirRef { fs, id: header.parent_id };
+
+					// If this directory is dangling, destroy it
+					// and remove it from the parent directory.
+					let r = async {
+						if data.is_dangling && !fs.read_only {
+							// TODO add sanity checks to ensure it is empty.
+							for offt in 0..3 {
+								fs.storage
+									.get(id + offt)
+									.await?
+									.decrease_reference_count()
+									.await?;
+							}
+							self.dir().clear_item(data.header.parent_index).await?;
+						}
+						Ok(())
+					}
+					.await;
+					if let Err(e) = r {
+						mem::forget(self);
+						return Err(e);
+					}
+
+					// Continue with parent dir
+					continue;
+				} else {
+					debug_assert!(!data.is_dangling, "root cannot dangle");
+				}
+			}
+			break;
+		}
+		Ok(())
+	}
+
 	/// Get the amount of items in this directory.
 	pub async fn len(&self) -> Result<u32, Error<D>> {
 		Ok(self.fs.dir_data(self.id).item_count)
 	}
 
 	/// Create a [`Dir`] helper structure.
-	fn dir(&self) -> Dir<'a, D> {
+	pub(crate) fn dir(&self) -> Dir<'a, D> {
 		Dir::new(self.fs, self.id)
 	}
 }

@@ -34,5 +34,9 @@ fn transfer_embed() {
 		let buf = &mut [0; 6];
 		file.read_exact(0, buf).await.unwrap();
 		assert_eq!(*buf, *b"Hello!");
+
+		file.drop().await.unwrap();
+		dir.drop().await.unwrap();
+		root.drop().await.unwrap();
 	})
 }

@@ -104,6 +104,8 @@ pub struct Nrfs<D: Dev> {
 	storage: nros::Nros<D>,
 	/// Data of objects with live references.
 	data: RefCell<NrfsData>,
+	/// Whether this filesystem is mounted as read-only.
+	read_only: bool,
 }
 
 impl<D: Dev> Nrfs<D> {
@@ -129,19 +131,23 @@ impl<D: Dev> Nrfs<D> {
 			dirty_cache_size,
 		)
 		.await?;
-		let mut s = Self { storage, data: Default::default() };
-		DirRef::new_root(&mut s, dir).await?;
+		let mut s = Self { storage, data: Default::default(), read_only: false };
+		DirRef::new_root(&mut s, dir).await?.drop().await?;
 		Ok(s)
 	}
 
+	/// `read_only` guarantees no modifications will be made.
+	// TODO read_only is a sham.
 	pub async fn load(
 		devices: Vec<D>,
 		global_cache_size: usize,
 		dirty_cache_size: usize,
+		read_only: bool,
 	) -> Result<Self, Error<D>> {
 		Ok(Self {
 			storage: nros::Nros::load(devices, global_cache_size, dirty_cache_size).await?,
 			data: Default::default(),
+			read_only,
 		})
 	}
 
@@ -252,12 +258,15 @@ pub trait RawRef<'a, D: Dev>: Sized + 'a {
 
 /// Reference to a directory object.
 #[derive(Debug)]
+#[must_use = "Must be manually dropped with DirRef::drop"]
 pub struct DirRef<'a, D: Dev> {
 	/// Filesystem object containing the directory.
 	fs: &'a Nrfs<D>,
 	/// ID of the directory object.
 	id: u64,
 }
+
+impl<'a, D: Dev> DirRef<'a, D> {}
 
 /// Raw [`DirRef`] data.
 ///
@@ -290,40 +299,13 @@ impl<'a, D: Dev> Clone for DirRef<'a, D> {
 
 impl<D: Dev> Drop for DirRef<'_, D> {
 	fn drop(&mut self) {
-		let mut fs = self.fs.data.borrow_mut();
-		let hash_map::Entry::Occupied(mut data) = fs.directories.entry(self.id) else {
-			unreachable!()
-		};
-		data.get_mut().header.reference_count -= 1;
-		if data.get().header.reference_count == 0 {
-			// Remove DirData.
-			let header = data.get().header.clone();
-			data.remove();
-
-			// If this is the root dir there is no parent dir,
-			// so check first.
-			if self.id != 0 {
-				// Remove itself from parent directory.
-				let dir = fs
-					.directories
-					.get_mut(&header.parent_id)
-					.expect("parent dir is not loaded");
-				let _r = dir.children.remove(&header.parent_index);
-				debug_assert!(
-					matches!(_r, Some(Child::Dir(id)) if id == self.id),
-					"child not present in parent"
-				);
-
-				// Reconstruct DirRef to adjust reference count of dir appropriately.
-				drop(fs);
-				drop(DirRef { fs: self.fs, id: header.parent_id });
-			}
-		}
+		forbid_drop()
 	}
 }
 
 /// Reference to a file object.
 #[derive(Debug)]
+#[must_use = "Must be manually dropped with FileRef::drop"]
 pub struct FileRef<'a, D: Dev> {
 	/// Filesystem object containing the directory.
 	fs: &'a Nrfs<D>,
@@ -362,39 +344,13 @@ impl<'a, D: Dev> Clone for FileRef<'a, D> {
 
 impl<D: Dev> Drop for FileRef<'_, D> {
 	fn drop(&mut self) {
-		let mut fs_ref = self.fs.data.borrow_mut();
-		let fs = &mut *fs_ref; // borrow errors ahoy!
-
-		let mut data = fs
-			.files
-			.get_mut(self.idx)
-			.expect("filedata should be present");
-
-		data.header.reference_count -= 1;
-		if data.header.reference_count == 0 {
-			// Remove itself from parent directory.
-			let dir = fs
-				.directories
-				.get_mut(&data.header.parent_id)
-				.expect("parent dir is not loaded");
-			let _r = dir.children.remove(&data.header.parent_index);
-			debug_assert!(matches!(_r, Some(Child::File(idx)) if idx == self.idx));
-
-			// Remove filedata.
-			let data = fs
-				.files
-				.remove(self.idx)
-				.expect("filedata should be present");
-
-			// Reconstruct DirRef to adjust reference count of dir appropriately.
-			drop(fs_ref);
-			drop(DirRef { fs: self.fs, id: data.header.parent_id });
-		}
+		forbid_drop()
 	}
 }
 
 /// Reference to a file object representing a symbolic link.
 #[derive(Clone, Debug)]
+#[must_use = "Must be manually dropped with SymRef::drop"]
 pub struct SymRef<'a, D: Dev>(FileRef<'a, D>);
 
 /// Raw [`SymRef`] data.
@@ -418,6 +374,7 @@ impl<'a, D: Dev> RawRef<'a, D> for SymRef<'a, D> {
 
 /// Reference to an entry with an unrecognized type.
 #[derive(Clone, Debug)]
+#[must_use = "Must be manually dropped with UnknownRef::drop"]
 pub struct UnknownRef<'a, D: Dev>(FileRef<'a, D>);
 
 /// Raw [`UnknownRef`] data.
@@ -580,5 +537,18 @@ impl DataHeader {
 	/// Create a new header.
 	fn new(parent_id: u64, parent_index: u32) -> Self {
 		Self { reference_count: 1, parent_id, parent_index }
+	}
+}
+
+/// Panic if a type is being dropped when it shouldn't be.
+///
+/// Used by [`FileRef`] et al.
+///
+/// # Note
+///
+/// Doesn't panic if it is called during another panic to avoid an abort.
+fn forbid_drop() {
+	if !std::thread::panicking() {
+		panic!("drop is forbidden");
 	}
 }

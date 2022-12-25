@@ -159,6 +159,7 @@ impl Type {
 }
 
 /// A reference to an item.
+#[must_use = "Must be manually dropped with ItemRef::drop"]
 pub enum ItemRef<'a, D: Dev> {
 	Dir(DirRef<'a, D>),
 	File(FileRef<'a, D>),
@@ -288,5 +289,18 @@ impl<'a, D: Dev> ItemRef<'a, D> {
 	/// Create a parent dir helper.
 	fn parent_dir(&self) -> Dir<'a, D> {
 		Dir::new(self.fs(), self.data_header().parent_id)
+	}
+
+	/// Destroy the reference to this item.
+	///
+	/// This will perform cleanup if the item is dangling
+	/// and this was the last reference.
+	pub async fn drop(self) -> Result<(), Error<D>> {
+		match self {
+			Self::Dir(e) => e.drop().await,
+			Self::File(e) => e.drop().await,
+			Self::Sym(e) => e.drop().await,
+			Self::Unknown(e) => e.drop().await,
+		}
 	}
 }

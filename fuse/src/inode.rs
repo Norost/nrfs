@@ -47,16 +47,31 @@ impl InodeStore {
 		Self { unix_default: ext::unix::Entry::new(0o700, uid, gid), ..Default::default() }
 	}
 
-	pub fn add_dir<'f>(&mut self, dir: DirRef<'f, FileDev>, incr: bool) -> u64 {
-		Self::add(&mut self.dir, &mut self.dir_rev, dir, incr) | INO_TY_DIR
+	pub fn add_dir<'f>(
+		&mut self,
+		dir: DirRef<'f, FileDev>,
+		incr: bool,
+	) -> (u64, Option<DirRef<'f, FileDev>>) {
+		let (ino, e) = Self::add(&mut self.dir, &mut self.dir_rev, dir, incr);
+		(ino | INO_TY_DIR, e)
 	}
 
-	pub fn add_file<'f>(&mut self, file: FileRef<'f, FileDev>, incr: bool) -> u64 {
-		Self::add(&mut self.file, &mut self.file_rev, file, incr) | INO_TY_FILE
+	pub fn add_file<'f>(
+		&mut self,
+		file: FileRef<'f, FileDev>,
+		incr: bool,
+	) -> (u64, Option<FileRef<'f, FileDev>>) {
+		let (ino, e) = Self::add(&mut self.file, &mut self.file_rev, file, incr);
+		(ino | INO_TY_FILE, e)
 	}
 
-	pub fn add_sym<'f>(&mut self, sym: SymRef<'f, FileDev>, incr: bool) -> u64 {
-		Self::add(&mut self.sym, &mut self.sym_rev, sym, incr) | INO_TY_SYM
+	pub fn add_sym<'f>(
+		&mut self,
+		sym: SymRef<'f, FileDev>,
+		incr: bool,
+	) -> (u64, Option<SymRef<'f, FileDev>>) {
+		let (ino, e) = Self::add(&mut self.sym, &mut self.sym_rev, sym, incr);
+		(ino | INO_TY_SYM, e)
 	}
 
 	fn add<'f, T: RawRef<'f, FileDev>>(
@@ -64,20 +79,20 @@ impl InodeStore {
 		rev_m: &mut HashMap<T::Raw, Handle<()>>,
 		t: T,
 		incr: bool,
-	) -> u64
+	) -> (u64, Option<T>)
 	where
 		T::Raw: Hash + Eq,
 	{
-		let h = if let Some(h) = rev_m.get_mut(&t.as_raw()) {
+		let (h, t) = if let Some(h) = rev_m.get_mut(&t.as_raw()) {
 			m[*h].reference_count += u64::from(incr);
-			*h
+			(*h, Some(t))
 		} else {
 			let h = m.insert(InodeData { value: t.as_raw(), reference_count: 1 });
 			rev_m.insert(t.into_raw(), h);
-			h
+			(h, None)
 		};
 		// Because ROOT_ID (1) is reserved for the root dir, but nrfs uses 0 for the root dir
-		h.into_raw().0 as u64 + 1
+		(h.into_raw().0 as u64 + 1, t)
 	}
 
 	pub fn get<'s, 'f>(
@@ -125,7 +140,14 @@ impl InodeStore {
 	}
 
 	/// Forget an entry.
-	pub fn forget<'f>(&mut self, fs: &'f Nrfs<FileDev>, ino: u64, nlookup: u64) {
+	///
+	/// Returns an [`ItemRef`] if it needs to be dropped.
+	pub fn forget<'f>(
+		&mut self,
+		fs: &'f Nrfs<FileDev>,
+		ino: u64,
+		nlookup: u64,
+	) -> Option<ItemRef<'f, FileDev>> {
 		let h = Handle::from_raw((ino & !INO_TY_MASK) as usize - 1, ());
 		match ino & INO_TY_MASK {
 			INO_TY_DIR => {
@@ -134,7 +156,7 @@ impl InodeStore {
 				if *c == 0 {
 					let d = self.dir.remove(h).unwrap();
 					self.dir_rev.remove(&d.value);
-					DirRef::from_raw(fs, d.value);
+					return Some(DirRef::from_raw(fs, d.value).into());
 				}
 			}
 			INO_TY_FILE => {
@@ -143,7 +165,7 @@ impl InodeStore {
 				if *c == 0 {
 					let f = self.file.remove(h).unwrap();
 					self.file_rev.remove(&f.value);
-					FileRef::from_raw(fs, f.value);
+					return Some(FileRef::from_raw(fs, f.value).into());
 				}
 			}
 			INO_TY_SYM => {
@@ -152,24 +174,25 @@ impl InodeStore {
 				if *c == 0 {
 					let f = self.sym.remove(h).unwrap();
 					self.sym_rev.remove(&f.value);
-					SymRef::from_raw(fs, f.value);
+					return Some(SymRef::from_raw(fs, f.value).into());
 				}
 			}
 			_ => unreachable!(),
 		}
+		None
 	}
 
 	/// Drop all references and inodes.
-	pub fn remove_all(&mut self, fs: &Nrfs<FileDev>) {
-		self.dir.drain().for_each(|(_, r)| {
-			DirRef::from_raw(fs, r.value);
-		});
-		self.file.drain().for_each(|(_, r)| {
-			FileRef::from_raw(fs, r.value);
-		});
-		self.sym.drain().for_each(|(_, r)| {
-			SymRef::from_raw(fs, r.value);
-		});
+	pub async fn remove_all(&mut self, fs: &Nrfs<FileDev>) {
+		for (_, r) in self.dir.drain() {
+			DirRef::from_raw(fs, r.value).drop().await.unwrap();
+		}
+		for (_, r) in self.file.drain() {
+			FileRef::from_raw(fs, r.value).drop().await.unwrap();
+		}
+		for (_, r) in self.sym.drain() {
+			SymRef::from_raw(fs, r.value).drop().await.unwrap();
+		}
 
 		self.dir_rev.clear();
 		self.file_rev.clear();

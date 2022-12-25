@@ -231,7 +231,8 @@ impl<'a> Test<'a> {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
 						match dir.create_file(name, &ext).await.unwrap() {
-							Ok(_) => {
+							Ok(file) => {
+								file.drop().await.unwrap();
 								let d = d.expect("dir should be empty");
 								let r = d.insert(
 									name,
@@ -260,7 +261,8 @@ impl<'a> Test<'a> {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
 						match dir.create_dir(name, &options, &ext).await.unwrap() {
-							Ok(_) => {
+							Ok(dir) => {
+								dir.drop().await.unwrap();
 								let d = d.expect("dir should be empty");
 								let r = d.insert(
 									name,
@@ -324,11 +326,11 @@ impl<'a> Test<'a> {
 							// Drop reference
 							let removed = match entry {
 								RawItemRef::File { file, removed } => {
-									FileRef::from_raw(&self.fs, file);
+									FileRef::from_raw(&self.fs, file).drop().await.unwrap();
 									removed
 								}
 								RawItemRef::Dir { dir, removed } => {
-									DirRef::from_raw(&self.fs, dir);
+									DirRef::from_raw(&self.fs, dir).drop().await.unwrap();
 									removed
 								}
 							};
@@ -536,14 +538,16 @@ impl<'a> Test<'a> {
 			}
 
 			// Drop all refs to ensure refcounting works properly.
-			refs.drain().for_each(|(_, (r, _))| match r {
-				RawItemRef::File { file, .. } => {
-					FileRef::from_raw(&self.fs, file);
+			for (_, (r, _)) in refs.drain() {
+				match r {
+					RawItemRef::File { file, .. } => {
+						FileRef::from_raw(&self.fs, file).drop().await.unwrap()
+					}
+					RawItemRef::Dir { dir, .. } => {
+						DirRef::from_raw(&self.fs, dir).drop().await.unwrap()
+					}
 				}
-				RawItemRef::Dir { dir, .. } => {
-					DirRef::from_raw(&self.fs, dir);
-				}
-			});
+			}
 		})
 	}
 }

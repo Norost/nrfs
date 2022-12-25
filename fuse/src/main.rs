@@ -57,7 +57,7 @@ impl Fs {
 		let dirty_cache_size = 1 << 23;
 
 		let fs = FileDev::new(io, nrfs::BlockSize::K4);
-		let fs = Nrfs::load([fs].into(), global_cache_size, dirty_cache_size)
+		let fs = Nrfs::load([fs].into(), global_cache_size, dirty_cache_size, false)
 			.await
 			.unwrap();
 
@@ -109,17 +109,14 @@ impl Fs {
 		let d = self.ino.get_dir(&self.fs, parent);
 
 		// Be a good UNIX citizen and check the type.
-		enum Ty {
-			File(RawFileRef),
-			Sym(RawSymRef),
-		}
-		let raw_ref = match d.find(name).await.unwrap() {
-			None => return Err(libc::ENOENT),
-			Some(ItemRef::Dir(_)) => return Err(libc::EISDIR),
-			Some(ItemRef::File(f)) => Ty::File(f.as_raw()),
-			Some(ItemRef::Sym(f)) => Ty::Sym(f.as_raw()),
-			Some(ItemRef::Unknown(_)) => return Err(libc::EPERM),
+		let Some(e) = d.find(name).await.unwrap() else { return Err(libc::ENOENT) };
+		let r = match &e {
+			ItemRef::Dir(_) => Err(libc::EISDIR),
+			ItemRef::File(_) | ItemRef::Sym(_) => Ok(()),
+			ItemRef::Unknown(_) => Err(libc::EPERM),
 		};
+		e.drop().await.unwrap();
+		r?;
 
 		// First try to remove the entry straight away.
 		match d.remove(name).await.unwrap() {
@@ -154,17 +151,26 @@ impl Filesystem for Fs {
 			let (ty, len, ino) = match entry {
 				ItemRef::Dir(d) => {
 					let len = d.len().await.unwrap().into();
-					let ino = self.ino.add_dir(d, true);
+					let (ino, e) = self.ino.add_dir(d, true);
+					if let Some(e) = e {
+						e.drop().await.unwrap()
+					}
 					(FileType::Directory, len, ino)
 				}
 				ItemRef::File(f) => {
 					let len = f.len().await.unwrap();
-					let ino = self.ino.add_file(f, true);
+					let (ino, e) = self.ino.add_file(f, true);
+					if let Some(e) = e {
+						e.drop().await.unwrap()
+					}
 					(FileType::RegularFile, len, ino)
 				}
 				ItemRef::Sym(f) => {
 					let len = f.len().await.unwrap();
-					let ino = self.ino.add_sym(f, true);
+					let (ino, e) = self.ino.add_sym(f, true);
+					if let Some(e) = e {
+						e.drop().await.unwrap()
+					}
 					(FileType::Symlink, len, ino)
 				}
 				ItemRef::Unknown(_) => todo!("unknown entry type"),
@@ -175,7 +181,9 @@ impl Filesystem for Fs {
 	}
 
 	fn forget(&mut self, _req: &Request<'_>, ino: u64, nlookup: u64) {
-		self.ino.forget(&self.fs, ino, nlookup)
+		if let Some(r) = self.ino.forget(&self.fs, ino, nlookup) {
+			futures_executor::block_on(r.drop()).unwrap();
+		}
 	}
 
 	fn getattr(&mut self, _: &Request<'_>, ino: u64, reply: ReplyAttr) {
@@ -347,14 +355,33 @@ impl Filesystem for Fs {
 				let Some(name) = e.key(&data).await.unwrap() else {
 					// Entry may have been removed just after we fetched it,
 					// so just skip.
+					e.drop().await.unwrap();
 					index = i;
 					continue;
 				};
 
 				let (ty, e_ino) = match e {
-					ItemRef::Dir(d) => (FileType::Directory, self.ino.add_dir(d, false)),
-					ItemRef::File(f) => (FileType::RegularFile, self.ino.add_file(f, false)),
-					ItemRef::Sym(f) => (FileType::Symlink, self.ino.add_sym(f, false)),
+					ItemRef::Dir(d) => {
+						let (ino, e) = self.ino.add_dir(d, false);
+						if let Some(e) = e {
+							e.drop().await.unwrap()
+						}
+						(FileType::Directory, ino)
+					}
+					ItemRef::File(f) => {
+						let (ino, e) = self.ino.add_file(f, false);
+						if let Some(e) = e {
+							e.drop().await.unwrap()
+						}
+						(FileType::RegularFile, ino)
+					}
+					ItemRef::Sym(f) => {
+						let (ino, e) = self.ino.add_sym(f, false);
+						if let Some(e) = e {
+							e.drop().await.unwrap()
+						}
+						(FileType::Symlink, ino)
+					}
 					ItemRef::Unknown(_) => todo!("miscellaneous file type"),
 				};
 				d = self.ino.get_dir(&self.fs, ino);
@@ -393,7 +420,10 @@ impl Filesystem for Fs {
 			};
 			match d.create_file(name, &ext).await.unwrap() {
 				Ok(f) => {
-					let ino = self.ino.add_file(f, false);
+					let (ino, f) = self.ino.add_file(f, false);
+					if let Some(f) = f {
+						f.drop().await.unwrap()
+					}
 					let data = self.ino.get(&self.fs, ino).data().await.unwrap();
 					reply.created(
 						&TTL,
@@ -453,7 +483,10 @@ impl Filesystem for Fs {
 				Ok(f) => {
 					let link = link.as_os_str().as_bytes();
 					f.write_grow(0, link).await.unwrap();
-					let ino = self.ino.add_sym(f, false);
+					let (ino, f) = self.ino.add_sym(f, false);
+					if let Some(f) = f {
+						f.drop().await.unwrap()
+					}
 					let data = self.ino.get(&self.fs, ino).data().await.unwrap();
 					let attr = self.attr(ino, FileType::Symlink, link.len() as _, &data);
 					reply.entry(&TTL, &attr, 0);
@@ -495,7 +528,10 @@ impl Filesystem for Fs {
 			};
 			match d.create_dir(name, &opt, &ext).await.unwrap() {
 				Ok(dd) => {
-					let ino = self.ino.add_dir(dd, false);
+					let (ino, dd) = self.ino.add_dir(dd, false);
+					if let Some(dd) = dd {
+						dd.drop().await.unwrap()
+					}
 					let data = self.ino.get(&self.fs, ino).data().await.unwrap();
 					let attr = self.attr(ino, FileType::Directory, 0, &data);
 					reply.entry(&TTL, &attr, 0);
@@ -566,27 +602,20 @@ impl Filesystem for Fs {
 			let Ok(name) = name.as_bytes().try_into() else { return reply.error(libc::ENAMETOOLONG) };
 
 			// Ensure it's a directory because POSIX yadayada
-			match d.find(name).await.unwrap() {
-				Some(ItemRef::Dir(_)) => {}
-				Some(_) => return reply.error(libc::ENOTDIR),
-				None => return reply.error(libc::ENOENT),
+			let Some(e) = d.find(name).await.unwrap() else { return reply.error(libc::ENOENT) };
+			let r = match &e {
+				ItemRef::Dir(_) => Ok(()),
+				_ => Err(libc::ENOTDIR),
+			};
+			e.drop().await.unwrap();
+			if let Err(e) = r {
+				return reply.error(e);
 			};
 
 			match d.remove(name).await.unwrap() {
 				Ok(()) => reply.ok(),
 				Err(RemoveError::NotFound) => reply.error(libc::ENOENT),
-				Err(RemoveError::NotEmpty) => {
-					{
-						let Some(nrfs::dir::ItemRef::Dir(d)) = d.find(name).await.unwrap() else { todo!() };
-						let mut index = 0;
-						while let Some((e, i)) = d.next_from(index).await.unwrap() {
-							let data = e.data().await.unwrap();
-							let name = e.key(&data).await.unwrap();
-							index = i;
-						}
-					}
-					reply.error(libc::ENOTEMPTY)
-				}
+				Err(RemoveError::NotEmpty) => reply.error(libc::ENOTEMPTY),
 				Err(RemoveError::UnknownType) => reply.error(libc::ENOTDIR),
 			}
 		})
@@ -610,7 +639,10 @@ impl Filesystem for Fs {
 	}
 
 	fn destroy(&mut self) {
-		futures_executor::block_on(self.fs.finish_transaction()).unwrap();
+		futures_executor::block_on(async move {
+			self.ino.remove_all(&self.fs).await;
+			self.fs.finish_transaction().await.unwrap();
+		})
 	}
 }
 

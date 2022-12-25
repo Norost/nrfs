@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-MODE=release
+MODE=debug
 COUNT=1000
 IMG_LEN=256M
 

@@ -82,7 +82,11 @@ fn drop_borrow() {
 		dir.create_file(b"test.txt".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
+		dir.drop().await.unwrap();
 	})
 }
 
@@ -110,6 +114,10 @@ fn create_file() {
 		let ItemRef::File(file) = file else { panic!("expected file") };
 		let l = file.read(0, &mut buf).await.unwrap();
 		assert_eq!(core::str::from_utf8(&buf[..l]), Ok("Hello, world!"));
+
+		f.drop().await.unwrap();
+		file.drop().await.unwrap();
+		d.drop().await.unwrap();
 	})
 }
 
@@ -139,15 +147,20 @@ fn create_many_files() {
 			assert_eq!(core::str::from_utf8(&buf[..l]), Ok(&*contents),);
 
 			fs.finish_transaction().await.unwrap();
+
+			file.drop().await.unwrap();
+			f.drop().await.unwrap();
+			d.drop().await.unwrap();
 		}
 
 		// Test iteration
 		let d = fs.root_dir().await.unwrap();
 		let mut i = 0;
 		let mut count = 0;
-		while let Some((_, ni)) = d.next_from(i).await.unwrap() {
+		while let Some((e, ni)) = d.next_from(i).await.unwrap() {
 			count += 1;
 			i = ni;
+			e.drop().await.unwrap();
 		}
 		assert_eq!(count, 100);
 
@@ -169,7 +182,12 @@ fn create_many_files() {
 				"file #{}",
 				i
 			);
+
+			file.drop().await.unwrap();
+			d.drop().await.unwrap();
 		}
+
+		d.drop().await.unwrap();
 	})
 }
 
@@ -205,6 +223,10 @@ fn create_file_ext() {
 		let ItemRef::File(file) = file else { panic!("expected file") };
 		let l = file.read(0, &mut buf).await.unwrap();
 		assert_eq!(core::str::from_utf8(&buf[..l]), Ok("Hello, world!"));
+
+		file.drop().await.unwrap();
+		f.drop().await.unwrap();
+		d.drop().await.unwrap();
 	})
 }
 
@@ -219,18 +241,27 @@ fn remove_file() {
 		d.create_file(b"hello".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 1);
 
 		d.create_file(b"world".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 2);
 
 		d.create_file(b"exist".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 3);
 
@@ -244,7 +275,10 @@ fn remove_file() {
 			let key = e.key(&data).await.unwrap();
 			assert!(matches!(&**key.unwrap(), b"world" | b"exist"));
 			i = ni;
+			e.drop().await.unwrap();
 		}
+
+		d.drop().await.unwrap();
 	})
 }
 
@@ -257,16 +291,25 @@ fn shrink() {
 		d.create_file(b"hello".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 1);
 		d.create_file(b"world".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 2);
 		d.create_file(b"exist".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 		assert_eq!(d.len().await.unwrap(), 3);
 		d.remove(b"hello".into()).await.unwrap().unwrap();
@@ -281,7 +324,10 @@ fn shrink() {
 			let key = e.key(&data).await.unwrap();
 			assert_eq!(&**key.unwrap(), b"world");
 			i = ni;
+			e.drop().await.unwrap();
 		}
+
+		d.drop().await.unwrap();
 	})
 }
 
@@ -297,24 +343,77 @@ fn find_colllision() {
 			d.create_file((&[i]).into(), &Default::default())
 				.await
 				.unwrap()
+				.unwrap()
+				.drop()
+				.await
 				.unwrap();
 		}
 		d.create_file(b"d".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap(); // c4eafac0
 		d.create_file(b"g".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap(); // e57630a8
 
-		assert!(d.find(b"\x00".into()).await.unwrap().is_some());
-		assert!(d.find(b"\x01".into()).await.unwrap().is_some());
-		assert!(d.find(b"\x02".into()).await.unwrap().is_some());
-		assert!(d.find(b"\x03".into()).await.unwrap().is_some());
-		assert!(d.find(b"\x04".into()).await.unwrap().is_some());
-		assert!(d.find(b"d".into()).await.unwrap().is_some());
-		assert!(d.find(b"g".into()).await.unwrap().is_some());
+		d.find(b"\x00".into())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+		d.find(b"\x01".into())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+		d.find(b"\x02".into())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+		d.find(b"\x03".into())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+		d.find(b"\x04".into())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+		d.find(b"d".into())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+		d.find(b"g".into())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+
+		d.drop().await.unwrap();
 	})
 }
 
@@ -329,20 +428,31 @@ fn remove_collision() {
 			d.create_file((&[i]).into(), &Default::default())
 				.await
 				.unwrap()
+				.unwrap()
+				.drop()
+				.await
 				.unwrap();
 		}
 		d.create_file(b"d".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap(); // c4eafac0
 		d.create_file(b"g".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap(); // e57630a8
 		d.remove(b"d".into()).await.unwrap().unwrap();
 		// If the hashmap is improperly implemented, the empty slot makes
 		// it impossible to find "g" with linear probing
 		d.remove(b"g".into()).await.unwrap().unwrap();
+
+		d.drop().await.unwrap();
 	})
 }
 
@@ -354,24 +464,42 @@ fn real_case_find_000_minified() {
 		d.create_dir(b"d".into(), &DirOptions::new(&[0; 16]), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 		d.create_file(b"C".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 		d.create_file(b".rustc_info.json".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 		d.create_dir(b"p".into(), &DirOptions::new(&[0; 16]), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
-		assert_eq!(
-			d.len().await.unwrap(),
-			fs.root_dir().await.unwrap().len().await.unwrap()
-		);
-		let d = fs.root_dir().await.unwrap();
-		d.find(b".rustc_info.json".into()).await.unwrap().unwrap();
+		let e = fs.root_dir().await.unwrap();
+		assert_eq!(d.len().await.unwrap(), e.len().await.unwrap());
+		e.find(b".rustc_info.json".into())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+
+		e.drop().await.unwrap();
+		d.drop().await.unwrap();
 	})
 }

@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+if test -z "$MODE"
+then
+	MODE=debug
+fi
+
 set -xe
 
 # Go to workspace root
@@ -26,11 +31,11 @@ then
 	IMG_LEN=8M
 fi
 fallocate -l "$IMG_LEN" "$img"
-./target/debug/tool make "$img"
+"./target/$MODE/tool" make "$img"
 
 # Mount
-./target/debug/fuse "$img" "$mnt" &
-trap 'umount "$mnt"; ./target/debug/tool dump "$img"; rm -rf "$img" "$mnt"' EXIT
+"./target/$MODE/fuse" "$img" "$mnt" &
+trap 'umount "$mnt"; "./target/$MODE/tool" dump "$img"; rm -rf "$img" "$mnt"' EXIT
 
 # Wait a bit to ensure the driver is actually running
 sleep 0.2

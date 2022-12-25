@@ -5,8 +5,6 @@
 # Make git repo
 git init "$mnt"
 
-find "$mnt"
-
 # Destroy git repo
 rm -rf "$mnt/.git"
 

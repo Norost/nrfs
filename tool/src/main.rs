@@ -11,7 +11,7 @@ use {
 		ptr,
 		task::{Context, RawWaker, RawWakerVTable, Waker},
 	},
-	nrfs::{dev::FileDev, BlockSize, Nrfs},
+	nrfs::{dev::FileDev, dir::ItemRef, BlockSize, Nrfs},
 	std::{
 		fs::{self, File, OpenOptions},
 		io::{Read as _, Seek as _, SeekFrom},
@@ -186,6 +186,7 @@ async fn make(args: Make) {
 				let c = fs::read(f.path()).unwrap();
 				let f = root.create_file(n, &ext).await.unwrap().unwrap();
 				f.write_grow(0, &c).await.unwrap();
+				f.drop().await.unwrap();
 			} else if m.is_dir() {
 				// FIXME randomize key
 				let opt = nrfs::DirOptions { extensions, ..nrfs::DirOptions::new(&[0; 16]) };
@@ -193,17 +194,19 @@ async fn make(args: Make) {
 				let path = f.path();
 				let fut: Pin<Box<dyn Future<Output = ()>>> =
 					Box::pin(add_files(d, &path, args, extensions));
-				fut.await
+				fut.await;
 			} else if m.is_symlink() {
 				let c = fs::read_link(f.path()).unwrap();
 				let f = root.create_sym(n, &ext).await.unwrap().unwrap();
 				f.write_grow(0, c.to_str().unwrap().as_bytes())
 					.await
 					.unwrap();
+				f.drop().await.unwrap();
 			} else {
 				todo!()
 			}
 		}
+		root.drop().await.unwrap();
 	}
 }
 
@@ -216,9 +219,14 @@ async fn dump(args: Dump) {
 	f.read_exact(&mut block_size_p2).unwrap();
 
 	let s = FileDev::new(f, BlockSize::from_raw(block_size_p2[0]).unwrap());
-	let nrfs = Nrfs::load([s].into(), args.global_cache_size, args.dirty_cache_size)
-		.await
-		.unwrap();
+	let nrfs = Nrfs::load(
+		[s].into(),
+		args.global_cache_size,
+		args.dirty_cache_size,
+		true,
+	)
+	.await
+	.unwrap();
 
 	let root = nrfs.root_dir().await.unwrap();
 	println!("block size: 2**{}", block_size_p2[0]);
@@ -254,7 +262,6 @@ async fn dump(args: Dump) {
 			let name = e.key(&data).await.unwrap();
 			let name = String::from_utf8_lossy(name.as_ref().map_or(b"", |n| n));
 
-			use nrfs::dir::ItemRef;
 			match e {
 				ItemRef::File(f) => {
 					println!(
@@ -265,6 +272,7 @@ async fn dump(args: Dump) {
 						name,
 						indent = indent
 					);
+					f.drop().await.unwrap();
 				}
 				ItemRef::Dir(d) => {
 					println!(
@@ -290,12 +298,15 @@ async fn dump(args: Dump) {
 						link,
 						indent = 10 + indent
 					);
+					f.drop().await.unwrap();
 				}
-				ItemRef::Unknown(_) => {
+				ItemRef::Unknown(e) => {
 					println!("     ???  {:>indent$} ? {}", "", name, indent = indent);
+					e.drop().await.unwrap();
 				}
 			}
 			i = next_i
 		}
+		root.drop().await.unwrap();
 	}
 }
