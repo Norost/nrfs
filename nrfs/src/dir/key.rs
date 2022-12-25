@@ -56,8 +56,8 @@ impl Key {
 		Some(if len.get() <= 27 {
 			Self::Embed { len, data }
 		} else {
-			let offset = u64::from_le_bytes(data[8..16].try_into().unwrap());
-			let hash = u64::from_le_bytes(data[16..24].try_into().unwrap());
+			let offset = u64::from_le_bytes(data[7..15].try_into().unwrap());
+			let hash = u64::from_le_bytes(data[15..23].try_into().unwrap());
 			Self::Heap { len, offset, hash }
 		})
 	}
@@ -86,7 +86,7 @@ impl fmt::Debug for Key {
 				.debug_struct(stringify!(Heap))
 				.field("len", &len)
 				.field("offset", &offset)
-				.field("hash", &format_args!("{:#18x}", &hash))
+				.field("hash", &format_args!("{:#018x}", &hash))
 				.finish(),
 		}
 	}

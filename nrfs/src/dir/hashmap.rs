@@ -149,7 +149,6 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 		// Parse entry.
 		let [key @ .., a, b, c, d] = buf;
-		assert_ne!(key[8], 0xa4);
 		let key = Key::from_raw(&key);
 		let item_index = u32::from_le_bytes([a, b, c, d]);
 
@@ -174,7 +173,6 @@ impl<'a, D: Dev> HashMap<'a, D> {
 			Some(key) => {
 				buf[..28].copy_from_slice(&key.to_raw());
 				buf[28..].copy_from_slice(&entry.item_index.to_le_bytes());
-				assert_ne!(buf[8], 0xa4);
 			}
 			None => debug_assert_eq!(entry.item_index, 0),
 		}
