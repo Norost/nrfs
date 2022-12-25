@@ -9,7 +9,7 @@ use {
 	log::trace,
 	nrfs::{
 		dev::FileDev,
-		dir::{ItemRef, ItemData, RemoveError, TransferError, InsertError},
+		dir::{InsertError, ItemData, ItemRef, RemoveError, TransferError},
 		DirOptions, DirRef, Name, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef,
 	},
 	std::{
@@ -549,9 +549,7 @@ impl Filesystem for Fs {
 		})
 	}
 
-	/// Unlink a file or directory,
-	/// i.e. remove it from the directory but keep it alive until all references
-	/// to it are gone.
+	/// Unlink a file or symbolic link,
 	fn unlink(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
 		futures_executor::block_on(async move {
 			let Ok(name) = name.as_bytes().try_into() else { return reply.error(libc::ENAMETOOLONG) };
@@ -568,8 +566,8 @@ impl Filesystem for Fs {
 			let Ok(name) = name.as_bytes().try_into() else { return reply.error(libc::ENAMETOOLONG) };
 
 			// Ensure it's a directory because POSIX yadayada
-			let raw_ref = match d.find(name).await.unwrap() {
-				Some(ItemRef::Dir(d)) => d.as_raw(),
+			match d.find(name).await.unwrap() {
+				Some(ItemRef::Dir(_)) => {}
 				Some(_) => return reply.error(libc::ENOTDIR),
 				None => return reply.error(libc::ENOENT),
 			};
@@ -577,7 +575,18 @@ impl Filesystem for Fs {
 			match d.remove(name).await.unwrap() {
 				Ok(()) => reply.ok(),
 				Err(RemoveError::NotFound) => reply.error(libc::ENOENT),
-				Err(RemoveError::NotEmpty) => reply.error(libc::ENOTEMPTY),
+				Err(RemoveError::NotEmpty) => {
+					{
+						let Some(nrfs::dir::ItemRef::Dir(d)) = d.find(name).await.unwrap() else { todo!() };
+						let mut index = 0;
+						while let Some((e, i)) = d.next_from(index).await.unwrap() {
+							let data = e.data().await.unwrap();
+							let name = e.key(&data).await.unwrap();
+							index = i;
+						}
+					}
+					reply.error(libc::ENOTEMPTY)
+				}
 				Err(RemoveError::UnknownType) => reply.error(libc::ENOTDIR),
 			}
 		})

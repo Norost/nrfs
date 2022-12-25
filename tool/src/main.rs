@@ -251,7 +251,8 @@ async fn dump(args: Dump) {
 				print!("{:<23}", format!("{}", t));
 			}
 
-			let name = e.key(&data).await.unwrap().unwrap();
+			let name = e.key(&data).await.unwrap();
+			let name = String::from_utf8_lossy(name.as_ref().map_or(b"", |n| n));
 
 			use nrfs::dir::ItemRef;
 			match e {

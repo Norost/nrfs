@@ -147,25 +147,11 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		let mut buf = [0; ENTRY_SIZE as usize];
 		read_exact(&self.map, offt, &mut buf).await?;
 
-		// Get ty, key
-		let [key_len, data @ ..] = buf;
-		let [data @ .., a, b, c, d] = data;
+		// Parse entry.
+		let [key @ .., a, b, c, d] = buf;
+		assert_ne!(key[8], 0xa4);
+		let key = Key::from_raw(&key);
 		let item_index = u32::from_le_bytes([a, b, c, d]);
-
-		let key = NonZeroU8::new(key_len).map(|len| {
-			if len.get() <= 27 {
-				Key::Embed { len, data }
-			} else {
-				let [_, _, _, _, _, _, _, data @ ..] = data;
-				let [a, b, c, d, e, f, g, h, data @ ..] = data;
-				let [hash @ .., _, _, _, _] = data;
-				Key::Heap {
-					len,
-					offset: u64::from_le_bytes([a, b, c, d, e, f, g, h]),
-					hash: u64::from_le_bytes(hash),
-				}
-			}
-		});
 
 		Ok(RawEntry { key, index, item_index })
 	}
@@ -184,31 +170,17 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 		// Serialize entry.
 		let mut buf = [0; ENTRY_SIZE as usize];
-
-		// Set ty, key
-		match entry.key {
+		match entry.key.as_ref() {
+			Some(key) => {
+				buf[..28].copy_from_slice(&key.to_raw());
+				buf[28..].copy_from_slice(&entry.item_index.to_le_bytes());
+				assert_ne!(buf[8], 0xa4);
+			}
 			None => debug_assert_eq!(entry.item_index, 0),
-			Some(Key::Embed { len, data }) => {
-				buf[0] = len.into();
-				buf[1..28].copy_from_slice(&data);
-				buf[28..].copy_from_slice(&entry.item_index.to_le_bytes());
-			}
-			Some(Key::Heap { len, offset, hash }) => {
-				buf[0] = len.into();
-				buf[8..16].copy_from_slice(&offset.to_le_bytes());
-				buf[16..24].copy_from_slice(&hash.to_le_bytes());
-				buf[28..].copy_from_slice(&entry.item_index.to_le_bytes());
-			}
 		}
 
 		// Write out entry.
 		write_all(&self.map, offt, &buf).await
-	}
-
-	/// Set arbitrary data.
-	pub async fn set_raw(&self, index: u32, offset: u16, data: &[u8]) -> Result<(), Error<D>> {
-		let offt = self.get_offset(index) + u64::from(offset);
-		write_all(&self.map, offt, data).await
 	}
 
 	/// Insert a new entry.

@@ -230,6 +230,7 @@ impl<'a, D: Dev> ItemRef<'a, D> {
 	///
 	/// Returns `false` if the extension is not enabled for the parent directory.
 	pub async fn set_ext_unix(&self, data: &ext::unix::Entry) -> Result<bool, Error<D>> {
+		trace!("set_ext_unix {:?}", data);
 		// Root dir has no attributes.
 		if matches!(self, Self::Dir(d) if d.id == 0) {
 			return Ok(false);
@@ -242,6 +243,7 @@ impl<'a, D: Dev> ItemRef<'a, D> {
 	///
 	/// Returns `false` if the extension is not enabled for the parent directory.
 	pub async fn set_ext_mtime(&self, data: &ext::mtime::Entry) -> Result<bool, Error<D>> {
+		trace!("set_ext_mtime {:?}", data);
 		// Root dir has no attributes.
 		if matches!(self, Self::Dir(d) if d.id == 0) {
 			return Ok(false);

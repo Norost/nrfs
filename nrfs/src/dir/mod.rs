@@ -226,6 +226,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 	/// Update the entry count.
 	async fn update_item_count(&self, f: impl FnOnce(u32) -> u32) -> Result<(), Error<D>> {
+		trace!("update_item_count");
 		let mut data = self.fs.dir_data(self.id);
 		let count = f(data.item_count);
 		data.item_count = count;
