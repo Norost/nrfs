@@ -251,6 +251,9 @@ impl<'a> Test<'a> {
 							Err(InsertError::Full) => {
 								let _ = d.expect("dir should be empty");
 							}
+							Err(InsertError::Dangling) => {
+								assert!(d.is_none(), "dir is present in state");
+							}
 						}
 					}
 					Op::CreateDir { dir_idx, name, options, ext } => {
@@ -276,6 +279,9 @@ impl<'a> Test<'a> {
 							}
 							Err(InsertError::Full) => {
 								let _ = d.expect("dir should be empty");
+							}
+							Err(InsertError::Dangling) => {
+								assert!(d.is_none(), "dir is present in state");
 							}
 						}
 					}
@@ -316,20 +322,24 @@ impl<'a> Test<'a> {
 						let idx = arena::Handle::from_raw(idx.into(), ());
 						if let Some((entry, path)) = refs.remove(idx) {
 							// Drop reference
-							match entry {
-								RawItemRef::File { file, .. } => {
+							let removed = match entry {
+								RawItemRef::File { file, removed } => {
 									FileRef::from_raw(&self.fs, file);
+									removed
 								}
-								RawItemRef::Dir { dir, .. } => {
+								RawItemRef::Dir { dir, removed } => {
 									DirRef::from_raw(&self.fs, dir);
+									removed
 								}
+							};
+							if !removed {
+								// Remove from state
+								let indices = state_mut(&mut state, path.iter().copied())
+									.unwrap()
+									.indices_mut();
+								let i = indices.iter().position(|e| e == &idx).unwrap();
+								indices.swap_remove(i);
 							}
-							// Remove from state
-							let indices = state_mut(&mut state, path.iter().copied())
-								.unwrap()
-								.indices_mut();
-							let i = indices.iter().position(|e| e == &idx).unwrap();
-							indices.swap_remove(i);
 						}
 					}
 					Op::Write { file_idx, offset, amount } => {
@@ -450,6 +460,10 @@ impl<'a> Test<'a> {
 							Err(TransferError::UnknownType) => unreachable!(),
 							Err(TransferError::Duplicate) => {
 								// TODO
+							}
+							Err(TransferError::Dangling) => {
+								let d = state_mut(&mut state, to_path.iter().copied());
+								assert!(d.is_none(), "target directory is present in state");
 							}
 						}
 					}
@@ -1029,6 +1043,28 @@ fn fuzz_access_removed_ref() {
 			Get { dir_idx: 0, name: b"\0".into() },
 			Remove { dir_idx: 0, name: b"\0".into() },
 			GetExt { idx: 1 },
+		],
+	)
+	.run()
+}
+
+/// Directories that have been removed may never accept new entries.
+#[test]
+fn forbid_insert_removed_dir() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateDir {
+				dir_idx: 0,
+				name: b"\0".into(),
+				options: DirOptions::new(&[0; 16]),
+				ext: Default::default(),
+			},
+			Root,
+			Get { dir_idx: 0, name: b"\0".into() },
+			Remove { dir_idx: 0, name: b"\0".into() },
+			CreateFile { dir_idx: 2, name: b"?".into(), ext: Default::default() },
 		],
 	)
 	.run()

@@ -41,6 +41,10 @@ pub struct DirData {
 	///
 	/// It is lazily loaded to save time when only reading the directory.
 	pub(super) heap_alloc_map: Option<RangeSet<u64>>,
+	/// Whether this directory has been removed and the corresponding item is dangling.
+	///
+	/// If `true`, no modifications may be made to this directory.
+	pub(super) is_dangling: bool,
 }
 
 impl DirData {

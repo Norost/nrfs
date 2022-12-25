@@ -136,15 +136,26 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let data = self.fs.dir_data(self.id);
 		let item_len = data.item_size();
 		let has_live_ref = data.children.contains_key(&item.index);
-		drop(data);
 
 		if has_live_ref {
 			// If a child is present, don't remove the item yet as we don't want dangling
 			// references.
-			// Do clear the key however.
+
+			// If loaded, mark as dangling.
+			match data.children.get(&item.index) {
+				None => drop(data),
+				Some(&Child::File(_)) => drop(data),
+				Some(&Child::Dir(id)) => {
+					drop(data);
+					debug_assert!(!self.fs.dir_data(id).is_dangling, "already dangling");
+					self.fs.dir_data(id).is_dangling = true;
+				}
+			}
+			// Clear the key to mark as dangling.
 			self.set(item.index, 0, &[0; 28]).await?;
 		} else {
 			// Destroy the item.
+			drop(data);
 			match item.ty {
 				Type::None | Type::Unknown(_) => todo!(),
 				Type::File { id } | Type::Sym { id } => {
@@ -295,6 +306,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 			Ok(i) => i,
 			Err(InsertError::Full) => return Ok(Err(TransferError::Full)),
 			Err(InsertError::Duplicate) => return Ok(Err(TransferError::Duplicate)),
+			Err(InsertError::Dangling) => return Ok(Err(TransferError::Dangling)),
 		};
 
 		// 4. (if embedded) copy to other dir & deallocate in current.
@@ -433,14 +445,12 @@ impl<'a, D: Dev> Dir<'a, D> {
 	) -> Result<Result<u32, InsertError>, Error<D>> {
 		trace!("insert {:?} {:?} {:?}", name, &ty, ext);
 		let data = self.fs.dir_data(self.id);
+		if data.is_dangling {
+			// If dangling, refuse to insert new entries as the dir should stay empty.
+			return Ok(Err(InsertError::Dangling));
+		}
 		let item_len = data.item_size();
 		let should_grow = data.should_grow();
-
-		let mut item = Item {
-			ty,
-			data: ItemData { key: None, ext_unix: ext.unix, ext_mtime: ext.mtime },
-			index: u32::MAX, // Doesn't matter, not used.
-		};
 		drop(data);
 
 		// Check if we should grow the hashmap
@@ -456,7 +466,11 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 		if let Some(key) = self.hashmap().await?.insert(entry, Some(name)).await? {
 			// Write out entry.
-			item.data.key = Some(key);
+			let item = Item {
+				ty,
+				data: ItemData { key: Some(key), ext_unix: ext.unix, ext_mtime: ext.mtime },
+				index: u32::MAX, // Doesn't matter, not used.
+			};
 			let mut buf = vec![0; item_len.into()];
 			item.to_raw(&self.fs.dir_data(self.id), &mut buf);
 			self.set(item_index, 0, &buf).await?;
@@ -708,6 +722,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			mtime_offset,
 			heap_alloc_map: Some(Default::default()),
 			item_alloc_map: Some(Default::default()),
+			is_dangling: false,
 		};
 
 		// Create objects (dir, map, heap).
@@ -886,6 +901,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			mtime_offset,
 			heap_alloc_map: None,
 			item_alloc_map: None,
+			is_dangling: false,
 		};
 
 		// Insert directory data & return reference.
@@ -1184,6 +1200,8 @@ pub enum InsertError {
 	Duplicate,
 	/// The directory is full.
 	Full,
+	/// The directory was removed and does not accept new entries.
+	Dangling,
 }
 
 /// An error that occured while trying to transfer an entry.
@@ -1200,8 +1218,10 @@ pub enum TransferError {
 	UnknownType,
 	/// An entry with the same name already exists.
 	Duplicate,
-	/// The directory is full.
+	/// The target directory is full.
 	Full,
+	/// The target directory was removed and does not accept new entries.
+	Dangling,
 }
 
 /// An error that occured while trying to transfer an entry.
