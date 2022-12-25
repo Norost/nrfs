@@ -350,3 +350,31 @@ fn error_priority() {
 		assert!(matches!(err, RemoveError::NotEmpty));
 	})
 }
+
+/// The key is stored in two places: the hashmap entry and the item.
+///
+/// Ensure that rename updates both.
+#[test]
+fn rename_item_key() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+		root.create_file(b"file".into(), &Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+		root.rename(b"file".into(), b"same_file".into())
+			.await
+			.unwrap()
+			.unwrap();
+
+		let (e, i) = root.next_from(0).await.unwrap().unwrap();
+		let data = e.data().await.unwrap();
+		let name = e.key(&data).await.unwrap();
+		assert_eq!(
+			name.as_ref().map(|n| &**n),
+			Some(<&Name>::from(b"same_file"))
+		);
+		assert!(root.next_from(i).await.unwrap().is_none());
+	});
+}

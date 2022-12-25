@@ -211,7 +211,10 @@ impl<'a, D: Dev> Dir<'a, D> {
 		// Try to insert entry with new name.
 		let old_entry = entry.clone();
 		let old_index = entry.index;
-		if map.insert(entry, Some(to)).await?.is_some() {
+		let item_index = entry.item_index;
+		if let Some(key) = map.insert(entry, Some(to)).await? {
+			// Update key in item.
+			self.set(item_index, 0, &key.to_raw()).await?;
 			Ok(Ok(()))
 		} else {
 			// On failure, restore entry.
@@ -973,7 +976,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			// Get standard info
 			let item = self.dir().get(index.try_into().unwrap()).await?;
 
-			if item.data.key.is_none() {
+			if matches!(item.ty, Type::None) {
 				// Not in use, so skip.
 				index += 1;
 				continue;
