@@ -225,16 +225,8 @@ async fn dump(args: Dump) {
 	list_files(root, 0).await;
 
 	async fn list_files(root: nrfs::DirRef<'_, FileDev>, indent: usize) {
-		let mut i = Some(0);
-		while let Some((e, next_i)) = async {
-			if let Some(i) = i {
-				root.next_from(i).await.unwrap()
-			} else {
-				None
-			}
-		}
-		.await
-		{
+		let mut i = 0;
+		while let Some((e, next_i)) = root.next_from(i).await.unwrap() {
 			let data = e.data().await.unwrap();
 
 			if let Some(u) = data.ext_unix {
@@ -259,11 +251,11 @@ async fn dump(args: Dump) {
 				print!("{:<23}", format!("{}", t));
 			}
 
-			let name = e.key(&data).await.unwrap();
+			let name = e.key(&data).await.unwrap().unwrap();
 
-			use nrfs::dir::Entry;
+			use nrfs::dir::ItemRef;
 			match e {
-				Entry::File(f) => {
+				ItemRef::File(f) => {
 					println!(
 						"{:>8}  {:>indent$}{}f {}",
 						f.len().await.unwrap(),
@@ -273,7 +265,7 @@ async fn dump(args: Dump) {
 						indent = indent
 					);
 				}
-				Entry::Dir(d) => {
+				ItemRef::Dir(d) => {
 					println!(
 						"{:>8}  {:>indent$} d {}",
 						d.len().await.unwrap(),
@@ -284,7 +276,7 @@ async fn dump(args: Dump) {
 					let fut: Pin<Box<dyn Future<Output = _>>> = Box::pin(list_files(d, indent + 2));
 					fut.await;
 				}
-				Entry::Sym(f) => {
+				ItemRef::Sym(f) => {
 					let len = f.len().await.unwrap();
 					let mut buf = vec![0; len as _];
 					f.read_exact(0, &mut buf).await.unwrap();
@@ -298,7 +290,7 @@ async fn dump(args: Dump) {
 						indent = 10 + indent
 					);
 				}
-				Entry::Unknown(_) => {
+				ItemRef::Unknown(_) => {
 					println!("     ???  {:>indent$} ? {}", "", name, indent = indent);
 				}
 			}

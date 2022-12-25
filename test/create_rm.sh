@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 MODE=release
+COUNT=1000
 
 set -xe
 
@@ -36,7 +37,7 @@ jobs %%
 
 # Test recursive delete shit
 mkdir "$mnt/test"
-for i in $(seq 1 1000000)
+for i in $(seq 1 $COUNT)
 do
 	touch "$mnt/test/$i"
 done

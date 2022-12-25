@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-BONNIE=$HOME/Documents/benchmark/fs/bonnie++-2.00a/bonnie++
-#BONNIE=/sbin/bonnie++
+#BONNIE=$HOME/Documents/benchmark/fs/bonnie++-2.00a/bonnie++
+BONNIE=/sbin/bonnie++
 MODE=release
 
 set -xe

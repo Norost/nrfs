@@ -8,7 +8,7 @@ mod heap;
 mod item;
 mod key;
 
-pub use item::ItemRef;
+pub use item::{ItemData, ItemRef};
 
 pub(crate) use {child::Child, dir_data::DirData, hasher::Hasher, item::Type};
 
@@ -18,7 +18,7 @@ use {
 	},
 	core::cell::RefMut,
 	hashmap::*,
-	item::{Item, ItemData},
+	item::Item,
 	key::Key,
 	rangemap::RangeSet,
 };

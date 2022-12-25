@@ -3,7 +3,7 @@ use {
 	core::hash::Hash,
 	nrfs::{
 		dev::FileDev,
-		dir::{ext, Entry},
+		dir::{ext, ItemRef},
 		DirRef, FileRef, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef, SymRef, TmpRef,
 	},
 	std::collections::{HashMap, HashSet},
@@ -28,18 +28,6 @@ pub struct InodeStore {
 	file_rev: HashMap<RawFileRef, Handle<()>>,
 	/// Reverse lookup from directory ID + sym
 	sym_rev: HashMap<RawSymRef, Handle<()>>,
-	/// Files to be removed.
-	///
-	/// These may not have been deleted yet due to live references.
-	remove_files: HashSet<RawFileRef>,
-	/// Symbolic links to be removed.
-	///
-	/// These may not have been deleted yet due to live references.
-	remove_syms: HashSet<RawSymRef>,
-	/// Directories to be removed.
-	///
-	/// These may not have been deleted yet due to live references.
-	remove_dirs: HashSet<RawDirRef>,
 	/// Default value for `unix` extension if not present.
 	pub unix_default: nrfs::dir::ext::unix::Entry,
 }
@@ -96,7 +84,7 @@ impl InodeStore {
 		&'s self,
 		fs: &'f Nrfs<FileDev>,
 		ino: u64,
-	) -> TmpRef<'s, Entry<'f, FileDev>> {
+	) -> TmpRef<'s, ItemRef<'f, FileDev>> {
 		let h = Handle::from_raw((ino & !INO_TY_MASK) as usize - 1, ());
 		match ino & INO_TY_MASK {
 			INO_TY_DIR => self.dir[h].value.into_tmp(fs).into(),
@@ -136,37 +124,8 @@ impl InodeStore {
 			.into_tmp(fs)
 	}
 
-	/// Mark a directory for deletion as soon as it has no more references.
-	pub fn mark_remove_dir(&mut self, dir: RawDirRef) {
-		debug_assert!(self.dir_rev.contains_key(&dir), "not referenced");
-		let _r = self.remove_dirs.insert(dir);
-		debug_assert!(_r, "already marked");
-	}
-
-	/// Mark a file for deletion as soon as it has no more references.
-	pub fn mark_remove_file(&mut self, file: RawFileRef) {
-		debug_assert!(self.file_rev.contains_key(&file), "not referenced");
-		let _r = self.remove_files.insert(file);
-		debug_assert!(_r, "already marked");
-	}
-
-	/// Mark a symbolic link for deletion as soon as it has no more references.
-	pub fn mark_remove_sym(&mut self, sym: RawSymRef) {
-		debug_assert!(self.sym_rev.contains_key(&sym), "not referenced");
-		let _r = self.remove_syms.insert(sym);
-		debug_assert!(_r, "already marked");
-	}
-
 	/// Forget an entry.
-	///
-	/// If the entry needs to be removed it is returned.
-	#[must_use = "may need to remove entry"]
-	pub fn forget<'f>(
-		&mut self,
-		fs: &'f Nrfs<FileDev>,
-		ino: u64,
-		nlookup: u64,
-	) -> Option<Entry<'f, FileDev>> {
+	pub fn forget<'f>(&mut self, fs: &'f Nrfs<FileDev>, ino: u64, nlookup: u64) {
 		let h = Handle::from_raw((ino & !INO_TY_MASK) as usize - 1, ());
 		match ino & INO_TY_MASK {
 			INO_TY_DIR => {
@@ -175,10 +134,7 @@ impl InodeStore {
 				if *c == 0 {
 					let d = self.dir.remove(h).unwrap();
 					self.dir_rev.remove(&d.value);
-					let e = DirRef::from_raw(fs, d.value.clone());
-					if self.remove_dirs.remove(&d.value) {
-						return Some(e.into());
-					}
+					DirRef::from_raw(fs, d.value);
 				}
 			}
 			INO_TY_FILE => {
@@ -187,10 +143,7 @@ impl InodeStore {
 				if *c == 0 {
 					let f = self.file.remove(h).unwrap();
 					self.file_rev.remove(&f.value);
-					let e = FileRef::from_raw(fs, f.value.clone());
-					if self.remove_files.remove(&f.value) {
-						return Some(e.into());
-					}
+					FileRef::from_raw(fs, f.value);
 				}
 			}
 			INO_TY_SYM => {
@@ -199,15 +152,11 @@ impl InodeStore {
 				if *c == 0 {
 					let f = self.sym.remove(h).unwrap();
 					self.sym_rev.remove(&f.value);
-					let e = SymRef::from_raw(fs, f.value.clone());
-					if self.remove_syms.remove(&f.value) {
-						return Some(e.into());
-					}
+					SymRef::from_raw(fs, f.value);
 				}
 			}
 			_ => unreachable!(),
 		}
-		None
 	}
 
 	/// Drop all references and inodes.
@@ -225,9 +174,5 @@ impl InodeStore {
 		self.dir_rev.clear();
 		self.file_rev.clear();
 		self.sym_rev.clear();
-
-		self.remove_dirs.clear();
-		self.remove_files.clear();
-		self.remove_syms.clear();
 	}
 }
