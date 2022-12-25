@@ -6,11 +6,22 @@ use {
 	rustc_hash::FxHashMap,
 };
 
-// TODO make part of public API.
 #[derive(Debug)]
 enum RawItemRef {
-	File(RawFileRef),
-	Dir(RawDirRef),
+	File {
+		/// Reference to the file.
+		file: RawFileRef,
+		/// Whether the corresponding entry was removed from the directory,
+		/// i.e. whether the corresponding item is dangling.
+		removed: bool,
+	},
+	Dir {
+		/// Reference to the directory.
+		dir: RawDirRef,
+		/// Whether the corresponding entry was removed from the directory,
+		/// i.e. whether the corresponding item is dangling.
+		removed: bool,
+	},
 }
 
 #[derive(Debug)]
@@ -155,15 +166,15 @@ impl<'a> Test<'a> {
 			) -> Option<(
 				TmpRef<'c, ItemRef<'b, MemDev>>,
 				&'c [&'a Name],
-				&'d mut State<'a>,
+				Option<&'d mut State<'a>>,
 			)> {
 				match refs.get(arena::Handle::from_raw(file_idx.into(), ())) {
-					Some((RawItemRef::File(file), path)) => {
-						let c = state_mut(state, path.iter().copied()).unwrap();
+					Some((RawItemRef::File { file, removed }, path)) => {
+						let c = (!removed).then(|| state_mut(state, path.iter().copied()).unwrap());
 						Some((file.into_tmp(fs).into(), path, c))
 					}
-					Some((RawItemRef::Dir(dir), path)) => {
-						let c = state_mut(state, path.iter().copied()).unwrap();
+					Some((RawItemRef::Dir { dir, removed }, path)) => {
+						let c = (!removed).then(|| state_mut(state, path.iter().copied()).unwrap());
 						Some((dir.into_tmp(fs).into(), path, c))
 					}
 					_ => None,
@@ -178,11 +189,12 @@ impl<'a> Test<'a> {
 			) -> Option<(
 				TmpRef<'c, DirRef<'b, MemDev>>,
 				&'c [&'a Name],
-				&'d mut FxHashMap<&'a Name, State<'a>>,
+				Option<&'d mut FxHashMap<&'a Name, State<'a>>>,
 			)> {
 				match refs.get(arena::Handle::from_raw(dir_idx.into(), ())) {
-					Some((RawItemRef::Dir(dir), path)) => {
-						let d = state_mut(state, path.iter().copied()).unwrap().dir_mut();
+					Some((RawItemRef::Dir { dir, removed }, path)) => {
+						let d = (!removed)
+							.then(|| state_mut(state, path.iter().copied()).unwrap().dir_mut());
 						Some((dir.into_tmp(fs), path, d))
 					}
 					_ => None,
@@ -197,11 +209,12 @@ impl<'a> Test<'a> {
 			) -> Option<(
 				TmpRef<'c, FileRef<'b, MemDev>>,
 				&'c [&'a Name],
-				&'d mut RangeSet<u64>,
+				Option<&'d mut RangeSet<u64>>,
 			)> {
 				match refs.get(arena::Handle::from_raw(file_idx.into(), ())) {
-					Some((RawItemRef::File(file), path)) => {
-						let c = state_mut(state, path.iter().copied()).unwrap().file_mut();
+					Some((RawItemRef::File { file, removed }, path)) => {
+						let c = (!removed)
+							.then(|| state_mut(state, path.iter().copied()).unwrap().file_mut());
 						Some((file.into_tmp(fs), path, c))
 					}
 					_ => None,
@@ -219,6 +232,7 @@ impl<'a> Test<'a> {
 
 						match dir.create_file(name, &ext).await.unwrap() {
 							Ok(_) => {
+								let d = d.expect("dir should be empty");
 								let r = d.insert(
 									name,
 									State::File {
@@ -231,9 +245,12 @@ impl<'a> Test<'a> {
 								assert!(r.is_none());
 							}
 							Err(InsertError::Duplicate) => {
+								let d = d.expect("dir should be empty");
 								assert!(d.contains_key(name));
 							}
-							Err(InsertError::Full) => {}
+							Err(InsertError::Full) => {
+								let _ = d.expect("dir should be empty");
+							}
 						}
 					}
 					Op::CreateDir { dir_idx, name, options, ext } => {
@@ -241,6 +258,7 @@ impl<'a> Test<'a> {
 
 						match dir.create_dir(name, &options, &ext).await.unwrap() {
 							Ok(_) => {
+								let d = d.expect("dir should be empty");
 								let r = d.insert(
 									name,
 									State::Dir {
@@ -253,20 +271,31 @@ impl<'a> Test<'a> {
 								assert!(r.is_none());
 							}
 							Err(InsertError::Duplicate) => {
+								let d = d.expect("dir should be empty");
 								assert!(d.contains_key(name));
 							}
-							Err(InsertError::Full) => {}
+							Err(InsertError::Full) => {
+								let _ = d.expect("dir should be empty");
+							}
 						}
 					}
 					Op::Get { dir_idx, name } => {
 						let Some((dir, path, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
+						// If the dir has been removed it should be empty.
+						let d_stub = &mut Default::default();
+						let d = d.unwrap_or(d_stub);
+
 						let path = append(path, name);
 						if let Some(entry) = dir.find(name).await.unwrap() {
 							let state = d.get_mut(name).unwrap();
 							let r = match entry {
-								ItemRef::File(e) => RawItemRef::File(e.into_raw()),
-								ItemRef::Dir(e) => RawItemRef::Dir(e.into_raw()),
+								ItemRef::File(e) => {
+									RawItemRef::File { file: e.into_raw(), removed: false }
+								}
+								ItemRef::Dir(e) => {
+									RawItemRef::Dir { dir: e.into_raw(), removed: false }
+								}
 								_ => panic!("unexpected entry type"),
 							};
 							let idx = refs.insert((r, path));
@@ -277,7 +306,10 @@ impl<'a> Test<'a> {
 					}
 					Op::Root => {
 						let dir = self.fs.root_dir().await.unwrap();
-						let idx = refs.insert((RawItemRef::Dir(dir.into_raw()), [].into()));
+						let idx = refs.insert((
+							RawItemRef::Dir { dir: dir.into_raw(), removed: false },
+							[].into(),
+						));
 						state.indices_mut().push(idx);
 					}
 					Op::Drop { idx } => {
@@ -285,11 +317,11 @@ impl<'a> Test<'a> {
 						if let Some((entry, path)) = refs.remove(idx) {
 							// Drop reference
 							match entry {
-								RawItemRef::File(e) => {
-									FileRef::from_raw(&self.fs, e);
+								RawItemRef::File { file, .. } => {
+									FileRef::from_raw(&self.fs, file);
 								}
-								RawItemRef::Dir(e) => {
-									DirRef::from_raw(&self.fs, e);
+								RawItemRef::Dir { dir, .. } => {
+									DirRef::from_raw(&self.fs, dir);
 								}
 							}
 							// Remove from state
@@ -314,6 +346,10 @@ impl<'a> Test<'a> {
 
 						// Update expected contents
 						if amount > 0 {
+							let Some(contents) = contents else {
+								// TODO keep track of contents even if removed.
+								continue
+							};
 							contents.insert(offset..offset + u64::from(amount));
 						}
 					}
@@ -330,6 +366,10 @@ impl<'a> Test<'a> {
 
 						// Verify contents
 						if l > 0 {
+							let Some(contents) = contents else {
+								// TODO keep track of contents even if removed.
+								continue
+							};
 							for (i, c) in (offt..offt + u64::try_from(l).unwrap()).zip(&*buf) {
 								assert_eq!(contents.contains(&i), *c == 1);
 							}
@@ -339,11 +379,19 @@ impl<'a> Test<'a> {
 						let Some((file, _, contents)) = get_file(&self.fs, &refs, &mut state, file_idx) else { continue };
 						file.resize(len).await.unwrap();
 						if len < u64::MAX {
+							let Some(contents) = contents else {
+								// TODO keep track of contents even if removed.
+								continue
+							};
 							contents.remove(len..u64::MAX);
 						}
 					}
 					Op::Rename { dir_idx, from, to } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
+						let Some(d) = d else {
+							// Entry was already removed.
+							continue
+						};
 						match dir.rename(from, to).await.unwrap() {
 							Ok(()) => {
 								// Rename succeeded
@@ -368,6 +416,11 @@ impl<'a> Test<'a> {
 					Op::Transfer { from_dir_idx, from, to_dir_idx, to } => {
 						let Some((to_dir, to_path, _)) = get_dir(&self.fs, &refs, &mut state, to_dir_idx) else { continue };
 						let Some((from_dir, _, d)) = get_dir(&self.fs, &refs, &mut state, from_dir_idx) else { continue };
+
+						let Some(d) = d else {
+							// Entry was already removed.
+							continue
+						};
 
 						match from_dir.transfer(from, &to_dir, to).await.unwrap() {
 							Ok(()) => {
@@ -403,15 +456,29 @@ impl<'a> Test<'a> {
 					Op::Remove { dir_idx, name } => {
 						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
+						let Some(d) = d else {
+							// Entry was already removed.
+							continue
+						};
+
 						match dir.remove(name).await.unwrap() {
 							// Remove succeeded:
 							// - if the entry is a directory it is empty
-							Ok(()) => match d.remove(name).unwrap() {
-								State::File { indices, .. } => {}
-								State::Dir { children, indices, .. } => {
-									assert!(children.is_empty())
+							Ok(()) => {
+								let indices = match d.remove(name).unwrap() {
+									State::File { indices, .. } => indices,
+									State::Dir { children, indices, .. } => {
+										assert!(children.is_empty());
+										indices
+									}
+								};
+								for &i in indices.iter() {
+									match &mut refs[i].0 {
+										RawItemRef::File { removed, .. } => *removed = true,
+										RawItemRef::Dir { removed, .. } => *removed = true,
+									}
 								}
-							},
+							}
 							// Remove failed:
 							// - the entry doesn't exist.
 							Err(RemoveError::NotFound) => assert!(d.get(name).is_none()),
@@ -436,15 +503,19 @@ impl<'a> Test<'a> {
 					Op::GetExt { idx } => {
 						let Some((entry, _, e)) = get(&self.fs, &refs, &mut state, idx) else { continue };
 						let data = entry.data().await.unwrap();
-						if let Some(data) = data.ext_unix {
-							let ext = e.ext_unix_mut();
-							assert_eq!(ext.permissions, data.permissions);
-							assert_eq!(ext.uid(), data.uid());
-							assert_eq!(ext.gid(), data.gid());
-						}
-						if let Some(data) = data.ext_mtime {
-							let ext = e.ext_mtime_mut();
-							assert_eq!(ext.mtime, data.mtime);
+						if let Some(e) = e {
+							if let Some(data) = data.ext_unix {
+								let ext = e.ext_unix_mut();
+								assert_eq!(ext.permissions, data.permissions);
+								assert_eq!(ext.uid(), data.uid());
+								assert_eq!(ext.gid(), data.gid());
+							}
+							if let Some(data) = data.ext_mtime {
+								let ext = e.ext_mtime_mut();
+								assert_eq!(ext.mtime, data.mtime);
+							}
+						} else {
+							// TODO keep tracking metadata even if removed.
 						}
 					}
 				}
@@ -452,11 +523,11 @@ impl<'a> Test<'a> {
 
 			// Drop all refs to ensure refcounting works properly.
 			refs.drain().for_each(|(_, (r, _))| match r {
-				RawItemRef::File(e) => {
-					FileRef::from_raw(&self.fs, e);
+				RawItemRef::File { file, .. } => {
+					FileRef::from_raw(&self.fs, file);
 				}
-				RawItemRef::Dir(e) => {
-					DirRef::from_raw(&self.fs, e);
+				RawItemRef::Dir { dir, .. } => {
+					DirRef::from_raw(&self.fs, dir);
 				}
 			});
 		})
@@ -936,6 +1007,28 @@ fn remove_next_index_mask() {
 				ext: Extensions { unix: None, mtime: None },
 			},
 			Transfer { from_dir_idx: 0, from: b"x".into(), to_dir_idx: 0, to: b"x".into() },
+		],
+	)
+	.run()
+}
+
+/// Out-of-bounds error with `Test::run::get`.
+///
+/// This is a new error since items with live references can now be "removed".
+#[test]
+fn fuzz_access_removed_ref() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile {
+				dir_idx: 0,
+				name: b"\0".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Get { dir_idx: 0, name: b"\0".into() },
+			Remove { dir_idx: 0, name: b"\0".into() },
+			GetExt { idx: 1 },
 		],
 	)
 	.run()
