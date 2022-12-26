@@ -10,6 +10,9 @@ trace = []
 [dependencies.arena]
 git = "https://git.sr.ht/~demindiro/arena"
 
+[dependencies.bstr]
+version = "1.1"
+
 [dependencies.endian]
 package = "nora_endian"
 version = "0.1"

@@ -152,3 +152,16 @@ When the transfer has finished, the copy is replaced with the dirty map.
 This process is repeated until the dirty map is empty or sufficiently small to
 warrant a brief write stall.
 Finally, the headers are written.
+
+
+Filesystem
+~~~~~~~~~~
+
+
+Directory
+^^^^^^^^^
+
+::
+
+  +----------
+  |

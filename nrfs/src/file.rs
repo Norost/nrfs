@@ -1,23 +1,25 @@
 use {
 	crate::{
 		dir::{Child, Dir, Type},
-		DataHeader, Dev, Error, FileRef, Idx, Nrfs, SymRef, UnknownRef,
+		DataHeader, Dev, DirRef, Error, FileRef, Idx, Nrfs, SymRef, UnknownRef,
 	},
-	core::cell::RefMut,
+	core::{cell::RefMut, mem},
 	std::collections::hash_map,
 };
 
 /// [`File`] shared mutable data.
 #[derive(Debug)]
-pub struct FileData {
+pub(crate) struct FileData {
 	/// Data header.
 	pub(crate) header: DataHeader,
 	/// Reference to file data, which may be a separate object or embedded on a directory's heap.
-	inner: Inner,
+	pub(crate) inner: Inner,
+	/// Whether this file has been removed and the corresponding item is dangling.
+	pub(crate) is_dangling: bool,
 }
 
 #[derive(Debug)]
-enum Inner {
+pub(crate) enum Inner {
 	/// The data is in a separate object.
 	Object { id: u64 },
 	/// The data is embedded on the parent directory's heap.
@@ -108,7 +110,6 @@ impl<'a, D: Dev> File<'a, D> {
 				if offset >= length {
 					return Ok(0);
 				}
-				let end = offt + u64::from(length);
 				// Truncate buffer so we don't read out-of-bounds.
 				let l = usize::try_from(length - offset).unwrap();
 				let l = buf.len().min(l);
@@ -235,12 +236,12 @@ impl<'a, D: Dev> File<'a, D> {
 				// Take data off the directory's heap and deallocate.
 				let mut buf = vec![0; usize::from(length)];
 				dir.read_heap(offt, &mut buf).await?;
-				dir.dealloc(offt, u64::from(length)).await?;
+				dir.dealloc_heap(offt, u64::from(length)).await?;
 
 				// Determine whether we should keep the data embedded.
 				let bs = 1u64 << self.fs.block_size();
 				let new_inner = if end <= u64::from(u16::MAX).min(bs * EMBED_FACTOR) {
-					let o = dir.alloc(end).await?;
+					let o = dir.alloc_heap(end).await?;
 					// TODO avoid redundant tail write
 					dir.write_heap(o, &buf).await?;
 					dir.write_heap(o + offset, &data).await?;
@@ -301,13 +302,13 @@ impl<'a, D: Dev> File<'a, D> {
 				drop(data);
 				let mut buf = vec![0; new_len.min(u64::from(length)) as _];
 				dir.read_heap(offt, &mut buf).await?;
-				dir.dealloc(offt, u64::from(length)).await?;
+				dir.dealloc_heap(offt, u64::from(length)).await?;
 
 				// Determine whether we should keep the data embedded.
 				let bs = 1u64 << self.fs.block_size();
 				let new_inner = if new_len <= u64::from(u16::MAX).min(bs * EMBED_FACTOR) {
 					// Keep it embedded, write to
-					let o = dir.alloc(new_len).await?;
+					let o = dir.alloc_heap(new_len).await?;
 					dir.write_heap(o, &buf).await?;
 					Inner::Embed { offset: o, length: new_len.try_into().unwrap() }
 				} else {
@@ -335,7 +336,7 @@ impl<'a, D: Dev> File<'a, D> {
 		match &data.inner {
 			&Inner::Object { id } => {
 				drop(data);
-				self.fs.length(id).await
+				Ok(self.fs.storage.get(id).await?.len().await?)
 			}
 			&Inner::Embed { length, .. } => Ok(length.into()),
 		}
@@ -437,7 +438,11 @@ impl<'a, D: Dev> FileRef<'a, D> {
 			},
 			hash_map::Entry::Vacant(e) => {
 				// Insert new FileData and reference parent dict
-				let idx = files.insert(FileData { header: DataHeader::new(dir.id, index), inner });
+				let idx = files.insert(FileData {
+					header: DataHeader::new(dir.id, index),
+					inner,
+					is_dangling: false,
+				});
 				e.insert(Child::File(idx));
 
 				dir_data.header.reference_count += 1;
@@ -447,6 +452,64 @@ impl<'a, D: Dev> FileRef<'a, D> {
 		};
 
 		Self { fs: dir.fs, idx }
+	}
+
+	/// Destroy the reference to this file.
+	///
+	/// This will perform cleanup if the file is dangling
+	/// and this was the last reference.
+	pub async fn drop(self) -> Result<(), Error<D>> {
+		// Don't run the Drop impl
+		let Self { fs, idx } = self;
+		mem::forget(self);
+
+		let mut fs_ref = fs.data.borrow_mut();
+		let fsr = &mut *fs_ref; // borrow errors ahoy!
+
+		let mut data = fsr.files.get_mut(idx).expect("filedata should be present");
+
+		data.header.reference_count -= 1;
+		if data.header.reference_count == 0 {
+			// Remove itself from parent directory.
+			let dir = fsr
+				.directories
+				.get_mut(&data.header.parent_id)
+				.expect("parent dir is not loaded");
+			let _r = dir.children.remove(&data.header.parent_index);
+			debug_assert!(matches!(_r, Some(Child::File(i)) if i == idx));
+
+			// Remove filedata.
+			let data = fsr.files.remove(idx).expect("filedata should be present");
+
+			drop(fs_ref);
+
+			// Reconstruct DirRef to parent.
+			let dir = DirRef { fs, id: data.header.parent_id };
+
+			// If dangling, destroy associated file data.
+			let r = async {
+				if data.is_dangling && !fs.read_only {
+					match data.inner {
+						Inner::Embed { offset, length } => {
+							dir.dir().dealloc_heap(offset, length.into()).await?
+						}
+						Inner::Object { id } => {
+							fs.storage.get(id).await?.decrease_reference_count().await?
+						}
+					}
+					dir.dir().clear_item(data.header.parent_index).await?;
+				}
+				Ok(())
+			}
+			.await;
+			if let Err(e) = r {
+				mem::forget(dir);
+				return Err(e);
+			}
+
+			dir.drop().await?;
+		}
+		Ok(())
 	}
 
 	impl_common!(s -> s, Ty::File);
@@ -463,6 +526,14 @@ impl<'a, D: Dev> SymRef<'a, D> {
 		Self(FileRef::from_embed(dir, offset, length, index))
 	}
 
+	/// Destroy the reference to this symbolic link.
+	///
+	/// This will perform cleanup if the symbolic link is dangling
+	/// and this was the last reference.
+	pub async fn drop(self) -> Result<(), Error<D>> {
+		self.0.drop().await
+	}
+
 	impl_common!(s -> s.0, Ty::Sym);
 }
 
@@ -470,6 +541,14 @@ impl<'a, D: Dev> UnknownRef<'a, D> {
 	/// Create a new [`UnknownRef`].
 	pub(crate) fn new(dir: &Dir<'a, D>, index: u32) -> Self {
 		Self(FileRef::from_embed(dir, 0, 0, index))
+	}
+
+	/// Destroy the reference to this item.
+	///
+	/// This will perform cleanup if the item is dangling
+	/// and this was the last reference.
+	pub async fn drop(self) -> Result<(), Error<D>> {
+		self.0.drop().await
 	}
 
 	// Do *not* use impl_common!

@@ -1,10 +1,10 @@
-use super::*;
+use {super::*, crate::dir::RemoveError};
 
 #[test]
 fn get_root() {
 	run(async {
 		let fs = new().await;
-		fs.root_dir().await.unwrap();
+		fs.root_dir().await.unwrap().drop().await.unwrap();
 	})
 }
 
@@ -16,7 +16,11 @@ fn create_file() {
 		root.create_file(b"file".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
+		root.drop().await.unwrap();
 	})
 }
 
@@ -32,7 +36,11 @@ fn create_dir() {
 		)
 		.await
 		.unwrap()
+		.unwrap()
+		.drop()
+		.await
 		.unwrap();
+		root.drop().await.unwrap();
 	})
 }
 
@@ -44,7 +52,11 @@ fn create_sym() {
 		root.create_sym(b"sym".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
+		root.drop().await.unwrap();
 	})
 }
 
@@ -54,12 +66,18 @@ fn create_file_long_name() {
 		let fs = new().await;
 		let root = fs.root_dir().await.unwrap();
 		root.create_file(
-			b"This is a string with len >= 14".into(),
+			b"This is a string with len equal to 37"[..]
+				.try_into()
+				.unwrap(),
 			&Default::default(),
 		)
 		.await
 		.unwrap()
+		.unwrap()
+		.drop()
+		.await
 		.unwrap();
+		root.drop().await.unwrap();
 	})
 }
 
@@ -71,10 +89,16 @@ fn get_file() {
 		root.create_file(b"file".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 
 		let file = root.find(b"file".into()).await.unwrap().unwrap();
-		assert!(matches!(file, Entry::File(_)));
+		assert!(matches!(file, ItemRef::File(_)));
+		file.drop().await.unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -90,10 +114,16 @@ fn get_dir() {
 		)
 		.await
 		.unwrap()
+		.unwrap()
+		.drop()
+		.await
 		.unwrap();
 
 		let dir = root.find(b"dir".into()).await.unwrap().unwrap();
-		assert!(matches!(dir, Entry::Dir(_)));
+		assert!(matches!(dir, ItemRef::Dir(_)));
+		dir.drop().await.unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -105,10 +135,16 @@ fn get_sym() {
 		root.create_sym(b"sym".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 
 		let sym = root.find(b"sym".into()).await.unwrap().unwrap();
-		assert!(matches!(sym, Entry::Sym(_)));
+		assert!(matches!(sym, ItemRef::Sym(_)));
+		sym.drop().await.unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -118,19 +154,25 @@ fn get_file_long_name() {
 		let fs = new().await;
 		let root = fs.root_dir().await.unwrap();
 		root.create_file(
-			b"This is a string with len >= 14".into(),
+			b"This is a string with len >= 27".into(),
 			&Default::default(),
 		)
 		.await
 		.unwrap()
+		.unwrap()
+		.drop()
+		.await
 		.unwrap();
 
 		let file = root
-			.find(b"This is a string with len >= 14".into())
+			.find(b"This is a string with len >= 27".into())
 			.await
 			.unwrap()
 			.unwrap();
-		assert!(matches!(file, Entry::File(_)));
+		assert!(matches!(file, ItemRef::File(_)));
+		file.drop().await.unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -142,9 +184,14 @@ fn remove_file() {
 		root.create_file(b"file".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 
-		assert!(root.remove(b"file".into()).await.unwrap());
+		root.remove(b"file".into()).await.unwrap().unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -161,9 +208,11 @@ fn remove_large_file() {
 
 		// Write at least 64KiB of data so an object is guaranteed to be allocated.
 		file.write_grow(0, &[0; 1 << 16]).await.unwrap();
-		drop(file);
+		file.drop().await.unwrap();
 
-		assert!(root.remove(b"file".into()).await.unwrap());
+		root.remove(b"file".into()).await.unwrap().unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -180,9 +229,14 @@ fn remove_empty_dir() {
 		)
 		.await
 		.unwrap()
+		.unwrap()
+		.drop()
+		.await
 		.unwrap();
 
-		assert!(root.remove(b"dir".into()).await.unwrap());
+		root.remove(b"dir".into()).await.unwrap().unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -192,20 +246,30 @@ fn remove_nonempty_dir() {
 	run(async {
 		let fs = new().await;
 		let root = fs.root_dir().await.unwrap();
-		root.create_dir(
-			b"dir".into(),
-			&DirOptions::new(&[0; 16]),
-			&Default::default(),
-		)
-		.await
-		.unwrap()
-		.unwrap()
-		.create_file(b"file".into(), &Default::default())
-		.await
-		.unwrap()
-		.unwrap();
+		let dir = root
+			.create_dir(
+				b"dir".into(),
+				&DirOptions::new(&[0; 16]),
+				&Default::default(),
+			)
+			.await
+			.unwrap()
+			.unwrap();
+		dir.create_file(b"file".into(), &Default::default())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+		dir.drop().await.unwrap();
 
-		assert!(!root.remove(b"dir".into()).await.unwrap());
+		assert!(matches!(
+			root.remove(b"dir".into()).await.unwrap(),
+			Err(RemoveError::NotEmpty)
+		));
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -217,9 +281,14 @@ fn remove_sym() {
 		root.create_sym(b"sym".into(), &Default::default())
 			.await
 			.unwrap()
+			.unwrap()
+			.drop()
+			.await
 			.unwrap();
 
-		assert!(root.remove(b"sym".into()).await.unwrap());
+		root.remove(b"sym".into()).await.unwrap().unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -234,12 +303,17 @@ fn remove_file_long_name() {
 		)
 		.await
 		.unwrap()
+		.unwrap()
+		.drop()
+		.await
 		.unwrap();
 
-		assert!(root
-			.remove(b"This is a string with len >= 14".into())
+		root.remove(b"This is a string with len >= 14".into())
 			.await
-			.unwrap());
+			.unwrap()
+			.unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -255,14 +329,16 @@ fn rename() {
 			.unwrap()
 			.unwrap();
 
-		let moved = root
-			.rename(b"file".into(), b"same_file".into())
+		root.rename(b"file".into(), b"same_file".into())
 			.await
+			.unwrap()
 			.unwrap();
-		assert!(moved);
 
 		// Check if the associated FileData is still correct.
 		file.write_grow(0, b"panic in the disco").await.unwrap();
+		file.drop().await.unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -288,14 +364,17 @@ fn transfer() {
 			.unwrap()
 			.unwrap();
 
-		let moved = root
-			.transfer(b"file".into(), &dir, b"same_file".into())
+		root.transfer(b"file".into(), &dir, b"same_file".into())
 			.await
+			.unwrap()
 			.unwrap();
-		assert!(moved);
 
 		// Check if the associated FileData is still correct.
 		file.write_grow(0, b"panic in the disco").await.unwrap();
+		file.drop().await.unwrap();
+		dir.drop().await.unwrap();
+
+		root.drop().await.unwrap();
 	})
 }
 
@@ -316,6 +395,76 @@ fn get_dir_existing_ref() {
 			.unwrap();
 
 		let dir2 = root.find(b"dir".into()).await.unwrap().unwrap();
-		assert!(matches!(dir2, Entry::Dir(_)));
+		assert!(matches!(dir2, ItemRef::Dir(_)));
+		dir2.drop().await.unwrap();
+		dir.drop().await.unwrap();
+
+		root.drop().await.unwrap();
 	})
+}
+
+/// `NotEmpty` & other errors must be returned before `LiveReference` to avoid confusion.
+#[test]
+fn error_priority() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+
+		let dir = root
+			.create_dir(
+				b"dir".into(),
+				&DirOptions::new(&[0; 16]),
+				&Default::default(),
+			)
+			.await
+			.unwrap()
+			.unwrap();
+
+		let file = dir
+			.create_file(b"file".into(), &Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+
+		let err = root.remove(b"dir".into()).await.unwrap().unwrap_err();
+		assert!(matches!(err, RemoveError::NotEmpty));
+		file.drop().await.unwrap();
+		dir.drop().await.unwrap();
+
+		root.drop().await.unwrap();
+	})
+}
+
+/// The key is stored in two places: the hashmap entry and the item.
+///
+/// Ensure that rename updates both.
+#[test]
+fn rename_item_key() {
+	run(async {
+		let fs = new().await;
+		let root = fs.root_dir().await.unwrap();
+		root.create_file(b"file".into(), &Default::default())
+			.await
+			.unwrap()
+			.unwrap()
+			.drop()
+			.await
+			.unwrap();
+		root.rename(b"file".into(), b"same_file".into())
+			.await
+			.unwrap()
+			.unwrap();
+
+		let (e, i) = root.next_from(0).await.unwrap().unwrap();
+		let data = e.data().await.unwrap();
+		let name = e.key(&data).await.unwrap();
+		assert_eq!(
+			name.as_ref().map(|n| &**n),
+			Some(<&Name>::from(b"same_file"))
+		);
+		assert!(root.next_from(i).await.unwrap().is_none());
+		e.drop().await.unwrap();
+
+		root.drop().await.unwrap();
+	});
 }

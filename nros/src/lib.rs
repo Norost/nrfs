@@ -6,6 +6,7 @@
 #![feature(iterator_try_collect)]
 #![feature(nonzero_min_max)]
 #![feature(pin_macro)]
+#![feature(slice_flatten)]
 #![feature(type_alias_impl_trait)]
 
 extern crate alloc;
@@ -141,9 +142,9 @@ impl<D: Dev> Nros<D> {
 		self.store.create().await
 	}
 
-	/// Create two objects, one at ID and one at ID + 1.
-	pub async fn create_pair(&self) -> Result<(Tree<D>, Tree<D>), Error<D>> {
-		self.store.create_pair().await
+	/// Create multiple adjacent objects, from ID up to ID + N - 1.
+	pub async fn create_many<const N: usize>(&self) -> Result<u64, Error<D>> {
+		self.store.create_many::<N>().await
 	}
 
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {

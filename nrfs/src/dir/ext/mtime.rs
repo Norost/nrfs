@@ -1,4 +1,5 @@
 #[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
 pub struct Entry {
 	pub mtime: i64,
 }

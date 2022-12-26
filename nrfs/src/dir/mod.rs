@@ -1,16 +1,26 @@
 pub mod ext;
 
+mod child;
+mod dir_data;
+mod hasher;
 mod hashmap;
+mod heap;
+mod item;
+mod key;
+
+pub use item::{ItemData, ItemRef};
+
+pub(crate) use {child::Child, dir_data::DirData, hasher::Hasher, item::Type};
 
 use {
 	crate::{
-		read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Idx, Name, Nrfs, SymRef,
-		UnknownRef,
+		file, read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Name, Nrfs, SymRef,
 	},
 	core::{cell::RefMut, mem},
 	hashmap::*,
+	item::Item,
+	key::Key,
 	rangemap::RangeSet,
-	rustc_hash::FxHashMap,
 	std::collections::hash_map,
 };
 
@@ -18,99 +28,15 @@ use {
 const MAX_LOAD_FACTOR_MILLI: u64 = 875;
 const MIN_LOAD_FACTOR_MILLI: u64 = 375;
 
-const TY_NONE: u8 = 0;
-const TY_FILE: u8 = 1;
-const TY_DIR: u8 = 2;
-const TY_SYM: u8 = 3;
-const TY_EMBED_FILE: u8 = 4;
-const TY_EMBED_SYM: u8 = 5;
+const MAP_OFFT: u64 = 1;
+const HEAP_OFFT: u64 = 2;
 
 /// Constants used to manipulate the directory header.
 mod header {
 	pub mod offset {
-		pub const ENTRY_COUNT: u16 = 4;
-	}
-}
-
-/// Directory data only, which has no lifetimes.
-///
-/// The map is located at ID.
-/// The heap is located at ID + 1.
-#[derive(Debug)]
-pub struct DirData {
-	/// Data header.
-	pub(crate) header: DataHeader,
-	/// Live [`FileRef`] and [`DirRef`]s that point to files which are a child of this directory.
-	///
-	/// Indexed by the index of the file on the on-disk hashmap.
-	pub(crate) children: FxHashMap<u32, Child>,
-	/// The length of the header, in multiples of 8 bytes.
-	header_len8: u8,
-	/// The length of a single entry, in multiples of 8 bytes.
-	entry_len8: u8,
-	/// The size of the hashmap, as a power of 2.
-	///
-	/// This is always between `0` and `32`.
-	hashmap_size_p2: u8,
-	/// The hasher used to index the hashmap.
-	hasher: Hasher,
-	/// The amount of entries in the hashmap.
-	entry_count: u32,
-	/// The offset of `unix` extension data, if in use.
-	unix_offset: Option<u16>,
-	/// The offset of `mtime` extension data, if in use.
-	mtime_offset: Option<u16>,
-	/// Allocation map of the heap.
-	///
-	/// This map is lazily loaded to save time when only reading the directory.
-	alloc_map: Option<RangeSet<u64>>,
-}
-
-impl DirData {
-	/// The base address of the hashmap.
-	fn hashmap_base(&self) -> u64 {
-		u64::from(self.header_len8) * 8
-	}
-
-	/// The base address of the allocation log.
-	fn alloc_log_base(&self) -> u64 {
-		self.hashmap_base() + u64::from(self.entry_size()) * self.capacity()
-	}
-
-	/// The size of a single entry.
-	fn entry_size(&self) -> u16 {
-		u16::from(self.entry_len8) * 8
-	}
-
-	/// Check if the hashmap should grow.
-	fn should_grow(&self) -> bool {
-		self.index_mask() == self.entry_count
-			|| u64::from(self.entry_count) * 1000
-				> u64::from(self.capacity()) * MAX_LOAD_FACTOR_MILLI
-	}
-
-	/// Check if the hashmap should shrink.
-	fn should_shrink(&self) -> bool {
-		u64::from(self.entry_count) * 1000 < u64::from(self.capacity()) * MIN_LOAD_FACTOR_MILLI
-	}
-
-	/// The current size of the hashmap
-	fn capacity(&self) -> u64 {
-		1 << self.hashmap_size_p2
-	}
-
-	/// The size of the hashmap minus one.
-	///
-	/// Used to truncate indices.
-	fn index_mask(&self) -> u32 {
-		(self.capacity() as u32).wrapping_sub(1)
-	}
-
-	/// Determine the offset of an entry.
-	///
-	/// This does *not* check if the index is in range.
-	fn get_offset(&self, index: u32) -> u64 {
-		self.hashmap_base() + u64::from(index) * u64::from(self.entry_size())
+		pub const HASHMAP_SIZE: u16 = 3;
+		pub const ITEM_COUNT: u16 = 4;
+		pub const ITEM_CAPACITY: u16 = 8;
 	}
 }
 
@@ -119,9 +45,7 @@ impl DirData {
 pub(crate) struct Dir<'a, D: Dev> {
 	/// The filesystem containing the directory's data.
 	pub(crate) fs: &'a Nrfs<D>,
-	/// The ID of this directory's map.
-	///
-	/// The heap is located at ID + 1.
+	/// The ID of this directory.
 	pub(crate) id: u64,
 }
 
@@ -131,158 +55,40 @@ impl<'a, D: Dev> Dir<'a, D> {
 		Self { fs, id }
 	}
 
-	/// Initialize a hashmap object with the given size.
-	///
-	/// This does not modify the current dir structure.
-	async fn init_with_size(
-		&self,
-		object: &nros::Tree<'a, D>,
-		data: &mut DirData,
-		map_size_p2: u8,
-	) -> Result<(), Error<D>> {
-		// Create header
-		let (hash_ty, hash_key) = data.hasher.to_raw();
-
-		let mut buf = [0; 64];
-		buf[0] = data.header_len8;
-		buf[1] = data.entry_len8;
-		buf[2] = hash_ty;
-		buf[3] = map_size_p2;
-		buf[4..8].copy_from_slice(&data.entry_count.to_le_bytes());
-		buf[8..24].copy_from_slice(&hash_key);
-		let mut header_offt = 24;
-
-		let buf = &mut buf[..usize::from(data.header_len8) * 8];
-		if let Some(offt) = data.unix_offset {
-			buf[header_offt + 0] = 4; // name len
-			buf[header_offt + 1] = 2; // data len
-			buf[header_offt + 2..][..4].copy_from_slice(b"unix");
-			buf[header_offt + 6..][..2].copy_from_slice(&offt.to_le_bytes());
-			header_offt += 8;
-		}
-		if let Some(offt) = data.mtime_offset {
-			buf[header_offt + 0] = 5; // name len
-			buf[header_offt + 1] = 2; // data len
-			buf[header_offt + 2..][..5].copy_from_slice(b"mtime");
-			buf[header_offt + 7..][..2].copy_from_slice(&offt.to_le_bytes());
-		}
-
-		// Write header
-		let (hashmap_base, entry_size) = (data.hashmap_base(), data.entry_size());
-		let header_len = usize::from(data.header_len8) * 8;
-		drop(data);
-		object
-			.resize(hashmap_base + (u64::from(entry_size) << map_size_p2))
-			.await?;
-		object.write(0, &buf[..header_len]).await?;
-
-		Ok(())
-	}
-
 	/// Create a helper structure to operate on the hashmap of this directory.
 	async fn hashmap(&self) -> Result<HashMap<'a, D>, Error<D>> {
-		let obj = self.fs.storage.get(self.id).await?;
-		Ok(HashMap::new(
-			self,
-			obj,
-			self.fs.dir_data(self.id).hashmap_size_p2,
-		))
+		let obj = self.fs.storage.get(self.id + MAP_OFFT).await?;
+		let data = self.fs.dir_data(self.id);
+		Ok(HashMap::new(self, &data, obj, data.hashmap_size))
 	}
 
-	/// Set the type and offset of an entry.
-	///
-	/// The entry must not be empty, i.e. type is not 0.
+	/// Set the type of an entry.
 	pub(crate) async fn set_ty(&self, index: u32, ty: Type) -> Result<(), Error<D>> {
 		trace!("set_ty {:?} {:?}", index, ty);
-		let map = self.hashmap().await?;
-		let mut e = map.get(index).await?;
-		debug_assert!(e.ty != 0);
-		e.ty = ty.to_ty();
-		e.id_or_offset = ty.to_data();
-		map.set(&e).await
-	}
-
-	/// Read a heap value.
-	pub(crate) async fn read_heap(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
-		trace!("read_heap {:?} (len: {})", offset, buf.len());
-		self.fs.read_exact(self.id + 1, offset, buf).await
-	}
-
-	/// Write a heap value.
-	pub(crate) async fn write_heap(&self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
-		trace!("write_heap {:?} (len: {})", offset, data.len());
-		self.fs.write_all(self.id + 1, offset, data).await
-	}
-
-	/// Allocate heap space for arbitrary data.
-	///
-	/// The returned region is not readable until it is written to.
-	pub(crate) async fn alloc(&self, len: u64) -> Result<u64, Error<D>> {
-		if len == 0 {
-			return Ok(0);
-		}
-		let mut log = self.alloc_log().await?;
-		for r in log.gaps(&(0..u64::MAX)) {
-			if r.end - r.start >= len {
-				log.insert(r.start..r.start + len);
-				let end = log.iter().last().map_or(0, |r| r.end);
-				drop(log);
-
-				// Resize heap
-				let heap = self.fs.storage.get(self.id + 1).await?;
-				let len = heap.len().await?;
-				heap.resize(len.max(end)).await?;
-				drop(heap);
-
-				// Save alloc log
-				self.save_alloc_log().await?;
-				return Ok(r.start);
-			}
-		}
-		// This is unreachable in practice.
-		unreachable!("all 2^64 bytes are allocated");
-	}
-
-	/// Deallocate heap space.
-	pub(crate) async fn dealloc(&self, offset: u64, len: u64) -> Result<(), Error<D>> {
-		if len > 0 {
-			let r = offset..offset + len;
-			let mut log = self.alloc_log().await?;
-			debug_assert!(
-				log.iter().any(|d| r.clone().all(|e| d.contains(&e))),
-				"double free"
-			);
-			log.remove(r);
-			drop(log);
-			self.save_alloc_log().await?;
-		}
-		Ok(())
+		self.set(index, 28, &ty.to_raw()).await
 	}
 
 	/// Compare an entry's key with the given name.
 	///
 	/// `hash` is used to avoid redundant heap reads.
-	async fn compare_names(
-		&self,
-		entry: &RawEntry,
-		name: &[u8],
-		hash: u32,
-	) -> Result<bool, Error<D>> {
+	async fn compare_names(&self, key: &Key, name: &Name, hash: u64) -> Result<bool, Error<D>> {
 		trace!(
 			"compare_names {:?} ({:?}, {:#10x})",
-			&entry.key,
+			key,
 			<&Name>::try_from(name).unwrap(),
 			hash
 		);
-		match entry.key {
-			RawEntryKey::Embed { data, len } => Ok(&data[..len.into()] == name),
-			RawEntryKey::Heap { offset, len, hash: e_hash } => {
-				if e_hash != hash || usize::from(len) != name.len() {
+		match key {
+			&Key::Embed { data, len } => Ok(&data[..len.get().into()] == &**name),
+			&Key::Heap { offset, len, hash: e_hash } => {
+				if e_hash != hash || usize::from(len.get()) != name.len() {
 					return Ok(false);
 				}
-				let mut buf = vec![0; len.into()];
-				self.fs.read_exact(self.id + 1, offset, &mut buf).await?;
-				Ok(&buf == name)
+				let mut buf = vec![0; len.get().into()];
+				self.fs
+					.read_exact(self.id + HEAP_OFFT, offset, &mut buf)
+					.await?;
+				Ok(&*buf == &**name)
 			}
 		}
 	}
@@ -291,198 +97,282 @@ impl<'a, D: Dev> Dir<'a, D> {
 	///
 	/// Returns `true` if successful.
 	/// It will fail for entries whose type is unknown to avoid space leaks.
-	async fn remove_at(&self, entry: &RawEntry) -> Result<bool, Error<D>> {
-		trace!("remove_at {:?}", (entry.index, &entry.key));
+	async fn remove_at(&self, entry: &RawEntry) -> Result<Result<(), RemoveError>, Error<D>> {
+		trace!("remove_at {:?}", entry);
+
+		let item = self.get(entry.item_index).await?;
 
 		// Only destroy types we recognize
-		let Ok(ty) = entry.ty() else { return Ok(false) };
+		match item.ty {
+			Type::None => todo!(),
+			Type::Unknown(_) => return Ok(Err(RemoveError::UnknownType)),
+			_ => {}
+		}
 
-		// If a child is present, don't remove as we don't want dangling references.
-		if self
-			.fs
-			.dir_data(self.id)
-			.children
-			.contains_key(&entry.index)
-		{
-			return Ok(false);
+		// If the entry is a directory, first check if it is empty or not.
+		if let Type::Dir { id } = item.ty {
+			// Ensure the directory is empty to avoid space leaks.
+			let buf = &mut [0; 4];
+			let dir = self.fs.storage.get(id).await?;
+			read_exact(&dir, header::offset::ITEM_COUNT.into(), buf).await?;
+			let item_count = u32::from_le_bytes(*buf);
+			if item_count > 0 {
+				return Ok(Err(RemoveError::NotEmpty));
+			}
 		}
 
 		// Remove from map.
-		self.update_entry_count(|x| x - 1).await?;
+		self.update_item_count(|x| x - 1).await?;
 		self.hashmap().await?.remove_at(entry.index).await?;
 
 		// Deallocate key if stored on heap
 		match entry.key {
-			RawEntryKey::Embed { .. } => {}
-			RawEntryKey::Heap { offset, len, .. } => self.dealloc(offset, len.into()).await?,
+			None | Some(Key::Embed { .. }) => {}
+			Some(Key::Heap { offset, len, .. }) => {
+				self.dealloc_heap(offset, len.get().into()).await?
+			}
 		}
 
-		match ty {
-			Type::File { id } | Type::Sym { id } => {
-				// Dereference object.
-				self.fs
-					.storage
-					.get(id)
-					.await?
-					.decrease_reference_count()
-					.await?;
-			}
-			Type::Dir { id } => {
-				// Ensure the directory is empty to avoid space leaks.
-				let map = self.fs.storage.get(id).await?;
-				let buf = &mut [0; 4];
-				read_exact(&map, header::offset::ENTRY_COUNT.into(), buf).await?;
-				let entry_count = u32::from_le_bytes(*buf);
-				if entry_count > 0 {
-					return Ok(false);
-				}
+		let data = self.fs.dir_data(self.id);
+		let item_len = data.item_size();
+		let has_live_ref = data.children.contains_key(&item.index);
 
-				// Dereference map and heap.
-				map.decrease_reference_count().await?;
-				self.fs
-					.storage
-					.get(id + 1)
-					.await?
-					.decrease_reference_count()
-					.await?;
+		if has_live_ref {
+			// If a child is present, don't remove the item yet as we don't want dangling
+			// references.
+
+			// If loaded, mark as dangling.
+			match data.children.get(&item.index) {
+				None => drop(data),
+				Some(&Child::File(idx)) => {
+					drop(data);
+					debug_assert!(!self.fs.file_data(idx).is_dangling, "already dangling");
+					self.fs.file_data(idx).is_dangling = true;
+				}
+				Some(&Child::Dir(id)) => {
+					drop(data);
+					debug_assert!(!self.fs.dir_data(id).is_dangling, "already dangling");
+					self.fs.dir_data(id).is_dangling = true;
+				}
 			}
-			Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
-				// Free heap space.
-				self.dealloc(offset, length.into()).await?;
+			// Clear the key to mark as dangling.
+			self.set(item.index, 0, &[0; 28]).await?;
+		} else {
+			// Destroy the item.
+			drop(data);
+			match item.ty {
+				Type::None | Type::Unknown(_) => todo!(),
+				Type::File { id } | Type::Sym { id } => {
+					// Dereference object.
+					self.fs
+						.storage
+						.get(id)
+						.await?
+						.decrease_reference_count()
+						.await?;
+				}
+				Type::Dir { id } => {
+					// Dereference dir, map and heap.
+					for i in 0..3 {
+						self.fs
+							.storage
+							.get(id + i)
+							.await?
+							.decrease_reference_count()
+							.await?;
+					}
+				}
+				Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
+					// Free heap space.
+					self.dealloc_heap(offset, length.into()).await?;
+				}
 			}
+			self.dealloc_item_slot(item.index).await?;
+			// Clear the item entirely.
+			self.set(item.index, 0, &vec![0; item_len.into()]).await?;
 		}
 
 		// Check if we should shrink the hashmap
 		if self.fs.dir_data(self.id).should_shrink() {
 			self.shrink().await?;
 		}
-		Ok(true)
+		Ok(Ok(()))
 	}
 
 	/// Rename an entry.
 	///
 	/// Returns `false` if the entry could not be found or another entry with the same index
 	/// exists.
-	async fn rename(&self, from: &Name, to: &Name) -> Result<bool, Error<D>> {
+	async fn rename(&self, from: &Name, to: &Name) -> Result<Result<(), RenameError>, Error<D>> {
 		trace!("rename {:?} -> {:?}", from, to);
 		let map = self.hashmap().await?;
-		if let Some(entry) = map.find_index(from).await? {
-			// Remove entry.
-			let child = self.fs.dir_data(self.id).children.remove(&entry.index);
-			map.remove_at(entry.index).await?;
+		let Some(entry) = map.find_index(from).await?
+			else { return Ok(Err(RenameError::NotFound)) };
 
-			// Try to insert entry with new name.
-			let old_entry = entry.clone();
-			let old_index = entry.index;
-			if let Some(new_index) = map.insert(entry, Some(to)).await? {
-				// Fixup indices in corresponding File or DirData
-				if let Some(child) = child {
-					let _r = self.fs.dir_data(self.id).children.insert(new_index, child);
-					assert!(_r.is_none());
-					match child {
-						Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
-						Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
-					}
-				}
-				return Ok(true);
-			} else {
-				// On failure, restore entry.
-				map.insert(old_entry, None).await?;
-				if let Some(child) = child {
-					let _r = self.fs.dir_data(self.id).children.insert(old_index, child);
-					assert!(_r.is_none());
-				}
-			}
+		// Remove entry.
+		map.remove_at(entry.index).await?;
+
+		// Try to insert entry with new name.
+		let old_entry = entry.clone();
+		let item_index = entry.item_index;
+		if let Some(key) = map.insert(entry, Some(to)).await? {
+			// Update key in item.
+			self.set(item_index, 0, &key.to_raw()).await?;
+			Ok(Ok(()))
+		} else {
+			// On failure, restore entry.
+			let _r = map.insert(old_entry, None).await?;
+			debug_assert!(_r.is_some(), "failed to insert after remove");
+			Ok(Err(RenameError::Duplicate))
 		}
-		Ok(false)
 	}
 
 	/// Update the entry count.
-	async fn update_entry_count(&self, f: impl FnOnce(u32) -> u32) -> Result<(), Error<D>> {
+	async fn update_item_count(&self, f: impl FnOnce(u32) -> u32) -> Result<(), Error<D>> {
+		trace!("update_item_count");
 		let mut data = self.fs.dir_data(self.id);
-		let count = f(data.entry_count);
-		data.entry_count = count;
+		let count = f(data.item_count);
+		data.item_count = count;
 		drop(data);
 		self.fs.write_all(self.id, 4, &count.to_le_bytes()).await
 	}
 
 	/// Move an entry to another directory.
-	async fn transfer(&self, name: &Name, to_dir: u64, to_name: &Name) -> Result<bool, Error<D>> {
+	async fn transfer(
+		&self,
+		name: &Name,
+		to_dir: u64,
+		to_name: &Name,
+	) -> Result<Result<(), TransferError>, Error<D>> {
 		trace!("transfer {:?} {:?} {:?}", name, to_dir, to_name);
+
+		// 1. Find the entry + item to transfer.
+		// 2. (if embedded) allocate on heap in other dir & update item.
+		// 3. Try to insert entry + item in other dir.
+		// 4. (if embedded) copy to other dir & deallocate in current.
+		// 5. Remove entry + item in this dir.
+		// 6. Transfer child, if present.
+
 		if self.id == to_dir {
 			// Don't transfer, rename instead.
-			return self.rename(name, to_name).await;
+			return Ok(match self.rename(name, to_name).await? {
+				Ok(()) => Ok(()),
+				Err(RenameError::NotFound) => Err(TransferError::NotFound),
+				Err(RenameError::Duplicate) => Err(TransferError::Duplicate),
+			});
 		}
 
 		let to_dir = Dir::new(self.fs, to_dir);
 
 		let from_map = self.hashmap().await?;
 
-		// Find the entry to transfer.
-		let Some(entry) = from_map.find_index(name).await? else { return Ok(false) };
+		// 1. Find the entry + item to transfer.
+		let Some(entry) = from_map.find_index(name).await?
+			else { return Ok(Err(TransferError::NotFound)) };
+		let mut item = self.get(entry.item_index).await?;
+		debug_assert!(item.data.key.is_some(), "item to transfer is not in use");
 
 		// If we don't know the type, don't transfer to avoid bringing the filesystem in an
 		// inconsistent state.
-		if entry.ty().is_err() {
-			return Ok(false);
+		match item.ty {
+			Type::None => todo!("none type (corrupt fs?)"),
+			Type::Unknown(_) => return Ok(Err(TransferError::UnknownType)),
+			_ => {}
 		}
 
 		// If the entry is a directory, ensure it is not a ancestor of to_dir
-		if let Ok(Type::Dir { id }) = entry.ty() {
+		if let Type::Dir { id } = item.ty {
 			// Start from to_dir and work downwards to the root.
 			// The root is guaranteed to be the ancestor of all other objects.
 			let mut cur_id = to_dir.id;
 			while cur_id != 0 {
 				if cur_id == id {
 					// to_dir is a descendant of the entry to be moved, so cancel operation.
-					return Ok(false);
+					return Ok(Err(TransferError::IsAncestor));
 				}
-				cur_id = self.fs.dir_data(id).header.parent_id;
+				cur_id = self.fs.dir_data(cur_id).header.parent_id;
 			}
 		}
 
-		// Check if the destination directory has enough capacity.
-		// If not, grow it first.
-		if self.fs.dir_data(to_dir.id).should_grow() {
-			to_dir.grow().await?;
-		}
-		let to_map = to_dir.hashmap().await?;
-
-		// Remove the entry from the current directory.
-		from_map.remove_at(entry.index).await?;
-		self.update_entry_count(|x| x - 1).await?;
-
-		// Insert the entry in the destination directory.
-		let from_index = entry.index;
-		let Some(to_index) = to_map.insert(entry, Some(to_name)).await? else { return Ok(false) };
-		to_dir.update_entry_count(|x| x + 1).await?;
-
-		// Fixup indices & reference counts in corresponding File or DirData
-
-		// Fixup from dir
-		let mut data = self.fs.dir_data(self.id);
-		data.header.reference_count -= 1;
-		let child = data
-			.children
-			.remove(&from_index)
-			.expect("child not present");
-		drop(data);
-
-		// Fixup to dir
-		let mut data = self.fs.dir_data(to_dir.id);
-		data.children.insert(to_index, child);
-		data.header.reference_count += 1;
-		drop(data);
-
-		// Fixup child
-		let mut header = match child {
-			Child::File(idx) => RefMut::map(self.fs.file_data(idx), |d| &mut d.header),
-			Child::Dir(id) => RefMut::map(self.fs.dir_data(id), |d| &mut d.header),
+		// 2. (if embedded) allocate on heap in other dir & update item.
+		let from_embed_data = match &mut item.ty {
+			Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
+				let from_offset = *offset;
+				let to_offset = to_dir.alloc_heap((*length).into()).await?;
+				*offset = to_offset;
+				Some((from_offset, to_offset, *length))
+			}
+			Type::Dir { .. } | Type::File { .. } | Type::Sym { .. } => None,
+			Type::Unknown(_) | Type::None => unreachable!(),
 		};
-		header.parent_id = to_dir.id;
-		header.parent_index = to_index;
 
-		Ok(true)
+		// 3. Try to insert entry + item in other dir.
+		let ext = Extensions { unix: item.data.ext_unix, mtime: item.data.ext_mtime };
+		let to_index = match to_dir.insert(to_name, item.ty, &ext).await? {
+			Ok(i) => i,
+			Err(InsertError::Full) => return Ok(Err(TransferError::Full)),
+			Err(InsertError::Duplicate) => return Ok(Err(TransferError::Duplicate)),
+			Err(InsertError::Dangling) => return Ok(Err(TransferError::Dangling)),
+		};
+
+		// 4. (if embedded) copy to other dir & deallocate in current.
+		if let Some((from_offset, to_offset, length)) = from_embed_data {
+			let buf = &mut vec![0; length.into()];
+			self.read_heap(from_offset, buf).await?;
+			self.dealloc_heap(from_offset, length.into()).await?;
+			to_dir.write_heap(to_offset, buf).await?;
+		}
+
+		// 5. Remove entry + item in this dir.
+		from_map.remove_at(entry.index).await?;
+		self.dealloc_item_slot(item.index).await?;
+		let item_len = self.fs.dir_data(self.id).item_size();
+		self.set(item.index, 0, &vec![0; item_len.into()]).await?;
+		// Deallocate key if stored on heap
+		match entry.key {
+			None | Some(Key::Embed { .. }) => {}
+			Some(Key::Heap { offset, len, .. }) => {
+				self.dealloc_heap(offset, len.get().into()).await?
+			}
+		}
+		self.update_item_count(|x| x - 1).await?;
+
+		// 6. Transfer child, if present.
+		let mut data = self.fs.dir_data(self.id);
+		if let Some(child) = data.children.remove(&item.index) {
+			// Dereference current dir
+			data.header.reference_count -= 1;
+			drop(data);
+
+			// Move to other dir and increase refcount
+			let mut data = self.fs.dir_data(to_dir.id);
+			data.children.insert(to_index, child);
+			data.header.reference_count += 1;
+			drop(data);
+
+			// Fixup child
+			let mut header = match child {
+				Child::File(idx) => {
+					let mut data = self.fs.file_data(idx);
+					if let Some((_, offset, length)) = from_embed_data {
+						// Fixup pointer to embedded data.
+						debug_assert!(matches!(&data.inner, file::Inner::Embed { .. }));
+						data.inner = file::Inner::Embed { offset, length };
+					} else {
+						debug_assert!(matches!(&data.inner, file::Inner::Object { .. }));
+					}
+					RefMut::map(data, |d| &mut d.header)
+				}
+				Child::Dir(id) => {
+					debug_assert!(from_embed_data.is_none(), "dir is never embedded");
+					RefMut::map(self.fs.dir_data(id), |d| &mut d.header)
+				}
+			};
+			header.parent_id = to_dir.id;
+			header.parent_index = to_index;
+		}
+
+		Ok(Ok(()))
 	}
 
 	/// Resize the hashmap
@@ -491,68 +381,59 @@ impl<'a, D: Dev> Dir<'a, D> {
 	async fn resize(&self, grow: bool) -> Result<(), Error<D>> {
 		trace!("resize {}", if grow { "grow" } else { "shrink" });
 		// Since we're going to load the entire log we can as well minimize it.
-		self.alloc_log().await?;
+		self.heap_alloc_log().await?;
 
-		let mut data = self.fs.dir_data(self.id);
+		let data = self.fs.dir_data(self.id);
 
-		let hashmap_size_p2 = data.hashmap_size_p2;
-		let capacity = data.capacity();
-		let entry_count = data.entry_count;
+		let hashmap_size = data.hashmap_size;
+		let capacity = 1u64 << hashmap_size;
+		let item_count = data.item_count;
 
-		let new_size_p2 = if grow {
-			debug_assert!(hashmap_size_p2 < 32, "hashmap is already at maximum size");
-			hashmap_size_p2 + 1
+		let new_size = if grow {
+			// FIXME don't panic, we should just fail.
+			DirSize::from_raw(hashmap_size.to_raw() + 1).unwrap()
 		} else {
-			debug_assert!(hashmap_size_p2 > 0, "hashmap is already at minimum size");
 			debug_assert!(
-				u64::from(entry_count) < capacity / 2,
+				u64::from(item_count) < capacity / 2,
 				"not enough free slots"
 			);
-			hashmap_size_p2 - 1
+			DirSize::from_raw(hashmap_size.to_raw() - 1).expect("hashmap is already at min size")
 		};
 
-		let mut children = mem::take(&mut data.children);
 		drop(data);
 
-		let new_map = self.fs.storage.create().await?;
-		self.init_with_size(&new_map, &mut self.fs.dir_data(self.id), new_size_p2)
-			.await?;
+		// Create hashmap helpers
+		let cur_map = self.hashmap().await?;
+		let new_map = HashMap::create(self, new_size).await?;
 
 		// Copy entries
-		let cur_map = self.hashmap().await?;
-		let new_map = HashMap::new(self, new_map, new_size_p2);
 		for index in (0..capacity).map(|i| i as _) {
-			let e = cur_map.get(index).await?;
-			if e.ty == 0 {
+			let entry = cur_map.get(index).await?;
+			if entry.key.is_none() {
 				continue;
 			}
-			let new_index = new_map.insert(e, None).await?.unwrap();
-			if let Some(child) = children.remove(&index) {
-				let _r = self.fs.dir_data(self.id).children.insert(new_index, child);
-				debug_assert!(_r.is_none());
-				match child {
-					Child::File(idx) => self.fs.file_data(idx).header.parent_index = new_index,
-					Child::Dir(id) => self.fs.dir_data(id).header.parent_index = new_index,
-				}
-			}
+			let _r = new_map.insert(entry, None).await?;
+			debug_assert!(_r.is_some(), "failed to insert entry in new map");
 		}
-		debug_assert!(
-			children.is_empty(),
-			"not all children have been moved: {:#?}",
-			children
-		);
 
 		// Replace old map
 		self.fs
 			.storage
-			.get(self.id)
+			.get(self.id + MAP_OFFT)
 			.await?
 			.replace_with(new_map.map)
 			.await?;
 		let mut data = self.fs.dir_data(self.id);
-		data.hashmap_size_p2 = new_size_p2;
+		data.hashmap_size = new_size;
 		drop(data);
-		self.save_alloc_log().await
+		self.fs
+			.write_all(
+				self.id,
+				header::offset::HASHMAP_SIZE.into(),
+				&[new_size.to_raw()],
+			)
+			.await?;
+		self.save_heap_alloc_log().await
 	}
 
 	/// Grow the hashmap
@@ -563,104 +444,199 @@ impl<'a, D: Dev> Dir<'a, D> {
 	/// Shrink the hashmap.
 	///
 	/// There must be *at least* `capacity / 2 + 1` slots free,
-	/// i.e. `entry_count < capacity / 2`.
+	/// i.e. `item_count < capacity / 2`.
 	async fn shrink(&self) -> Result<(), Error<D>> {
 		self.resize(false).await
 	}
 
-	/// Try to insert a new entry.
-	///
-	/// Returns `None` if an entry with the same name already exists.
-	async fn insert<'x>(
-		&'x self,
-		entry: NewEntry<'x>,
-		ext: &'x Extensions,
-	) -> Result<Option<u32>, Error<D>> {
+	/// Try to insert a new item.
+	async fn insert(
+		&self,
+		name: &Name,
+		ty: Type,
+		ext: &Extensions,
+	) -> Result<Result<u32, InsertError>, Error<D>> {
+		trace!("insert {:?} {:?} {:?}", name, &ty, ext);
+		let data = self.fs.dir_data(self.id);
+		if data.is_dangling {
+			// If dangling, refuse to insert new entries as the dir should stay empty.
+			return Ok(Err(InsertError::Dangling));
+		}
+		let item_len = data.item_size();
+		let should_grow = data.should_grow();
+		drop(data);
+
 		// Check if we should grow the hashmap
-		if self.fs.dir_data(self.id).should_grow() {
+		if should_grow {
 			self.grow().await?;
 		}
 
-		let name = Some(entry.name);
-		let entry = RawEntry {
-			ty: entry.ty.to_ty(),
-			key: RawEntryKey::Embed { len: 0, data: [0; 14] },
+		// Allocate an item slot.
+		let Some(item_index) = self.alloc_item_slot().await?
+			else { return Ok(Err(InsertError::Full)) };
 
-			id_or_offset: entry.ty.to_data(),
+		let entry = RawEntry { key: None, index: u32::MAX, item_index };
 
-			ext_unix: ext.unix,
-			ext_mtime: ext.mtime,
-
-			index: u32::MAX,
-		};
-
-		let r = self.hashmap().await?.insert(entry, name).await?;
-		if r.is_some() {
-			self.update_entry_count(|x| x + 1).await?;
+		if let Some(key) = self.hashmap().await?.insert(entry, Some(name)).await? {
+			// Write out entry.
+			let item = Item {
+				ty,
+				data: ItemData { key: Some(key), ext_unix: ext.unix, ext_mtime: ext.mtime },
+				index: u32::MAX, // Doesn't matter, not used.
+			};
+			let mut buf = vec![0; item_len.into()];
+			item.to_raw(&self.fs.dir_data(self.id), &mut buf);
+			self.set(item_index, 0, &buf).await?;
+			self.update_item_count(|x| x + 1).await?;
+			Ok(Ok(item_index))
+		} else {
+			// Deallocate item slot and give up.
+			self.dealloc_item_slot(item_index).await?;
+			Ok(Err(InsertError::Duplicate))
 		}
-		Ok(r)
 	}
 
-	/// Write a full, minimized allocation log.
-	async fn save_alloc_log(&self) -> Result<(), Error<D>> {
-		// Get log.
-		let log = self.alloc_log().await?.clone();
-		let mut log_offt = self.fs.dir_data(self.id).alloc_log_base();
-		let log_len = log.iter().count();
+	/// Get an item.
+	async fn get(&self, index: u32) -> Result<Item, Error<D>> {
+		trace!("get {:?}", index);
+		let d = self.fs.dir_data(self.id);
+		let offt = u64::from(d.header_len()) + u64::from(d.item_size()) * u64::from(index);
+		let item_len = d.item_size();
+		drop(d);
+		let mut buf = vec![0; item_len.into()];
+		self.fs.read_exact(self.id, offt, &mut buf).await?;
+		let item = Item::from_raw(&self.fs.dir_data(self.id), &buf, index);
+		Ok(item)
+	}
 
-		// Ensure there is enough capacity.
-		let map = self.fs.storage.get(self.id).await?;
-		map.resize(log_offt + 16 * u64::try_from(log_len).unwrap())
-			.await?;
+	/// Set any item data at an arbitrary offset.
+	async fn set(&self, index: u32, offset: u16, data: &[u8]) -> Result<(), Error<D>> {
+		trace!("set {:?} {:?}:{:?}", index, offset, data.len());
+		let d = self.fs.dir_data(self.id);
+		let offt = u64::from(d.header_len())
+			+ u64::from(d.item_size()) * u64::from(index)
+			+ u64::from(offset);
+		drop(d);
+		self.fs.write_all(self.id, offt, data).await?;
+		Ok(())
+	}
 
-		// Write log.
-		for r in log.iter() {
-			let mut buf = [0; 16];
-			buf[..8].copy_from_slice(&r.start.to_le_bytes());
-			buf[8..].copy_from_slice(&(r.end - r.start).to_le_bytes());
-			write_all(&map, log_offt, &buf).await?;
-			log_offt += 16;
+	/// Allocate an item slot.
+	async fn alloc_item_slot(&self) -> Result<Option<u32>, Error<D>> {
+		trace!("alloc_item_slot");
+		let mut log = self.item_alloc_log().await?;
+
+		// Take first free slot.
+		let Some(index) = log.gaps(&(0..u32::MAX)).next().map(|r| r.start)
+			else { return Ok(None) };
+		log.insert(index..index + 1);
+		drop(log);
+
+		// If the slot is over the item capacity, resize.
+		// Incidentally, it also there are no gaps.
+		let mut data = self.fs.dir_data(self.id);
+		if data.item_capacity <= index {
+			data.item_capacity = index + 1;
+			drop(data);
+			self.fs
+				.write_all(
+					self.id,
+					header::offset::ITEM_CAPACITY.into(),
+					&(index + 1).to_le_bytes(),
+				)
+				.await?;
+		} else {
+			drop(data);
+		}
+
+		// Save log
+		self.save_item_alloc_log().await?;
+		Ok(Some(index))
+	}
+
+	/// Deallocate an item slot.
+	async fn dealloc_item_slot(&self, index: u32) -> Result<(), Error<D>> {
+		trace!("dealloc_item_slot {:?}", index);
+		let mut log = self.item_alloc_log().await?;
+		debug_assert!(log.contains(&index), "double free");
+		log.remove(index..index + 1);
+		drop(log);
+		self.save_item_alloc_log().await?;
+		Ok(())
+	}
+
+	/// Write a full, minimized item allocation log.
+	async fn save_item_alloc_log(&self) -> Result<(), Error<D>> {
+		trace!("save_item_alloc_log");
+		let log = self.item_alloc_log().await?.clone();
+		let data = self.fs.dir_data(self.id);
+		let base = u64::from(data.header_len())
+			+ u64::from(data.item_size()) * u64::from(data.item_capacity);
+		drop(data);
+
+		// Write log
+		let count = log.iter().count();
+		let obj = self.fs.storage.get(self.id).await?;
+		obj.resize(base + u64::try_from(count).unwrap() * 8).await?;
+		for (i, r) in log.iter().enumerate() {
+			let offt = u64::try_from(i).unwrap() * 8;
+			let mut buf = [0; 8];
+			buf[..4].copy_from_slice(&r.start.to_le_bytes());
+			buf[4..].copy_from_slice(&(r.end - r.start).to_le_bytes());
+			write_all(&obj, base + offt, &mut buf).await?;
 		}
 
 		Ok(())
 	}
 
-	/// Get or load the allocation map.
-	async fn alloc_log(&self) -> Result<RefMut<'a, RangeSet<u64>>, Error<D>> {
+	/// Get or load the item allocation map.
+	async fn item_alloc_log(&self) -> Result<RefMut<'a, RangeSet<u32>>, Error<D>> {
+		trace!("item_alloc_log");
 		let data = self.fs.dir_data(self.id);
-
-		// Check if the map has already been loaded.
-		let data = match RefMut::filter_map(data, |data| data.alloc_map.as_mut()) {
-			Ok(r) => return Ok(r),
+		let data = match RefMut::filter_map(data, |d| d.item_alloc_map.as_mut()) {
+			Ok(log) => return Ok(log),
 			Err(data) => data,
 		};
-
-		let alloc_log_base = data.alloc_log_base();
-
+		let base = u64::from(data.header_len())
+			+ u64::from(data.item_size()) * u64::from(data.item_capacity);
 		drop(data);
 
-		// Load the allocation log
-		let mut m = RangeSet::new();
-		let l = self.fs.length(self.id).await?;
-
-		for offt in (alloc_log_base..l).step_by(16) {
-			let mut buf = [0; 16];
-			self.fs.read_exact(self.id, offt, &mut buf).await?;
-			let [a, b, c, d, e, f, g, h, buf @ ..] = buf;
-			let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
-			let len = u64::from_le_bytes(buf);
-			if len & 1 << 63 != 0 {
-				// Dealloc
-				m.remove(offset..offset + (len ^ 1 << 63));
+		// Read log
+		let mut log = RangeSet::new();
+		let obj = self.fs.storage.get(self.id).await?;
+		let len = obj.len().await?;
+		for offt in (base..len).step_by(8) {
+			let mut buf = [0; 8];
+			read_exact(&obj, offt, &mut buf).await?;
+			let [a, b, c, d, length @ ..] = buf;
+			let offset = u32::from_le_bytes([a, b, c, d]);
+			let length = u32::from_le_bytes(length);
+			assert!(length > 0, "todo: return error if length == 0");
+			if log.contains(&offset) {
+				// Deallocation
+				log.remove(offset..offset + length);
 			} else {
-				// Alloc
-				m.insert(offset..offset + len);
+				// Allocation
+				log.insert(offset..offset + length);
 			}
 		}
 
-		Ok(RefMut::map(self.fs.dir_data(self.id), |data| {
-			data.alloc_map.insert(m)
+		// Insert log
+		Ok(RefMut::map(self.fs.dir_data(self.id), |d| {
+			d.item_alloc_map.insert(log)
 		}))
+	}
+
+	/// Clear the given item.
+	/// This is used to clean up removed items after all references are destroyed.
+	///
+	/// # Note
+	///
+	/// This function does *not* free up space!
+	pub(crate) async fn clear_item(&self, index: u32) -> Result<(), Error<D>> {
+		trace!("clear_item {:?}", index);
+		let len = self.fs.dir_data(self.id).item_size() - 28;
+		self.set(index, 28, &vec![0; len.into()]).await
 	}
 }
 
@@ -713,41 +689,73 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		options: &DirOptions,
 	) -> Result<DirRef<'a, D>, Error<D>> {
 		// Initialize data.
-		let mut header_len = 24;
-		let mut entry_len = 24;
+		let mut header_len = 32;
+		let mut item_len = 32 + 8; // header + object id or data offset
 		let unix_offset = options.extensions.unix().then(|| {
 			header_len += 8; // 4, 2, "unix", offset
-			let o = entry_len;
-			entry_len += 8;
+			let o = item_len;
+			item_len += 8;
 			o
 		});
 		let mtime_offset = options.extensions.mtime().then(|| {
 			header_len += 9; // 5, 2, "mtime", offset
-			let o = entry_len;
-			entry_len += 8;
+			let o = item_len;
+			item_len += 8;
 			o
 		});
-		let mut data = DirData {
+		let data = DirData {
 			header: DataHeader::new(parent_id, parent_index),
 			children: Default::default(),
 			header_len8: ((header_len + 7) / 8).try_into().unwrap(),
-			entry_len8: ((entry_len + 7) / 8).try_into().unwrap(),
-			hashmap_size_p2: options.capacity_p2,
+			item_len8: ((item_len + 7) / 8).try_into().unwrap(),
+			hashmap_size: DirSize::B1,
 			hasher: options.hasher,
-			entry_count: 0,
+			item_count: 0,
+			item_capacity: 0,
 			unix_offset,
 			mtime_offset,
-			alloc_map: Some(Default::default()),
+			heap_alloc_map: Some(Default::default()),
+			item_alloc_map: Some(Default::default()),
+			is_dangling: false,
 		};
 
-		// Create objects.
-		let (slf_obj, heap_obj) = fs.storage.create_pair().await?;
-		let slf_id = slf_obj.id();
+		// Create objects (dir, map, heap).
+		let slf_id = fs.storage.create_many::<3>().await?;
 
-		// Create hashmap
-		Dir::new(fs, slf_id)
-			.init_with_size(&slf_obj, &mut data, options.capacity_p2)
-			.await?;
+		// Create header.
+		let (hash_ty, hash_key) = data.hasher.to_raw();
+
+		let mut buf = [0; 64];
+		buf[0] = data.header_len8;
+		buf[1] = data.item_len8;
+		buf[2] = hash_ty;
+		buf[3] = data.hashmap_size.to_raw();
+		buf[4..8].copy_from_slice(&data.item_count.to_le_bytes());
+		buf[8..12].copy_from_slice(&data.item_capacity.to_le_bytes());
+		buf[16..32].copy_from_slice(&hash_key);
+		let mut header_offt = 32;
+
+		let buf = &mut buf[..usize::from(data.header_len8) * 8];
+		if let Some(offt) = data.unix_offset {
+			buf[header_offt + 0] = 4; // name len
+			buf[header_offt + 1] = 2; // data len
+			buf[header_offt + 2..][..4].copy_from_slice(b"unix");
+			buf[header_offt + 6..][..2].copy_from_slice(&offt.to_le_bytes());
+			header_offt += 8;
+		}
+		if let Some(offt) = data.mtime_offset {
+			buf[header_offt + 0] = 5; // name len
+			buf[header_offt + 1] = 2; // data len
+			buf[header_offt + 2..][..5].copy_from_slice(b"mtime");
+			buf[header_offt + 7..][..2].copy_from_slice(&offt.to_le_bytes());
+		}
+
+		// Write header
+		let header_len = usize::from(data.header_len8) * 8;
+		fs.write_grow(slf_id, 0, &buf[..header_len]).await?;
+
+		// Ensure hashmap is properly sized.
+		fs.storage.get(slf_id + MAP_OFFT).await?.resize(32).await?;
 
 		// Insert directory data & return reference.
 		fs.data.borrow_mut().directories.insert(slf_id, data);
@@ -760,6 +768,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		parent_index: u32,
 		id: u64,
 	) -> Result<DirRef<'a, D>, Error<D>> {
+		trace!("load {:?} | {:?}:{:?}", id, parent_dir.id, parent_index);
 		// Check if the directory is already present in the filesystem object.
 		//
 		// If so, just reference that and return.
@@ -798,6 +807,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 
 	/// Load the root directory.
 	pub(crate) async fn load_root(fs: &'a Nrfs<D>) -> Result<DirRef<'a, D>, Error<D>> {
+		trace!("load_root");
 		// Check if the root directory is already present in the filesystem object.
 		//
 		// If so, just reference that and return.
@@ -830,17 +840,24 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		parent_index: u32,
 		id: u64,
 	) -> Result<DirRef<'a, D>, Error<D>> {
+		trace!("load_inner {:?} | {:?}:{:?}", id, parent_id, parent_index);
 		// Get basic info
-		let mut buf = [0; 24];
+		let mut buf = [0; 32];
 		fs.read_exact(id, 0, &mut buf).await?;
-		let [header_len8, entry_len8, hash_algorithm, hashmap_size_p2, a, b, c, d, hash_key @ ..] =
-			buf;
-		let entry_count = u32::from_le_bytes([a, b, c, d]);
+		let [header_len8, item_len8, hash_algorithm, hashmap_size_p2, rem @ ..] = buf;
+		let [a, b, c, d, rem @ ..] = rem;
+		let item_count = u32::from_le_bytes([a, b, c, d]);
+		let [a, b, c, d, rem @ ..] = rem;
+		let item_capacity = u32::from_le_bytes([a, b, c, d]);
+		let [_, _, _, _, hash_key @ ..] = rem;
+
+		// FIXME return error
+		let hashmap_size = DirSize::from_raw(hashmap_size_p2).unwrap();
 
 		// Get extensions
 		let mut unix_offset = None;
 		let mut mtime_offset = None;
-		let mut offt = 24;
+		let mut offt = 32;
 		// An extension consists of at least two bytes, ergo +1
 		while offt + 1 < u16::from(header_len8) * 8 {
 			let mut buf = [0; 2];
@@ -869,13 +886,16 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			header: DataHeader::new(parent_id, parent_index),
 			children: Default::default(),
 			header_len8,
-			entry_len8,
-			hashmap_size_p2,
+			item_len8,
+			hashmap_size,
 			hasher: Hasher::from_raw(hash_algorithm, &hash_key).unwrap(), // TODO
-			entry_count,
+			item_count,
+			item_capacity,
 			unix_offset,
 			mtime_offset,
-			alloc_map: None,
+			heap_alloc_map: None,
+			item_alloc_map: None,
+			is_dangling: false,
 		};
 
 		// Insert directory data & return reference.
@@ -890,10 +910,10 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		&self,
 		name: &Name,
 		ext: &Extensions,
-	) -> Result<Option<FileRef<'a, D>>, Error<D>> {
+	) -> Result<Result<FileRef<'a, D>, InsertError>, Error<D>> {
 		trace!("create_file {:?}", name);
-		let e = NewEntry { name, ty: Type::EmbedFile { offset: 0, length: 0 } };
-		let index = self.dir().insert(e, ext).await?;
+		let ty = Type::EmbedFile { offset: 0, length: 0 };
+		let index = self.dir().insert(name, ty, ext).await?;
 		Ok(index.map(|i| FileRef::from_embed(&self.dir(), 0, 0, i)))
 	}
 
@@ -905,17 +925,20 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		name: &Name,
 		options: &DirOptions,
 		ext: &Extensions,
-	) -> Result<Option<DirRef<'a, D>>, Error<D>> {
+	) -> Result<Result<DirRef<'a, D>, InsertError>, Error<D>> {
 		trace!("create_dir {:?}", name);
 		// Try to insert stub entry
-		let e = NewEntry { name, ty: Type::Dir { id: u64::MAX } };
-		let Some(index) = self.dir().insert(e, ext).await? else { return Ok(None) };
+		let ty = Type::Dir { id: u64::MAX };
+		let index = match self.dir().insert(name, ty, ext).await? {
+			Ok(i) => i,
+			Err(e) => return Ok(Err(e)),
+		};
 		// Create new directory with stub index (u32::MAX).
 		let d = DirRef::new(&self.dir(), index, options).await?;
 		// Fixup ID in entry.
 		self.dir().set_ty(index, Type::Dir { id: d.id }).await?;
 		// Done!
-		Ok(Some(d))
+		Ok(Ok(d))
 	}
 
 	/// Create a new symbolic link.
@@ -925,10 +948,10 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		&self,
 		name: &Name,
 		ext: &Extensions,
-	) -> Result<Option<SymRef<'a, D>>, Error<D>> {
+	) -> Result<Result<SymRef<'a, D>, InsertError>, Error<D>> {
 		trace!("create_sym {:?}", name);
-		let e = NewEntry { name, ty: Type::EmbedSym { offset: 0, length: 0 } };
-		let index = self.dir().insert(e, ext).await?;
+		let ty = Type::EmbedSym { offset: 0, length: 0 };
+		let index = self.dir().insert(name, ty, ext).await?;
 		Ok(index.map(|i| SymRef::from_embed(&self.dir(), 0, 0, i)))
 	}
 
@@ -937,30 +960,32 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	/// Used for iteration.
 	pub async fn next_from(
 		&self,
-		mut index: u32,
-	) -> Result<Option<(Entry<'a, D>, Option<u32>)>, Error<D>> {
-		while u64::from(index) < self.fs.dir_data(self.id).capacity() {
+		mut index: u64,
+	) -> Result<Option<(ItemRef<'a, D>, u64)>, Error<D>> {
+		trace!("next_from {:?}", index);
+		while index < u64::from(self.fs.dir_data(self.id).item_capacity) {
 			// Get standard info
-			let entry = self.dir().hashmap().await?.get(index).await?;
+			let item = self.dir().get(index.try_into().unwrap()).await?;
 
-			if entry.ty == 0 {
-				// Is empty, so skip
+			if matches!(item.ty, Type::None) {
+				// Not in use, so skip.
 				index += 1;
 				continue;
 			}
 
-			// Get extension info
-			let entry = Entry::new(&self.dir(), &entry).await?;
-			return Ok(Some((entry, index.checked_add(1))));
+			let item = ItemRef::new(&self.dir(), &item).await?;
+			return Ok(Some((item, index + 1)));
 		}
 		Ok(None)
 	}
 
 	/// Find an entry with the given name.
-	pub async fn find(&self, name: &Name) -> Result<Option<Entry<'a, D>>, Error<D>> {
+	pub async fn find(&self, name: &Name) -> Result<Option<ItemRef<'a, D>>, Error<D>> {
+		trace!("find {:?}", name);
 		let dir = self.dir();
 		if let Some(entry) = dir.hashmap().await?.find_index(name).await? {
-			Ok(Some(Entry::new(&dir, &entry).await?))
+			let item = self.dir().get(entry.item_index).await?;
+			Ok(Some(ItemRef::new(&dir, &item).await?))
 		} else {
 			Ok(None)
 		}
@@ -970,7 +995,11 @@ impl<'a, D: Dev> DirRef<'a, D> {
 	///
 	/// Returns `false` if the entry could not be found or another entry with the same index
 	/// exists.
-	pub async fn rename(&self, from: &Name, to: &Name) -> Result<bool, Error<D>> {
+	pub async fn rename(
+		&self,
+		from: &Name,
+		to: &Name,
+	) -> Result<Result<(), RenameError>, Error<D>> {
 		self.dir().rename(from, to).await
 	}
 
@@ -987,7 +1016,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 		name: &Name,
 		to_dir: &DirRef<'a, D>,
 		to_name: &Name,
-	) -> Result<bool, Error<D>> {
+	) -> Result<Result<(), TransferError>, Error<D>> {
 		assert_eq!(
 			self.fs as *const _, to_dir.fs as *const _,
 			"self and to_dir are on different filesystems"
@@ -997,181 +1026,110 @@ impl<'a, D: Dev> DirRef<'a, D> {
 
 	/// Remove the entry with the given name.
 	///
-	/// Returns `true` if successful.
+	/// Returns `Ok(Ok(()))` if successful.
 	/// It will fail if no entry with the given name could be found.
 	/// It will also fail if the type is unknown to avoid space leaks.
 	///
-	/// # Note
-	///
-	/// While it does check if the entry is a directory, it does not check whether it's empty.
-	/// It is up to the user to ensure the directory is empty.
-	pub async fn remove(&self, name: &Name) -> Result<bool, Error<D>> {
+	/// If there is a live reference to the removed item,
+	/// the item is kept intact until all references are dropped.
+	pub async fn remove(&self, name: &Name) -> Result<Result<(), RemoveError>, Error<D>> {
 		trace!("remove {:?}", name);
 		if let Some(e) = self.dir().hashmap().await?.find_index(name).await? {
 			self.dir().remove_at(&e).await
 		} else {
-			Ok(false)
+			Ok(Err(RemoveError::NotFound))
 		}
 	}
 
-	/// Get the amount of entries in this directory.
+	/// Destroy the reference to this directory.
+	///
+	/// This will perform cleanup if the directory is dangling
+	/// and this was the last reference.
+	pub async fn drop(mut self) -> Result<(), Error<D>> {
+		trace!("drop");
+		// Loop so we can drop references to parent directories
+		// without recursion and avoid a potential stack overflow.
+		loop {
+			// Don't run the Drop impl
+			let DirRef { id, fs } = self;
+			mem::forget(self);
+
+			let mut fs_ref = fs.data.borrow_mut();
+			let hash_map::Entry::Occupied(mut data) = fs_ref.directories.entry(id) else {
+				unreachable!()
+			};
+			data.get_mut().header.reference_count -= 1;
+			if data.get().header.reference_count == 0 {
+				// Remove DirData.
+				let header = data.get().header.clone();
+				let data = data.remove();
+
+				// If this is the root dir there is no parent dir,
+				// so check first.
+				if id != 0 {
+					// Remove itself from parent directory.
+					let dir = fs_ref
+						.directories
+						.get_mut(&header.parent_id)
+						.expect("parent dir is not loaded");
+					let _r = dir.children.remove(&header.parent_index);
+					debug_assert!(
+						matches!(_r, Some(Child::Dir(i)) if i == id),
+						"child not present in parent"
+					);
+
+					drop(fs_ref);
+
+					// Reconstruct DirRef to adjust reference count of dir appropriately.
+					self = DirRef { fs, id: header.parent_id };
+
+					// If this directory is dangling, destroy it
+					// and remove it from the parent directory.
+					let r = async {
+						if data.is_dangling && !fs.read_only {
+							// TODO add sanity checks to ensure it is empty.
+							for offt in 0..3 {
+								fs.storage
+									.get(id + offt)
+									.await?
+									.decrease_reference_count()
+									.await?;
+							}
+							self.dir().clear_item(data.header.parent_index).await?;
+						}
+						Ok(())
+					}
+					.await;
+					if let Err(e) = r {
+						mem::forget(self);
+						return Err(e);
+					}
+
+					// Continue with parent dir
+					continue;
+				} else {
+					debug_assert!(!data.is_dangling, "root cannot dangle");
+				}
+			}
+			break;
+		}
+		Ok(())
+	}
+
+	/// Get the amount of items in this directory.
 	pub async fn len(&self) -> Result<u32, Error<D>> {
-		Ok(self.fs.dir_data(self.id).entry_count)
+		Ok(self.fs.dir_data(self.id).item_count)
 	}
 
 	/// Create a [`Dir`] helper structure.
-	fn dir(&self) -> Dir<'a, D> {
+	pub(crate) fn dir(&self) -> Dir<'a, D> {
 		Dir::new(self.fs, self.id)
 	}
 }
 
-/// A single entry in a directory.
-#[derive(Debug)]
-pub enum Entry<'a, D: Dev> {
-	Dir(DirRef<'a, D>),
-	File(FileRef<'a, D>),
-	Sym(SymRef<'a, D>),
-	Unknown(UnknownRef<'a, D>),
-}
-
-impl<'a, D: Dev> Entry<'a, D> {
-	/// Construct an entry from raw entry data and the corresponding directory.
-	async fn new(dir: &Dir<'a, D>, entry: &RawEntry) -> Result<Entry<'a, D>, Error<D>> {
-		Ok(match entry.ty() {
-			Ok(Type::File { id }) => Self::File(FileRef::from_obj(dir, id, entry.index)),
-			Ok(Type::Sym { id }) => Self::Sym(SymRef::from_obj(dir, id, entry.index)),
-			Ok(Type::EmbedFile { offset, length }) => {
-				Self::File(FileRef::from_embed(dir, offset, length, entry.index))
-			}
-			Ok(Type::EmbedSym { offset, length }) => {
-				Self::Sym(SymRef::from_embed(dir, offset, length, entry.index))
-			}
-			Ok(Type::Dir { id }) => Self::Dir(DirRef::load(dir, entry.index, id).await?),
-			Err(_) => Self::Unknown(UnknownRef::new(dir, entry.index)),
-		})
-	}
-
-	/// Get entry data, i.e. data in the entry itself, excluding heap data.
-	pub async fn data(&self) -> Result<EntryData, Error<D>> {
-		let fs = self.fs();
-		let DataHeader { parent_index, parent_id, .. } = *self.data_header();
-		let dir = Dir::new(fs, parent_id);
-		let map = dir.hashmap().await?;
-		let entry = map.get(parent_index).await?;
-		Ok(EntryData { key: entry.key, ext_unix: entry.ext_unix, ext_mtime: entry.ext_mtime })
-	}
-
-	/// Set `unix` extension data.
-	///
-	/// Returns `false` if the extension is not enabled for the parent directory.
-	pub async fn set_ext_unix(&self, data: &ext::unix::Entry) -> Result<bool, Error<D>> {
-		self.parent_dir()
-			.ext_set_unix(self.data_header().parent_index, data)
-			.await
-	}
-
-	/// Set `mtime` extension data.
-	///
-	/// Returns `false` if the extension is not enabled for the parent directory.
-	pub async fn set_ext_mtime(&self, data: &ext::mtime::Entry) -> Result<bool, Error<D>> {
-		self.parent_dir()
-			.ext_set_mtime(self.data_header().parent_index, data)
-			.await
-	}
-
-	/// Get the key,
-	pub async fn key(&self, data: &EntryData) -> Result<Box<Name>, Error<D>> {
-		match &data.key {
-			&RawEntryKey::Embed { data, len } => {
-				Ok(<&Name>::try_from(&data[..usize::from(len)]).unwrap().into())
-			}
-			&RawEntryKey::Heap { offset, len, hash: _ } => {
-				// Heap is located at parent ID + 1
-				let DataHeader { parent_id, .. } = *self.data_header();
-				let heap = self.fs().storage.get(parent_id + 1).await?;
-				let mut name = vec![0; usize::from(len)];
-				read_exact(&heap, offset, &mut name).await?;
-				Ok(Box::<Name>::try_from(name.into_boxed_slice()).unwrap())
-			}
-		}
-	}
-
-	/// Get a reference to the filesystem containing this entry's data.
-	fn fs(&self) -> &'a Nrfs<D> {
-		match self {
-			Self::Dir(e) => e.fs,
-			Self::File(e) => e.fs,
-			Self::Sym(e) => e.0.fs,
-			Self::Unknown(e) => e.0.fs,
-		}
-	}
-
-	/// Get a reference to the [`DataHeader`] of this entry.
-	fn data_header(&self) -> RefMut<'a, DataHeader> {
-		match self {
-			Self::Dir(e) => RefMut::map(e.fs.dir_data(e.id), |d| &mut d.header),
-			Self::File(e) => RefMut::map(e.fs.file_data(e.idx), |d| &mut d.header),
-			Self::Sym(e) => RefMut::map(e.0.fs.file_data(e.0.idx), |d| &mut d.header),
-			Self::Unknown(e) => RefMut::map(e.0.fs.file_data(e.0.idx), |d| &mut d.header),
-		}
-	}
-
-	/// Create a parent dir helper.
-	fn parent_dir(&self) -> Dir<'a, D> {
-		Dir::new(self.fs(), self.data_header().parent_id)
-	}
-}
-
-/// Get entry data.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct EntryData {
-	/// The key of this entry.
-	key: RawEntryKey,
-	/// `unix` extension data, if present.
-	pub ext_unix: Option<ext::unix::Entry>,
-	/// `mtime` extension data, if present.
-	pub ext_mtime: Option<ext::mtime::Entry>,
-}
-
-#[derive(Debug)]
-pub(crate) enum Type {
-	File { id: u64 },
-	Dir { id: u64 },
-	Sym { id: u64 },
-	EmbedFile { offset: u64, length: u16 },
-	EmbedSym { offset: u64, length: u16 },
-}
-
-impl Type {
-	fn to_ty(&self) -> u8 {
-		match self {
-			Self::File { .. } => TY_FILE,
-			Self::Dir { .. } => TY_DIR,
-			Self::Sym { .. } => TY_SYM,
-			Self::EmbedFile { .. } => TY_EMBED_FILE,
-			Self::EmbedSym { .. } => TY_EMBED_SYM,
-		}
-	}
-
-	fn to_data(&self) -> u64 {
-		match self {
-			Self::File { id } | Self::Dir { id } | Self::Sym { id } => *id,
-			Self::EmbedFile { offset, length } | Self::EmbedSym { offset, length } => {
-				*offset | u64::from(*length) << 48
-			}
-		}
-	}
-}
-
-struct NewEntry<'a> {
-	name: &'a Name,
-	ty: Type,
-}
-
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
 pub struct DirOptions {
-	pub capacity_p2: u8,
 	pub extensions: EnableExtensions,
 	pub hasher: Hasher,
 }
@@ -1181,15 +1139,92 @@ impl DirOptions {
 	///
 	/// It is an alternative to [`Default`] which forces a key to be provided.
 	pub fn new(key: &[u8; 16]) -> Self {
-		Self {
-			capacity_p2: Default::default(),
-			extensions: Default::default(),
-			hasher: Hasher::SipHasher13(*key),
-		}
+		Self { extensions: Default::default(), hasher: Hasher::SipHasher13(*key) }
 	}
 }
 
+macro_rules! n2e {
+	(@INTERNAL $op:ident :: $fn:ident $int:ident $name:ident) => {
+		impl core::ops::$op<$name> for $int {
+			type Output = $int;
+
+			fn $fn(self, rhs: $name) -> Self::Output {
+				self.$fn(rhs.to_raw())
+			}
+		}
+	};
+	{
+		$(#[doc = $doc:literal])*
+		[$name:ident]
+		$($v:literal $k:ident)*
+	} => {
+		$(#[doc = $doc])*
+		#[derive(Clone, Copy, Default, Debug)]
+		#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
+		pub enum $name {
+			#[default]
+			$($k = $v,)*
+		}
+
+		impl $name {
+			pub fn from_raw(n: u8) -> Option<Self> {
+				Some(match n {
+					$($v => Self::$k,)*
+					_ => return None,
+				})
+			}
+
+			pub fn to_raw(self) -> u8 {
+				self as _
+			}
+		}
+
+		n2e!(@INTERNAL Shl::shl u64 $name);
+		n2e!(@INTERNAL Shr::shr u64 $name);
+		n2e!(@INTERNAL Shl::shl usize $name);
+		n2e!(@INTERNAL Shr::shr usize $name);
+	};
+}
+
+n2e! {
+	/// The capacity of the directory.
+	[DirSize]
+	0 B1
+	1 B2
+	2 B4
+	3 B8
+	4 B16
+	5 B32
+	6 B64
+	7 B128
+	8 B256
+	9 B512
+	10 K1
+	11 K2
+	12 K4
+	13 K8
+	14 K16
+	15 K32
+	16 K64
+	17 K128
+	18 K256
+	19 K512
+	20 M1
+	21 M2
+	22 M4
+	23 M8
+	24 M16
+	25 M32
+	26 M64
+	27 M128
+	28 M256
+	29 M512
+	30 G1
+	31 G2
+}
+
 #[derive(Clone, Copy, Default, Debug)]
+#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
 pub struct EnableExtensions(u8);
 
 macro_rules! ext {
@@ -1211,24 +1246,61 @@ impl EnableExtensions {
 }
 
 #[derive(Default, Debug)]
+#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
 pub struct Extensions {
 	pub unix: Option<ext::unix::Entry>,
 	pub mtime: Option<ext::mtime::Entry>,
 }
 
-/// A file or directory that is a child of another directory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Child {
-	File(Idx),
-	Dir(u64),
+/// An error that occured while trying to remove an entry.
+#[derive(Clone, Debug)]
+pub enum RemoveError {
+	/// The entry was not found.
+	NotFound,
+	/// The entry is a directory and was not empty.
+	NotEmpty,
+	/// The entry was not recognized.
+	///
+	/// Unrecognized entries aren't removed to avoid space leaks.
+	UnknownType,
 }
 
-impl Child {
-	/// Get the [`DataHeader`].
-	fn header<'a, D: Dev>(&self, fs: &'a Nrfs<D>) -> RefMut<'a, DataHeader> {
-		match self {
-			&Self::File(idx) => RefMut::map(fs.file_data(idx), |d| &mut d.header),
-			&Self::Dir(id) => RefMut::map(fs.dir_data(id), |d| &mut d.header),
-		}
-	}
+/// An error that occured while trying to insert an entry.
+#[derive(Clone, Debug)]
+pub enum InsertError {
+	/// An entry with the same name already exists.
+	Duplicate,
+	/// The directory is full.
+	Full,
+	/// The directory was removed and does not accept new entries.
+	Dangling,
+}
+
+/// An error that occured while trying to transfer an entry.
+#[derive(Clone, Debug)]
+pub enum TransferError {
+	/// The entry was not found.
+	NotFound,
+	/// The entry is an ancestor of the directory it was about to be
+	/// transferred to.
+	IsAncestor,
+	/// The entry was not recognized.
+	///
+	/// Unrecognized entries aren't removed to avoid space leaks.
+	UnknownType,
+	/// An entry with the same name already exists.
+	Duplicate,
+	/// The target directory is full.
+	Full,
+	/// The target directory was removed and does not accept new entries.
+	Dangling,
+}
+
+/// An error that occured while trying to transfer an entry.
+#[derive(Clone, Debug)]
+pub enum RenameError {
+	/// The entry was not found.
+	NotFound,
+	/// An entry with the same name already exists.
+	Duplicate,
 }
