@@ -5,7 +5,7 @@ BONNIE=/sbin/bonnie++
 MODE=release
 IMG_LEN=256M
 
-. ./init.sh
+. ./_init.sh
 
 # Run benchmark
 set +e

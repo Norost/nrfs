@@ -132,9 +132,19 @@ impl Fs {
 impl Filesystem for Fs {
 	fn init(&mut self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), i32> {
 		use fuser::consts::*;
-		const CAP: u32 =
-			FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITE_CACHE | FUSE_NO_OPEN_SUPPORT;
+		const CAP: u32 = FUSE_ASYNC_READ
+			| FUSE_BIG_WRITES
+			| FUSE_WRITEBACK_CACHE
+			| FUSE_NO_OPEN_SUPPORT
+			| FUSE_AUTO_INVAL_DATA
+			| FUSE_CACHE_SYMLINKS;
 		config.add_capabilities(CAP).unwrap();
+		if let Err(m) = config.set_max_write(1 << 24) {
+			config.set_max_write(m).unwrap();
+		}
+		if let Err(m) = config.set_max_readahead(1 << 24) {
+			config.set_max_readahead(m).unwrap();
+		}
 		Ok(())
 	}
 
@@ -309,10 +319,9 @@ impl Filesystem for Fs {
 	) {
 		futures_executor::block_on(async move {
 			let f = self.ino.get_file(&self.fs, ino);
-
 			f.write_grow(offset as _, data).await.unwrap();
 			reply.written(data.len() as _);
-		})
+		});
 	}
 
 	fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
