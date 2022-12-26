@@ -1,3 +1,7 @@
 /target
 /Cargo.lock
 .gdb_history
+*.profraw
+perf.data
+perf.data.old
+flamegraph.svg

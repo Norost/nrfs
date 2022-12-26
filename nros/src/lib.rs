@@ -1,5 +1,13 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
+#![feature(cell_update)]
+#![feature(hash_drain_filter)]
+#![feature(int_roundings)]
+#![feature(iterator_try_collect)]
+#![feature(nonzero_min_max)]
+#![feature(pin_macro)]
+#![feature(slice_flatten)]
+#![feature(type_alias_impl_trait)]
 
 extern crate alloc;
 
@@ -19,343 +27,236 @@ macro_rules! raw {
 	};
 }
 
-mod allocator;
-mod directory;
+macro_rules! n2e {
+	(@INTERNAL $op:ident :: $fn:ident $int:ident $name:ident) => {
+		impl core::ops::$op<$name> for $int {
+			type Output = $int;
+
+			fn $fn(self, rhs: $name) -> Self::Output {
+				self.$fn(rhs.to_raw())
+			}
+		}
+	};
+	{
+		$(#[doc = $doc:literal])*
+		[$name:ident]
+		$($v:literal $k:ident)*
+	} => {
+		$(#[doc = $doc])*
+		#[derive(Clone, Copy, Debug)]
+		pub enum $name {
+			$($k = $v,)*
+		}
+
+		impl $name {
+			pub fn from_raw(n: u8) -> Option<Self> {
+				Some(match n {
+					$($v => Self::$k,)*
+					_ => return None,
+				})
+			}
+
+			pub fn to_raw(self) -> u8 {
+				self as _
+			}
+		}
+
+		n2e!(@INTERNAL Shl::shl u64 $name);
+		n2e!(@INTERNAL Shr::shr u64 $name);
+		n2e!(@INTERNAL Shl::shl usize $name);
+		n2e!(@INTERNAL Shr::shr usize $name);
+	};
+}
+
+/// Tracing in debug mode only.
+macro_rules! trace {
+	($($arg:tt)*) => {{
+		#[cfg(feature = "trace")]
+		eprintln!("[DEBUG] {}", format_args!($($arg)*));
+	}};
+}
+
+mod cache;
 pub mod header;
 mod record;
-mod record_cache;
-mod record_tree;
 pub mod storage;
-#[cfg(test)]
-mod test;
+#[cfg(any(test, fuzzing))]
+pub mod test;
 mod util;
-mod write_buffer;
 
 pub use {
+	cache::{Statistics, Tree},
 	record::{Compression, MaxRecordSize},
-	storage::{Read, Storage, Write},
+	storage::{dev, Dev, Store},
 };
 
-use {
-	core::{fmt, mem},
-	rangemap::RangeSet,
-	record::Record,
-	record_cache::RecordCache,
-	record_tree::RecordTree,
-	write_buffer::WriteBuffer,
-};
+use {cache::Cache, core::fmt, record::Record, storage::DevSet};
 
-const RTREE_SIZE: u64 = mem::size_of::<RecordTree>() as _;
-
-pub struct Nros<S: Storage> {
-	storage: RecordCache<S>,
-	header: header::Header,
-	used_objects: RangeSet<u64>,
-	/// Write buffer for the object list.
-	object_list_wb: WriteBuffer,
+#[derive(Debug)]
+pub struct Nros<D: Dev> {
+	/// Backing store with cache and allocator.
+	store: Cache<D>,
 }
 
-impl<S: Storage> Nros<S> {
-	pub fn new(
-		mut storage: S,
+impl<D: Dev> Nros<D> {
+	/// Create a new object store.
+	pub async fn new<M, C>(
+		mirrors: M,
+		block_size: BlockSize,
 		max_record_size: MaxRecordSize,
 		compression: Compression,
-		cache_size: u16,
-	) -> Result<Self, NewError<S>> {
-		// Mandate at least 512 byte blocks since basically every disk has such a minimum size.
-		let block_length_p2 = storage.block_size_p2();
-		if block_length_p2 < 9 {
-			return Err(NewError::BlockTooSmall);
-		}
-
-		let h = header::Header {
-			block_length_p2,
-			max_record_length_p2: max_record_size.to_raw(),
-			compression: compression.to_raw(),
-			..Default::default()
-		};
-		let mut w = storage.write(1).map_err(NewError::Storage)?;
-		w.get_mut()[..h.as_ref().len()].copy_from_slice(h.as_ref());
-		w.set_region(0, 1).map_err(NewError::Storage)?;
-		w.finish().map_err(NewError::Storage)?;
-		Ok(Self {
-			storage: RecordCache::new(storage, max_record_size, compression, cache_size),
-			object_list_wb: WriteBuffer::new(&h.object_list),
-			header: h,
-			used_objects: Default::default(),
-		})
+		read_cache_size: usize,
+		write_cache_size: usize,
+	) -> Result<Self, Error<D>>
+	where
+		M: IntoIterator<Item = C>,
+		C: IntoIterator<Item = D>,
+	{
+		let devs = DevSet::new(mirrors, block_size, max_record_size, compression).await?;
+		Self::load_inner(devs, read_cache_size, write_cache_size).await
 	}
 
-	pub fn load(mut storage: S, cache_size: u16) -> Result<Self, LoadError<S>> {
-		let r = storage.read(0, 1).map_err(LoadError::Storage)?;
-		let mut h = header::Header::default();
-		let l = h.as_ref().len();
-		h.as_mut().copy_from_slice(&r.get()[..l]);
-		drop(r);
-		if h.magic != *b"Nora Reliable FS" {
-			return Err(LoadError::InvalidMagic);
-		}
-
-		let rec_size = MaxRecordSize::from_raw(h.max_record_length_p2)
-			.ok_or(LoadError::InvalidRecordSize(h.max_record_length_p2))?;
-		let compr = Compression::from_raw(h.compression)
-			.ok_or(LoadError::UnsupportedCompression(h.compression))?;
-		let mut storage = RecordCache::load(
-			storage,
-			rec_size,
-			h.allocation_log_lba.into(),
-			h.allocation_log_length.into(),
-			compr,
-			cache_size,
-		)?;
-
-		let upper_obj_id = h.object_list.len() / RTREE_SIZE;
-		let mut used_objects = RangeSet::from_iter([0..upper_obj_id]);
-		for id in 0..upper_obj_id {
-			let mut rec = Record::default();
-			h.object_list
-				.read(&mut storage, id * RTREE_SIZE, rec.as_mut())
-				.map_err(|e| match e {
-					_ => todo!(),
-				})?;
-			if rec.references == 0 {
-				used_objects.remove(id..id + 1);
-			}
-		}
-
-		Ok(Self {
-			storage,
-			object_list_wb: WriteBuffer::new(&h.object_list),
-			header: h,
-			used_objects,
-		})
+	/// Load an existing object store.
+	pub async fn load(
+		devices: Vec<D>,
+		read_cache_size: usize,
+		write_cache_size: usize,
+	) -> Result<Self, Error<D>> {
+		let devs = DevSet::load(devices).await?;
+		Self::load_inner(devs, read_cache_size, write_cache_size).await
 	}
 
-	fn alloc_ids(&mut self, count: u64) -> u64 {
-		for r in self.used_objects.gaps(&(0..u64::MAX)) {
-			if r.end - r.start >= count {
-				self.used_objects.insert(r.start..r.start + count);
-				return r.start;
-			}
-		}
-		unreachable!("more than 2**64 objects allocated");
+	/// Load an object store.
+	pub async fn load_inner(
+		devices: DevSet<D>,
+		read_cache_size: usize,
+		write_cache_size: usize,
+	) -> Result<Self, Error<D>> {
+		let store = Store::new(devices).await?;
+		let store = Cache::new(store, read_cache_size, write_cache_size);
+		Ok(Self { store })
 	}
 
-	fn dealloc_id(&mut self, id: u64) {
-		debug_assert!(self.used_objects.contains(&id), "double free");
-		self.used_objects.remove(id..id + 1);
+	/// Create an object.
+	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
+		self.store.create().await
 	}
 
-	pub fn new_object(&mut self) -> Result<u64, Error<S>> {
-		let id = self.alloc_ids(1);
-		let r = &mut self.object_list_wb;
-		if r.len() < (id + 1) * RTREE_SIZE {
-			r.resize((id + 1) * RTREE_SIZE);
-		}
-		r.write(
-			&mut self.storage,
-			&self.header.object_list,
-			id * RTREE_SIZE,
-			Record { references: 1.into(), ..Default::default() }.as_ref(),
-		)?;
-		Ok(id)
+	/// Create multiple adjacent objects, from ID up to ID + N - 1.
+	pub async fn create_many<const N: usize>(&self) -> Result<u64, Error<D>> {
+		self.store.create_many::<N>().await
 	}
 
-	/// Return IDs for two objects, one at ID and one at ID + 1
-	pub fn new_object_pair(&mut self) -> Result<u64, Error<S>> {
-		let id = self.alloc_ids(2);
-		let w = &mut self.object_list_wb;
-		if w.len() <= (id + 2) * RTREE_SIZE {
-			w.resize((id + 2) * RTREE_SIZE);
-		}
-		let rec = Record { references: 1.into(), ..Default::default() };
-		let mut b = [0; 2 * RTREE_SIZE as usize];
-		b[..RTREE_SIZE as _].copy_from_slice(rec.as_ref());
-		b[RTREE_SIZE as _..].copy_from_slice(rec.as_ref());
-		w.write(
-			&mut self.storage,
-			&self.header.object_list,
-			id * RTREE_SIZE,
-			&b,
-		)?;
-		Ok(id)
+	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
+		self.store.finish_transaction().await
 	}
 
-	/// Decrement the reference count to an object.
+	pub fn block_size(&self) -> BlockSize {
+		self.store.block_size()
+	}
+
+	/// Return an owned reference to an object.
+	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
+		assert!(
+			id != u64::MAX,
+			"ID u64::MAX is reserved for the object list"
+		);
+		self.store.get(id).await
+	}
+
+	/// Readjust cache size.
 	///
-	/// If this count reaches zero the object is automatically freed.
+	/// This may be useful to increase or decrease depending on total system memory usage.
 	///
-	/// This function *must not* be used on invalid objects!
-	pub fn decr_ref(&mut self, id: u64) -> Result<(), Error<S>> {
-		let mut obj = self.object_root(id)?;
-		obj.0.references -= 1;
-		if obj.0.references == 0 {
-			obj.resize(&mut self.storage, 0)?;
-			self.dealloc_id(id);
-		}
-		self.set_object_root(id, &obj)
+	/// # Panics
+	///
+	/// If `global_max < write_max`.
+	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
+		self.store.resize_cache(global_max, write_max).await
 	}
 
-	pub fn move_object(&mut self, to_id: u64, from_id: u64) -> Result<(), Error<S>> {
-		self.object_root(to_id)?.resize(&mut self.storage, 0)?;
-		let f = self.object_root(from_id)?;
-		self.set_object_root(to_id, &f)?;
-		self.set_object_root(from_id, &Default::default())?;
-		self.dealloc_id(from_id);
-		Ok(())
+	/// Get statistics for current session.
+	pub fn statistics(&self) -> Statistics {
+		self.store.statistics()
 	}
 
-	pub fn object_len(&mut self, id: u64) -> Result<u64, Error<S>> {
-		Ok(self.object_root(id)?.len())
-	}
-
-	pub fn read(&mut self, id: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error<S>> {
-		let obj = self.object_root(id)?;
-		if offset >= obj.len() {
-			return Ok(0);
-		}
-		let l = if let Some(l) = obj.len().checked_sub(offset) {
-			l
-		} else {
-			return Ok(0);
-		};
-		let l = (buf.len() as u64).min(l);
-		let buf = &mut buf[..l as _];
-		obj.read(&mut self.storage, offset, buf)?;
-		Ok(buf.len())
-	}
-
-	pub fn write(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<usize, Error<S>> {
-		let mut obj = self.object_root(id)?;
-		if offset >= obj.len() {
-			return Ok(0);
-		}
-		let l = if let Some(l) = obj.len().checked_sub(offset) {
-			l
-		} else {
-			return Ok(0);
-		};
-		let l = (data.len() as u64).min(l);
-		let data = &data[..l as _];
-		obj.write(&mut self.storage, offset, data)?;
-		self.object_list_wb.write(
-			&mut self.storage,
-			&self.header.object_list,
-			id * RTREE_SIZE,
-			obj.0.as_ref(),
-		)?;
-		Ok(data.len())
-	}
-
-	pub fn resize(&mut self, id: u64, len: u64) -> Result<(), Error<S>> {
-		let mut rec = self.object_root(id)?;
-		rec.resize(&mut self.storage, len)?;
-		self.object_list_wb.write(
-			&mut self.storage,
-			&self.header.object_list,
-			id * RTREE_SIZE,
-			rec.0.as_ref(),
-		)?;
-		Ok(())
-	}
-
-	pub fn finish_transaction(&mut self) -> Result<(), Error<S>> {
-		// Flush write buffers
-		self.object_list_wb
-			.flush(&mut self.storage, &mut self.header.object_list)?;
-
-		// Save allocation log
-		let (lba, len) = self.storage.finish_transaction()?;
-		self.header.allocation_log_lba = lba.into();
-		self.header.allocation_log_length = len.into();
-
-		// Write header
-		let mut w = self.storage.storage.write(1).map_err(Error::Storage)?;
-		w.set_region(0, 1).map_err(Error::Storage)?;
-		let (a, b) = w.get_mut().split_at_mut(self.header.as_ref().len());
-		a.copy_from_slice(self.header.as_ref());
-		b.fill(0);
-		w.finish().map_err(Error::Storage)
-	}
-
-	/// This function *must not* be used on invalid objects!
-	fn object_root(&mut self, id: u64) -> Result<record_tree::RecordTree, Error<S>> {
-		let w = &mut self.object_list_wb;
-		debug_assert!(id * RTREE_SIZE < w.len());
-		let mut rec = RecordTree::default();
-		w.read(
-			&mut self.storage,
-			&self.header.object_list,
-			id * RTREE_SIZE,
-			rec.0.as_mut(),
-		)?;
-		debug_assert!(u16::from(rec.0.references) > 0, "invalid object {}", id);
-		Ok(rec)
-	}
-
-	fn set_object_root(&mut self, id: u64, rec: &record_tree::RecordTree) -> Result<(), Error<S>> {
-		self.object_list_wb.write(
-			&mut self.storage,
-			&self.header.object_list,
-			id * RTREE_SIZE,
-			rec.0.as_ref(),
-		)
-	}
-
-	pub fn storage(&self) -> &S {
-		&self.storage.storage
+	/// Unmount the object store.
+	///
+	/// This performs one last transaction.
+	pub async fn unmount(self) -> Result<Vec<D>, Error<D>> {
+		let store = self.store.unmount().await?;
+		let devset = store.unmount().await?;
+		Ok(devset.into_devices())
 	}
 }
 
-impl<S: Storage> fmt::Debug for Nros<S> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct(stringify!(Nros))
-			.field("header", &self.header)
-			.field("storage", &self.storage)
-			.finish_non_exhaustive()
-	}
-}
-
-pub enum NewError<S: Storage> {
+pub enum NewError<D: Dev> {
 	BlockTooSmall,
-	Storage(S::Error),
+	Dev(D::Error),
 }
 
 #[derive(Debug)]
-pub enum LoadError<S: Storage> {
+pub enum LoadError<D: Dev> {
 	InvalidMagic,
 	InvalidRecordSize(u8),
 	UnsupportedCompression(u8),
-	Storage(S::Error),
+	Dev(D::Error),
 }
 
-pub enum Error<S: Storage> {
-	Storage(S::Error),
+pub enum Error<D: Dev> {
+	Dev(D::Error),
 	RecordUnpack(record::UnpackError),
 	NotEnoughSpace,
 }
 
-impl<S: Storage> fmt::Debug for NewError<S>
+impl<D: Dev> fmt::Debug for NewError<D>
 where
-	S::Error: fmt::Debug,
+	D::Error: fmt::Debug,
 {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::BlockTooSmall => f.debug_tuple("BlockTooSmall").finish(),
-			Self::Storage(e) => f.debug_tuple("Storage").field(&e).finish(),
+			Self::Dev(e) => f.debug_tuple("Dev").field(&e).finish(),
 		}
 	}
 }
 
-impl<S: Storage> fmt::Debug for Error<S>
+impl<D: Dev> fmt::Debug for Error<D>
 where
-	S::Error: fmt::Debug,
+	D::Error: fmt::Debug,
 {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::Storage(e) => f.debug_tuple("Storage").field(&e).finish(),
+			Self::Dev(e) => f.debug_tuple("Dev").field(&e).finish(),
 			Self::RecordUnpack(e) => f.debug_tuple("RecordUnpack").field(&e).finish(),
 			Self::NotEnoughSpace => f.debug_tuple("NotEnoughSpace").finish(),
 		}
 	}
+}
+
+n2e! {
+	[BlockSize]
+	9 B512
+	10 K1
+	11 K2
+	12 K4
+	13 K8
+	14 K16
+	15 K32
+	16 K64
+	17 K128
+	18 K256
+	19 K512
+	20 M1
+	21 M2
+	22 M4
+	23 M8
+	24 M16
+	25 M32
+	26 M64
+	27 M128
+	28 M256
+	29 M512
+	30 G1
+	31 G2
 }

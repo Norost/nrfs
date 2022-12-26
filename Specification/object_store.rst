@@ -86,18 +86,18 @@ A header has a variable size, up to 64 KiB.
   |    0 |                                                       |
   +------+            Magic string ("Nora Reliable FS")          |
   |    8 |                                                       |
-  +------+------+------+------+------+---------------------------+
-  |   16 | MirC | CAlg | RLen | BLen |   Version (0x00_00_0003)  |
-  +------+------+------+------+------+---------------------------+
-  |   24 |                          UID                          |
+  +------+------+------+------+------+------+--------------------+
+  |   16 | MirI | MirC | RLen | BLen | CAlg |  Version  (0.2.0)  |
+  +------+------+------+------+------+------+--------------------+
+  |   24 |                                                       |
+  +------+                          UID                          |
+  |   32 |                                                       |
   +------+-------------------------------------------------------+
   |   32 |                   Total block count                   |
   +------+-------------------------------------------------------+
   |   40 |                      LBA offset                       |
   +------+-------------------------------------------------------+
   |   48 |                      Block count                      |
-  +------+-------------------------------------------------------+
-  |   56 |                                                       |
   +------+-------------------------------------------------------+
   |   64 |                                                       |
   +------+                                                       |
@@ -107,33 +107,43 @@ A header has a variable size, up to 64 KiB.
   +------+                                                       |
   |   88 |                                                       |
   +------+-------------------------------------------------------+
-  |   96 |                   Allocation log LBA                  |
+  |   96 |                                                       |
+  +------+                                                       |
+  |  104 |                                                       |
+  +------+                     Allocation log                    |
+  |  112 |                                                       |
+  +------+                                                       |
+  |  120 |                                                       |
   +------+-------------------------------------------------------+
-  |  104 |                  Allocation log length                |
+  |  128 |                         XXH3                          |
   +------+-------------------------------------------------------+
-  |  112 |                         XXH3                          |
-  +------+-------------+-------------+---------------------------+
-  |  120 | Header len  |             |        Generation         |
-  +------+-------------+-------------+---------------------------+
+  |  136 |                      Generation                       |
+  +------+-------------------------------------------------------+
+  |  ... |                                                       |
+  +------+              Free for use by filesystem               |
+  |  504 |                                                       |
+  +------+-------------------------------------------------------+
 
 * Magic string: Must always be "Nora reliable FS"
 
 * Version: The version of the data storage format.
+
+* CAlg: The default compression algorithm to use.
 
 * BLen: The length of a single block as a power of two.
   Affects LBA addressing.
 
 * RLen: The maximum length of a record in bytes as a power of two.
 
-* CAlg: The default compression algorithm to use.
-
 * MirC: The amount of mirror volumes.
   Useful to determine how many mirrors should be waited for before allowing
   writes.
 
-* UID: Unique filesystem identifier [#]_.
+* MirI: The index of this chain in the mirror list.
+  It simplifies loading code & prevents devices from being shuffled between
+  chains on each mount.
 
-.. [#] Using the system time in microseconds as UID is recommended.
+* UID: Unique filesystem identifier.
 
 * Total block count:
   The total amount of blocks this pool consists of.
@@ -154,11 +164,7 @@ A header has a variable size, up to 64 KiB.
 
 * Generation: Counts updates. Wraps arounds.
 
-* Header len: The total length of the header.
-  May span multiple blocks.
-
-All bytes between 128 and the header length are free for use by the filesystem
-layer.
+All bytes between 256 and 512 are free for use by the filesystem layer.
 
   When updating the headers, ensure the updates *do not* happen concurrently.
 
@@ -251,29 +257,57 @@ Determining which slots are free is done by scanning the entire list [#]_.
 Allocation log
 ~~~~~~~~~~~~~~
 
-To ensure the log is not corrupted entries are grouped and prefixed with a
-length and suffixed with a hash [#]_.
+The allocation log keeps track of allocations and deallocations [#]_.
 
-.. [#] Suffixing the hash allows writing & hashing the log without seeking back
-   to the start.
+.. [#] An allocation log is much more convenient to use with transactional
+   filesystems.
+   It can also, combined with defragmentation, be much more compact than e.g.
+   a bitmap as a single log entry can cover a very large range for a fixed
+   cost.
 
-By default, all space is assumed to be free.
+   The log can be rewritten at any points to compactify it.
 
-.. table:: Log header
-  :align: center
-  :widths: grid
+The log is kept track of as a linked list [#]_,
+where the first 32 bytes are a record pointing to the next element and all
+bytes after it are log entries.
+The bottom of the stack denotes the start of the log.
+
+.. [#] A linked stack has the following useful properties:
+
+   * Appending is very quick.
+     This makes transactions quicker if I/O load is high.
+   * There are no parent records that need to be modified.
+
+   Additionally, deriving the allocation status of any block can trivially be
+   determined while iterating:
+   the *first* (de)allocation entry for any block indicates it status.
+   Any entries lower on the stack for that block can be ignored.
+
+The space used by records for the stack are **not** explicitly recorded in the
+log [#]_.
+
+.. [#] This makes it practical to compress log records.
+
+   The space used by these records can trivially be derived while iterating the
+   stack.
+
+.. table:: Log stack element
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                        Length                         |
+  |    0 |                                                       |
+  +------+                                                       |
+  |    8 |                                                       |
+  +------+                      Next record                      |
+  |   16 |                                                       |
+  +------+                                                       |
+  |   24 |                                                       |
+  +------+-------------------------------------------------------+
+  |  ... |                                                       |
   +------+-------------------------------------------------------+
 
-* Length: The size of the group in bytes.
-
 .. table:: Log entry
-  :align: center
-  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -283,20 +317,5 @@ By default, all space is assumed to be free.
   |    8 |                          Size                         |
   +------+-------------------------------------------------------+
 
-* LBA: The start address of the blocks.
-
-* Size: The lower 63 bits indicate the amount of blocks being addresses.
-  If the highest bit is cleared, the entry is an allocation.
-  Otherwise, it is a deallocation.
-
-.. table:: Log tail
-  :align: center
-  :widths: grid
-
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |                         XXH3                          |
-  +------+-------------------------------------------------------+
-
-* XXH3: Hash of all entries in this group, excluding the length.
+If the high bit of Size is set the entry is a deallocation.
+Otherwise it is an allocation.

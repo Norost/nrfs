@@ -1,28 +1,7 @@
-macro_rules! n2e {
-	{ [$name:ident] $($v:literal $k:ident)* } => {
-		#[derive(Clone, Copy, Debug)]
-		pub enum $name {
-			$($k = $v,)*
-		}
-
-		impl $name {
-			pub(crate) fn from_raw(n: u8) -> Option<Self> {
-				Some(match n {
-					$($v => Self::$k,)*
-					_ => return None,
-				})
-			}
-
-			pub(crate) fn to_raw(self) -> u8 {
-				self as _
-			}
-		}
-	};
-}
-
 mod compression;
 
 use {
+	crate::BlockSize,
 	alloc::vec::Vec,
 	core::fmt,
 	endian::{u16le, u32le, u64le},
@@ -31,7 +10,7 @@ use {
 
 pub use compression::Compression;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 #[repr(C, align(32))]
 pub struct Record {
 	pub lba: u64le,
@@ -46,8 +25,13 @@ pub struct Record {
 raw!(Record);
 
 impl Record {
-	pub fn pack(data: &[u8], buf: &mut [u8], compression: Compression) -> Record {
-		let (compression, length) = compression.compress(data, buf);
+	pub fn pack(
+		data: &[u8],
+		buf: &mut [u8],
+		compression: Compression,
+		block_size: BlockSize,
+	) -> Record {
+		let (compression, length) = compression.compress(data, buf, block_size);
 		Self {
 			length: length.into(),
 			compression: compression.to_raw(),
@@ -110,6 +94,7 @@ pub enum UnpackError {
 
 n2e! {
 	[MaxRecordSize]
+	9 B512
 	10 K1
 	11 K2
 	12 K4

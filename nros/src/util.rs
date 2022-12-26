@@ -1,19 +1,26 @@
-/// Read data at the given offset from `r`, filling data not present in `r` with zeroes.
-pub fn read_from(r: &[u8], offt: usize, buf: &mut [u8]) {
-	if offt >= r.len() {
-		buf.fill(0);
-		return;
-	}
-	let i = r.len().min(offt + buf.len());
-	let (l, h) = buf.split_at_mut(i - offt);
-	l.copy_from_slice(&r[offt..][..l.len()]);
-	h.fill(0);
+use {crate::Record, core::mem};
+
+/// Get a record from a slice of raw data.
+pub fn get_record(data: &[u8], index: usize) -> Record {
+	let offt = index * mem::size_of::<Record>();
+
+	let (start, end) = (offt, offt + mem::size_of::<Record>());
+	let (start, end) = (start.min(data.len()), end.min(data.len()));
+
+	let mut record = Record::default();
+	record.as_mut()[..end - start].copy_from_slice(&data[start..end]);
+	record
 }
 
-/// Write data to `w`, growing `w` if necessary.
-pub fn write_to(w: &mut Vec<u8>, offt: usize, data: &[u8]) {
-	if offt + data.len() > w.len() {
-		w.resize(offt + data.len(), 0);
+/// Cut off trailing zeroes from [`Vec`].
+pub fn trim_zeros_end(vec: &mut Vec<u8>) {
+	if let Some(i) = vec.iter().rev().position(|&x| x != 0) {
+		vec.resize(vec.len() - i, 0);
+	} else {
+		vec.clear();
 	}
-	w[offt..][..data.len()].copy_from_slice(data);
+	// TODO find a proper heuristic for freeing memory.
+	if vec.capacity() / 2 <= vec.len() {
+		vec.shrink_to_fit()
+	}
 }
