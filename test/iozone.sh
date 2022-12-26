@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 
-#BONNIE=$HOME/Documents/benchmark/fs/bonnie++-2.00a/bonnie++
-BONNIE=/sbin/bonnie++
+IOZONE=iozone
 MODE=release
 IMG_LEN=256M
 
 . ./_init.sh
 
 # Run benchmark
+pushd "$mnt"
 set +e
-"$BONNIE" -r 256M -d "$mnt"
+"$IOZONE" -a
 set -e
+popd
 
 find "$mnt"
 

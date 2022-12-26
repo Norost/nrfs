@@ -25,14 +25,18 @@ fn transfer_embed() {
 
 		file.write_grow(0, b"Hello!").await.unwrap();
 
-		assert!(root
-			.transfer(b"file".into(), &dir, b"file".into())
+		root.transfer(b"file".into(), &dir, b"file".into())
 			.await
-			.unwrap());
+			.unwrap()
+			.unwrap();
 
 		// If the embedded data hasn't been transferred, this will crash.
 		let buf = &mut [0; 6];
 		file.read_exact(0, buf).await.unwrap();
 		assert_eq!(*buf, *b"Hello!");
+
+		file.drop().await.unwrap();
+		dir.drop().await.unwrap();
+		root.drop().await.unwrap();
 	})
 }

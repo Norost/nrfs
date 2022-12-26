@@ -248,28 +248,24 @@ impl<D: Dev> Cache<D> {
 
 	/// Create an object.
 	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
-		let id = self.alloc_ids(1);
-		self.write_object_table(
-			id,
-			Record { references: 1.into(), ..Default::default() }.as_ref(),
-		)
-		.await?;
+		let id = self.create_many::<1>().await?;
 		Tree::new(self, id).await
 	}
 
-	/// Create a pair of objects.
-	/// The second object has ID + 1.
-	pub async fn create_pair(&self) -> Result<(Tree<D>, Tree<D>), Error<D>> {
-		let id = self.alloc_ids(2);
-		let rec = Record { references: 1.into(), ..Default::default() };
-		let mut b = [0; 2 * mem::size_of::<Record>()];
-		b[..mem::size_of::<Record>()].copy_from_slice(rec.as_ref());
-		b[mem::size_of::<Record>()..].copy_from_slice(rec.as_ref());
-		self.write_object_table(id, &b).await?;
+	/// Create many adjacent objects.
+	pub async fn create_many<const N: usize>(&self) -> Result<u64, Error<D>> {
+		// Allocate
+		let id = self.alloc_ids(N.try_into().unwrap());
 
-		let a = Tree::new(self, id + 0).await?;
-		let b = Tree::new(self, id + 1).await?;
-		Ok((a, b))
+		// Init
+		let mut b = [[0; 32]; N];
+		for c in &mut b {
+			c.copy_from_slice(Record { references: 1.into(), ..Default::default() }.as_ref());
+		}
+		self.write_object_table(id, b.flatten()).await?;
+
+		// Tadha!
+		Ok(id)
 	}
 
 	/// Get an object.

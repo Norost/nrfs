@@ -82,7 +82,9 @@ fn create_destroy_twice() {
 fn create_destroy_pair() {
 	run(async {
 		let s = new(MaxRecordSize::K1).await;
-		let (obj_a, obj_b) = s.create_pair().await.unwrap();
+		let id = s.create_many::<2>().await.unwrap();
+		let obj_a = s.get(id + 0).await.unwrap();
+		let obj_b = s.get(id + 1).await.unwrap();
 		obj_a.decrease_reference_count().await.unwrap();
 		obj_b.decrease_reference_count().await.unwrap();
 	})

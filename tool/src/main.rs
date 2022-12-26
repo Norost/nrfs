@@ -11,7 +11,7 @@ use {
 		ptr,
 		task::{Context, RawWaker, RawWakerVTable, Waker},
 	},
-	nrfs::{dev::FileDev, BlockSize, Nrfs},
+	nrfs::{dev::FileDev, dir::ItemRef, BlockSize, Nrfs},
 	std::{
 		fs::{self, File, OpenOptions},
 		io::{Read as _, Seek as _, SeekFrom},
@@ -186,6 +186,7 @@ async fn make(args: Make) {
 				let c = fs::read(f.path()).unwrap();
 				let f = root.create_file(n, &ext).await.unwrap().unwrap();
 				f.write_grow(0, &c).await.unwrap();
+				f.drop().await.unwrap();
 			} else if m.is_dir() {
 				// FIXME randomize key
 				let opt = nrfs::DirOptions { extensions, ..nrfs::DirOptions::new(&[0; 16]) };
@@ -193,17 +194,19 @@ async fn make(args: Make) {
 				let path = f.path();
 				let fut: Pin<Box<dyn Future<Output = ()>>> =
 					Box::pin(add_files(d, &path, args, extensions));
-				fut.await
+				fut.await;
 			} else if m.is_symlink() {
 				let c = fs::read_link(f.path()).unwrap();
 				let f = root.create_sym(n, &ext).await.unwrap().unwrap();
 				f.write_grow(0, c.to_str().unwrap().as_bytes())
 					.await
 					.unwrap();
+				f.drop().await.unwrap();
 			} else {
 				todo!()
 			}
 		}
+		root.drop().await.unwrap();
 	}
 }
 
@@ -216,25 +219,22 @@ async fn dump(args: Dump) {
 	f.read_exact(&mut block_size_p2).unwrap();
 
 	let s = FileDev::new(f, BlockSize::from_raw(block_size_p2[0]).unwrap());
-	let nrfs = Nrfs::load([s].into(), args.global_cache_size, args.dirty_cache_size)
-		.await
-		.unwrap();
+	let nrfs = Nrfs::load(
+		[s].into(),
+		args.global_cache_size,
+		args.dirty_cache_size,
+		true,
+	)
+	.await
+	.unwrap();
 
 	let root = nrfs.root_dir().await.unwrap();
 	println!("block size: 2**{}", block_size_p2[0]);
 	list_files(root, 0).await;
 
 	async fn list_files(root: nrfs::DirRef<'_, FileDev>, indent: usize) {
-		let mut i = Some(0);
-		while let Some((e, next_i)) = async {
-			if let Some(i) = i {
-				root.next_from(i).await.unwrap()
-			} else {
-				None
-			}
-		}
-		.await
-		{
+		let mut i = 0;
+		while let Some((e, next_i)) = root.next_from(i).await.unwrap() {
 			let data = e.data().await.unwrap();
 
 			if let Some(u) = data.ext_unix {
@@ -260,10 +260,10 @@ async fn dump(args: Dump) {
 			}
 
 			let name = e.key(&data).await.unwrap();
+			let name = String::from_utf8_lossy(name.as_ref().map_or(b"", |n| n));
 
-			use nrfs::dir::Entry;
 			match e {
-				Entry::File(f) => {
+				ItemRef::File(f) => {
 					println!(
 						"{:>8}  {:>indent$}{}f {}",
 						f.len().await.unwrap(),
@@ -272,8 +272,9 @@ async fn dump(args: Dump) {
 						name,
 						indent = indent
 					);
+					f.drop().await.unwrap();
 				}
-				Entry::Dir(d) => {
+				ItemRef::Dir(d) => {
 					println!(
 						"{:>8}  {:>indent$} d {}",
 						d.len().await.unwrap(),
@@ -284,7 +285,7 @@ async fn dump(args: Dump) {
 					let fut: Pin<Box<dyn Future<Output = _>>> = Box::pin(list_files(d, indent + 2));
 					fut.await;
 				}
-				Entry::Sym(f) => {
+				ItemRef::Sym(f) => {
 					let len = f.len().await.unwrap();
 					let mut buf = vec![0; len as _];
 					f.read_exact(0, &mut buf).await.unwrap();
@@ -297,12 +298,15 @@ async fn dump(args: Dump) {
 						link,
 						indent = 10 + indent
 					);
+					f.drop().await.unwrap();
 				}
-				Entry::Unknown(_) => {
+				ItemRef::Unknown(e) => {
 					println!("     ???  {:>indent$} ? {}", "", name, indent = indent);
+					e.drop().await.unwrap();
 				}
 			}
 			i = next_i
 		}
+		root.drop().await.unwrap();
 	}
 }
