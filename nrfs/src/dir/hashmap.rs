@@ -1,7 +1,7 @@
 use {
 	super::{Dir, DirSize, Error, Hasher, Key, Name, Nrfs},
 	crate::{read_exact, write_all, DirData},
-	core::{cell::RefMut, fmt, num::NonZeroU8},
+	core::cell::RefMut,
 	nros::{Dev, Tree},
 	rangemap::RangeSet,
 };
@@ -61,9 +61,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	/// This does not free heap data!
 	pub async fn remove_at(&self, mut index: u32) -> Result<(), Error<D>> {
 		trace!("remove_at {:?}", index);
-		let hasher = self.fs.dir_data(self.dir_id).hasher;
-
-		match hasher {
+		match self.hasher {
 			// shift entries if using Robin Hood hashing
 			Hasher::SipHasher13(_) => {
 				let calc_psl = |i: u32, h| i.wrapping_sub(h as u32) & self.mask();
@@ -79,7 +77,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 					// - if e.ty == 0, the next entry is empty.
 					//   We will clear the current entry below anyways.
 					// - if psl == 0 we don't want to shift it from its ideal position.
-					if e.hash(&hasher)
+					if e.hash(&self.hasher)
 						.map_or(true, |hash| calc_psl(index + 1, hash) == 0)
 					{
 						break;
@@ -105,12 +103,11 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	/// Find an entry with the given name.
 	pub async fn find_index(&self, name: &Name) -> Result<Option<RawEntry>, Error<D>> {
 		trace!("find_index {:?}", name);
-		let hasher = self.fs.dir_data(self.dir_id).hasher;
-		let hash = hasher.hash(name);
+		let hash = self.hasher.hash(name);
 		let mut index = hash as u32 & self.mask();
 		let dir = Dir::new(self.fs, self.dir_id);
 
-		match hasher {
+		match self.hasher {
 			Hasher::SipHasher13(_) => loop {
 				let entry = self.get(index).await?;
 				let Some(key) = entry.key.as_ref() else {
@@ -193,15 +190,14 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		name: Option<&Name>,
 	) -> Result<Option<Key>, Error<D>> {
 		trace!("insert {:?} {:?}", (entry.index, &entry.key), &name);
-		let data = self.fs.dir_data(self.dir_id);
 
 		// Determine hash to use.
 		let hash = if let Some(name) = name {
 			// Update hash if a name was specified.
-			data.hasher.hash(name)
+			self.hasher.hash(name)
 		} else {
 			// Take or calculate the hash from the existing key.
-			entry.hash(&data.hasher).expect("entry has no name")
+			entry.hash(&self.hasher).expect("entry has no name")
 		};
 		let name = name.map(|name| (name, hash));
 
@@ -238,22 +234,20 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				.map(|()| entry.key.expect("expected key on non-empty entry"))
 		}
 
-		let hasher = data.hasher;
 		let dir = Dir::new(self.fs, self.dir_id);
-		drop(data);
 
 		// Start with default PSL ("poorness")
 		let mut entry_psl = 0u32;
 		let calc_psl = |i: u32, h: u64| i.wrapping_sub(h as u32) & self.mask();
 
-		match hasher {
+		match self.hasher {
 			Hasher::SipHasher13(_) => {
 				// Insert with robin-hood hashing,
 				// - First, find an appropriate slot for the entry to be inserted.
 				// - Then, shift every other entry forward until we hit an empty slot.
 
 				// Insert current entry.
-				let (entry_index, mut entry, key) = loop {
+				let (mut entry, key) = loop {
 					let e = self.get(entry.index).await?;
 
 					let Some(key) = e.key.as_ref() else {
@@ -272,10 +266,9 @@ impl<'a, D: Dev> HashMap<'a, D> {
 
 					// Check if the PSL (Probe Sequence Length) is lower than that of ours
 					// If yes, swap with it and begin shifting forward.
-					if entry_psl > calc_psl(entry.index, key.hash(&hasher)) {
-						let index = entry.index;
+					if entry_psl > calc_psl(entry.index, key.hash(&self.hasher)) {
 						let key = insert_entry(self, name, entry).await?;
-						break (index, e, key);
+						break (e, key);
 					}
 
 					// Try next slot
@@ -293,7 +286,6 @@ impl<'a, D: Dev> HashMap<'a, D> {
 					let e = self.get(entry.index).await?;
 
 					// Insert unconditionally.
-					let index = entry.index;
 					insert_entry(self, None, entry).await?;
 
 					// We found a free slot.

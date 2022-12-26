@@ -28,7 +28,6 @@ use {
 const MAX_LOAD_FACTOR_MILLI: u64 = 875;
 const MIN_LOAD_FACTOR_MILLI: u64 = 375;
 
-const DIR_OFFT: u64 = 0;
 const MAP_OFFT: u64 = 1;
 const HEAP_OFFT: u64 = 2;
 
@@ -215,7 +214,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 		// Try to insert entry with new name.
 		let old_entry = entry.clone();
-		let old_index = entry.index;
 		let item_index = entry.item_index;
 		if let Some(key) = map.insert(entry, Some(to)).await? {
 			// Update key in item.
@@ -267,7 +265,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let to_dir = Dir::new(self.fs, to_dir);
 
 		let from_map = self.hashmap().await?;
-		let to_map = to_dir.hashmap().await?;
 
 		// 1. Find the entry + item to transfer.
 		let Some(entry) = from_map.find_index(name).await?
@@ -323,14 +320,21 @@ impl<'a, D: Dev> Dir<'a, D> {
 			let buf = &mut vec![0; length.into()];
 			self.read_heap(from_offset, buf).await?;
 			self.dealloc_heap(from_offset, length.into()).await?;
-			to_dir.write_heap(from_offset, buf).await?;
+			to_dir.write_heap(to_offset, buf).await?;
 		}
 
 		// 5. Remove entry + item in this dir.
 		from_map.remove_at(entry.index).await?;
 		self.dealloc_item_slot(item.index).await?;
-		let header_len = self.fs.dir_data(self.id).header_len();
-		self.set(item.index, 0, &vec![0; header_len.into()]).await?;
+		let item_len = self.fs.dir_data(self.id).item_size();
+		self.set(item.index, 0, &vec![0; item_len.into()]).await?;
+		// Deallocate key if stored on heap
+		match entry.key {
+			None | Some(Key::Embed { .. }) => {}
+			Some(Key::Heap { offset, len, .. }) => {
+				self.dealloc_heap(offset, len.get().into()).await?
+			}
+		}
 		self.update_item_count(|x| x - 1).await?;
 
 		// 6. Transfer child, if present.
@@ -589,7 +593,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 	async fn item_alloc_log(&self) -> Result<RefMut<'a, RangeSet<u32>>, Error<D>> {
 		trace!("item_alloc_log");
 		let data = self.fs.dir_data(self.id);
-		let mut data = match RefMut::filter_map(data, |d| d.item_alloc_map.as_mut()) {
+		let data = match RefMut::filter_map(data, |d| d.item_alloc_map.as_mut()) {
 			Ok(log) => return Ok(log),
 			Err(data) => data,
 		};
@@ -621,37 +625,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 		Ok(RefMut::map(self.fs.dir_data(self.id), |d| {
 			d.item_alloc_map.insert(log)
 		}))
-	}
-
-	/// Allocate heap space for creating a [`Key`] from a [`Name`],
-	/// if necessary.
-	///
-	/// # Note
-	///
-	/// The name will *not* be copied to the heap at this step!
-	async fn alloc_key(&self, name: &Name) -> Result<Key, Error<D>> {
-		trace!("alloc_key {:?}", name);
-		if name.len() <= 27 {
-			// Embed the key
-			let mut data = [0; 27];
-			data[..name.len()].copy_from_slice(name);
-			return Ok(Key::Embed { len: name.len_nonzero_u8(), data });
-		}
-		// Allocate heap space.
-		let offset = self.alloc_heap(name.len_u8().into()).await?;
-		let hasher = self.fs.dir_data(self.id).hasher;
-		let hash = hasher.hash(name);
-		Ok(Key::Heap { offset, len: name.len_nonzero_u8(), hash })
-	}
-
-	/// Deallocate heap space used by a [`Key`],
-	/// if necessary.
-	async fn dealloc_key(&self, key: &Key) -> Result<(), Error<D>> {
-		trace!("dealloc_key {:?}", key);
-		if let &Key::Heap { offset, len, .. } = key {
-			self.dealloc_heap(offset, len.get().into()).await?;
-		}
-		Ok(())
 	}
 
 	/// Clear the given item.

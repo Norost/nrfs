@@ -1,7 +1,7 @@
 use {
 	super::{ext, Dev, Dir, DirData, Key},
 	crate::{DataHeader, DirRef, Error, FileRef, Name, Nrfs, SymRef, UnknownRef},
-	core::{cell::RefMut, fmt},
+	core::cell::RefMut,
 };
 
 const TY_NONE: u8 = 0;
@@ -146,7 +146,7 @@ impl Type {
 		let length = u16::from_le_bytes([a, b]);
 		let id @ offset = u64::from_le_bytes(id_or_offset);
 
-		match data[0] {
+		match ty {
 			TY_NONE => Self::None,
 			TY_DIR => Self::Dir { id },
 			TY_FILE => Self::File { id },

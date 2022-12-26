@@ -75,10 +75,9 @@ use {
 		mem,
 		ops::{Deref, DerefMut},
 	},
-	dir::{Child, DirData, ItemRef},
+	dir::{DirData, ItemRef},
 	file::FileData,
 	rustc_hash::FxHashMap,
-	std::collections::hash_map,
 };
 
 /// Index used for arenas with file data.

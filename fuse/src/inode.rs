@@ -6,7 +6,7 @@ use {
 		dir::{ext, ItemRef},
 		DirRef, FileRef, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef, SymRef, TmpRef,
 	},
-	std::collections::{HashMap, HashSet},
+	std::collections::HashMap,
 };
 
 const INO_TY_MASK: u64 = 3 << 62;

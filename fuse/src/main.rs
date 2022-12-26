@@ -6,11 +6,10 @@ mod inode;
 use {
 	fuser::*,
 	inode::InodeStore,
-	log::trace,
 	nrfs::{
 		dev::FileDev,
 		dir::{InsertError, ItemData, ItemRef, RemoveError, TransferError},
-		DirOptions, DirRef, Name, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef,
+		Name, Nrfs,
 	},
 	std::{
 		ffi::OsStr,
