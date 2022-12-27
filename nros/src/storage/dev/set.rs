@@ -230,10 +230,11 @@ impl<D: Dev> DevSet<D> {
 		let fut = self
 			.devices
 			.iter()
-			.map(|chain| {
+			.enumerate()
+			.map(|(i, chain)| {
 				chain
 					.iter()
-					.map(move |node| self.create_and_save_header_tail(node))
+					.map(move |node| self.create_and_save_header_tail(i.try_into().unwrap(), node))
 			})
 			.flatten()
 			.collect::<FuturesUnordered<_>>();
@@ -395,6 +396,7 @@ impl<D: Dev> DevSet<D> {
 	/// Create a header for writing to a device.
 	async fn create_header<'a>(
 		&self,
+		chain: u8,
 		node: &'a Node<D>,
 	) -> Result<<D::Allocator as Allocator>::Buf<'a>, D::Error> {
 		let mut header = Header {
@@ -402,6 +404,7 @@ impl<D: Dev> DevSet<D> {
 			block_length_p2: self.block_size.to_raw(),
 			max_record_length_p2: self.max_record_size.to_raw(),
 			mirror_count: self.devices.len().try_into().unwrap(),
+			mirror_index: chain,
 
 			uid: self.uid,
 
@@ -431,9 +434,10 @@ impl<D: Dev> DevSet<D> {
 	/// Create header & save to tail of device
 	async fn create_and_save_header_tail<'a>(
 		&self,
+		chain: u8,
 		node: &'a Node<D>,
 	) -> Result<(&'a Node<D>, <D::Allocator as Allocator>::Buf<'a>), D::Error> {
-		let buf = self.create_header(node).await?;
+		let buf = self.create_header(chain, node).await?;
 		let b = buf.clone();
 		save_header(true, node, b).await?;
 		Ok((node, buf))
