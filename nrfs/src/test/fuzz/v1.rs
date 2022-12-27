@@ -253,7 +253,11 @@ impl<'a> Test<'a> {
 								let _ = d.expect("dir should be empty");
 							}
 							Err(InsertError::Dangling) => {
+								// TODO find a nice way to detect false dangling status while avoiding false positives.
+								// See fuzz_dangling_present_false_positive
+								/*
 								assert!(d.is_none(), "dir is present in state");
+								*/
 							}
 						}
 					}
@@ -283,7 +287,11 @@ impl<'a> Test<'a> {
 								let _ = d.expect("dir should be empty");
 							}
 							Err(InsertError::Dangling) => {
+								// TODO find a nice way to detect false dangling status while avoiding false positives.
+								// See fuzz_dangling_present_false_positive
+								/*
 								assert!(d.is_none(), "dir is present in state");
+								*/
 							}
 						}
 					}
@@ -464,8 +472,13 @@ impl<'a> Test<'a> {
 								// TODO
 							}
 							Err(TransferError::Dangling) => {
+								// TODO find a nice way to detect false dangling status while avoiding false positives.
+								// See fuzz_dangling_present_false_positive
+								/*
+								dbg!(&state);
 								let d = state_mut(&mut state, to_path.iter().copied());
 								assert!(d.is_none(), "target directory is present in state");
+								*/
 							}
 						}
 					}
@@ -1069,6 +1082,33 @@ fn forbid_insert_removed_dir() {
 			Get { dir_idx: 0, name: b"\0".into() },
 			Remove { dir_idx: 0, name: b"\0".into() },
 			CreateFile { dir_idx: 2, name: b"?".into(), ext: Default::default() },
+		],
+	)
+	.run()
+}
+
+/// The fuzzer falsely detected dangling objects as being present if a new object
+/// with the same name was made.
+#[test]
+fn fuzz_dangling_present_false_positive() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateDir {
+				dir_idx: 0,
+				name: b"\0".into(),
+				options: DirOptions::new(&[0; 16]),
+				ext: Extensions::default(),
+			},
+			Get { dir_idx: 0, name: b"\0".into() },
+			Remove { dir_idx: 0, name: b"\0".into() },
+			CreateFile {
+				dir_idx: 0,
+				name: b"\0".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Transfer { from_dir_idx: 0, from: b"\0".into(), to_dir_idx: 1, to: b"\0".into() },
 		],
 	)
 	.run()
