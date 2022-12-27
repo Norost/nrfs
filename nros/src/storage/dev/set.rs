@@ -231,12 +231,9 @@ impl<D: Dev> DevSet<D> {
 			.devices
 			.iter()
 			.map(|chain| {
-				let mut offset = self.block_count;
-				chain.iter().map(move |node| {
-					let len = offset - node.block_offset;
-					offset = node.block_offset;
-					self.create_and_save_header_tail(node, len)
-				})
+				chain
+					.iter()
+					.map(move |node| self.create_and_save_header_tail(node))
 			})
 			.flatten()
 			.collect::<FuturesUnordered<_>>();
@@ -247,7 +244,7 @@ impl<D: Dev> DevSet<D> {
 		// Now save heads.
 		let fut: FuturesUnordered<_> = fut
 			.into_iter()
-			.map(|(dev, buf, len)| save_header(false, dev, len, buf))
+			.map(|(node, buf)| save_header(false, node, buf))
 			.collect::<FuturesUnordered<_>>();
 
 		// Wait for head futures to finish
@@ -284,27 +281,42 @@ impl<D: Dev> DevSet<D> {
 			}
 
 			// Do a binary search for the start device.
-			let node = chain
+			let node_i = chain
 				.binary_search_by_key(&lba, |node| node.block_offset)
 				// if offset == lba, then we need that dev
 				// if offset < lba, then we want the previous dev.
 				.map_or_else(|i| i - 1, |i| i);
-			let node = &chain[node];
+			let node = &chain[node_i];
 
-			let block_count = node.block_count;
+			let node_block_end = node.block_offset + node.block_count;
+			let node_lba = lba - node.block_offset + 1;
 
 			// Check if the buffer range falls entirely within the device's range.
 			// If not, split the buffer in two and perform two operations.
-			return if lba_end <= node.block_offset + block_count {
+			return if lba_end <= node_block_end {
 				// No splitting necessary - yay
 				node.dev
-					.read(lba - node.block_offset + 1, size)
+					.read(node_lba, size)
 					.await // +1 because header
 					.map(SetBuf)
 					.map_err(Error::Dev)
 			} else {
 				// We need to split - aw
-				todo!()
+				// Figure out midpoint to split.
+				let mid =
+					size - usize::try_from(lba_end - node_block_end << self.block_size()).unwrap();
+				// Allocate two buffers and read into each.
+				let (buf_l, buf_r, mut buf) = futures_util::try_join!(
+					node.dev.read(node_lba, mid),
+					chain[node_i + 1].dev.read(1, size - mid),
+					node.dev.allocator().alloc(size),
+				)
+				.map_err(Error::Dev)?;
+				// Merge buffers.
+				let b = buf.get_mut();
+				b[..mid].copy_from_slice(buf_l.get());
+				b[mid..].copy_from_slice(buf_r.get());
+				Ok(SetBuf(buf))
 			};
 		}
 		todo!("all chains failed. RIP")
@@ -315,6 +327,8 @@ impl<D: Dev> DevSet<D> {
 	/// # Panics
 	///
 	/// If the buffer size isn't a multiple of the block size.
+	///
+	/// If the buffer overlaps more than two devices.
 	///
 	/// If the write is be out of bounds.
 	pub async fn write(&self, lba: u64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
@@ -332,27 +346,43 @@ impl<D: Dev> DevSet<D> {
 			.iter()
 			.map(|chain| {
 				// Do a binary search for the start device.
-				let node = chain
+				let node_i = chain
 					.binary_search_by_key(&lba, |node| node.block_offset)
 					// if offset == lba, then we need that dev
 					// if offset < lba, then we want the previous dev.
 					.map_or_else(|i| i - 1, |i| i);
-				let node = &chain[node];
-
-				let block_count = node.block_count;
+				let node = &chain[node_i];
 
 				// Check if the buffer range falls entirely within the device's range.
 				// If not, split the buffer in two and perform two operations.
 				let data = &data;
 				async move {
-					if lba_end <= node.block_offset + block_count {
+					let node_lba_end = node.block_offset + node.block_count;
+					let node_lba = lba - node.block_offset + 1;
+					if lba_end <= node_lba_end {
 						// No splitting necessary - yay
-						node.dev
-							.write(lba - node.block_offset + 1, data.0.clone())
-							.await // +1 because headers
+						node.dev.write(node_lba, data.0.clone()).await // +1 because headers
 					} else {
 						// We need to split - aw
-						todo!()
+						let d = data.get();
+						// Figure out midpoint to split.
+						let mid = d.len()
+							- usize::try_from(lba_end - node_lba_end << self.block_size()).unwrap();
+						// Allocate two buffers, copy halves to each and perform two writes.
+						async fn f<D: Dev>(
+							node: &Node<D>,
+							lba: u64,
+							data: &[u8],
+						) -> Result<(), D::Error> {
+							let mut buf = node.dev.allocator().alloc(data.len()).await?;
+							buf.get_mut().copy_from_slice(data);
+							node.dev.write(lba, buf).await
+						}
+						futures_util::try_join!(
+							f(node, node_lba, &d[..mid]),
+							f(&chain[node_i + 1], 1, &d[mid..])
+						)
+						.map(|((), ())| ())
 					}
 				}
 			})
@@ -402,12 +432,11 @@ impl<D: Dev> DevSet<D> {
 	async fn create_and_save_header_tail<'a>(
 		&self,
 		node: &'a Node<D>,
-		len: u64,
-	) -> Result<(&'a D, <D::Allocator as Allocator>::Buf<'a>, u64), D::Error> {
+	) -> Result<(&'a Node<D>, <D::Allocator as Allocator>::Buf<'a>), D::Error> {
 		let buf = self.create_header(node).await?;
 		let b = buf.clone();
-		save_header(true, &node.dev, len, b).await?;
-		Ok((&node.dev, buf, len))
+		save_header(true, node, b).await?;
+		Ok((node, buf))
 	}
 
 	/// Flush & ensure all writes have completed.
@@ -503,14 +532,12 @@ pub struct GenericHeader {
 /// Save a single header to a device.
 async fn save_header<D: Dev>(
 	tail: bool,
-	dev: &D,
-	len: u64,
+	node: &Node<D>,
 	header: <D::Allocator as Allocator>::Buf<'_>,
 ) -> Result<(), D::Error> {
-	let lba = if tail { 0 } else { len };
-
-	dev.write(lba, header);
-	dev.fence().await
+	let lba = if tail { 0 } else { 1 + node.block_count };
+	node.dev.write(lba, header);
+	node.dev.fence().await
 }
 
 #[derive(Clone, Copy, Debug, Default)]

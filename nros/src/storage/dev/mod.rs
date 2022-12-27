@@ -120,4 +120,9 @@ pub trait Buf: Clone {
 
 	/// Shrink the buffer.
 	fn shrink(&mut self, len: usize);
+
+	/// The length of this buffer, in bytes.
+	fn len(&self) -> usize {
+		self.get().len()
+	}
 }

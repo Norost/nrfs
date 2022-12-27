@@ -3,6 +3,7 @@ pub mod fuzz;
 mod allocator;
 mod cache;
 mod dev;
+mod raid;
 mod record;
 
 use {
