@@ -119,9 +119,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.138"
+version = "0.2.139"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db6d7e329c562c5dfab7a46a2afabc8b987ab9a4834c9d1ca04dc54c1546cef8"
+checksum = "201de327520df007757c1f0adce6e827fe8562fbc28bfd9c15571c66ca1f5f79"
 
 [[package]]
 name = "libfuzzer-sys"
@@ -159,7 +159,7 @@ source = "git+https://github.com/Demindiro/nora_endian#07bd2d0463c74a597dde43379
 
 [[package]]
 name = "nrfs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arbitrary",
  "arena",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "nros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arbitrary",
  "arena",
@@ -234,9 +234,9 @@ dependencies = [
 
 [[package]]
 name = "rangemap"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ed5f515fe4093fa60900ac1918c9ea73f18189114588ec9b99941e22cc2aedd"
+checksum = "4fa20df61fa7daf0ecf0735b9841ced4a0d25962d1b1eb2dd28dcdd37bb688f2"
 
 [[package]]
 name = "regex-automata"
@@ -252,9 +252,9 @@ checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "serde"
-version = "1.0.151"
+version = "1.0.152"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fed41fc1a24994d044e6db6935e69511a1153b52c15eb42493b26fa87feba0"
+checksum = "bb7d1f0d3021d347a83e556fc4683dea2ea09d87bccdf88ff5c12545d89d5efb"
 
 [[package]]
 name = "siphasher"
