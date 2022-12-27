@@ -1,5 +1,5 @@
 use {
-	super::{Dev, Store},
+	super::{Dev, Set256, Store},
 	crate::{util, Error, Record},
 	core::mem,
 	endian::u64le,
@@ -275,7 +275,7 @@ impl Allocator {
 				.alloc(blocks, store.devices.block_count())
 				.ok_or(Error::NotEnoughSpace)?;
 			prev.lba = lba.into();
-			writes.push(store.devices.write(lba, b));
+			writes.push(store.devices.write(lba, b, Set256::set_all()));
 			self.stack.push(prev);
 		}
 

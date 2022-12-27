@@ -258,6 +258,10 @@ impl<D: Dev> DevSet<D> {
 	///
 	/// A chain blacklist can be used in case corrupt data was returned.
 	///
+	/// The chain from which the data is read is returned.
+	///
+	/// If all available chains are blacklisted, `None` is returned.
+	///
 	/// # Note
 	///
 	/// If `size` isn't a multiple of the block size.
@@ -265,8 +269,8 @@ impl<D: Dev> DevSet<D> {
 		&self,
 		lba: u64,
 		size: usize,
-		blacklist: Set256,
-	) -> Result<SetBuf<D>, Error<D>> {
+		blacklist: &Set256,
+	) -> Result<Option<(SetBuf<D>, u8)>, (Error<D>, u8)> {
 		assert!(
 			size % (1usize << self.block_size()) == 0,
 			"data len isn't a multiple of block size"
@@ -277,9 +281,11 @@ impl<D: Dev> DevSet<D> {
 
 		// TODO balance loads
 		for (i, chain) in self.devices.iter().enumerate() {
-			if blacklist.get(i.try_into().unwrap()) {
+			let i = u8::try_from(i).unwrap();
+			if blacklist.get(i) {
 				continue;
 			}
+			dbg!(i);
 
 			// Do a binary search for the start device.
 			let node_i = chain
@@ -298,9 +304,9 @@ impl<D: Dev> DevSet<D> {
 				// No splitting necessary - yay
 				node.dev
 					.read(node_lba, size)
-					.await // +1 because header
-					.map(SetBuf)
-					.map_err(Error::Dev)
+					.await
+					.map(|buf| Some((SetBuf(buf), i)))
+					.map_err(|e| (Error::Dev(e), i))
 			} else {
 				// We need to split - aw
 				// Figure out midpoint to split.
@@ -312,18 +318,21 @@ impl<D: Dev> DevSet<D> {
 					chain[node_i + 1].dev.read(1, size - mid),
 					node.dev.allocator().alloc(size),
 				)
-				.map_err(Error::Dev)?;
+				.map_err(|e| (Error::Dev(e), i))?;
 				// Merge buffers.
 				let b = buf.get_mut();
 				b[..mid].copy_from_slice(buf_l.get());
 				b[mid..].copy_from_slice(buf_r.get());
-				Ok(SetBuf(buf))
+				Ok(Some((SetBuf(buf), i)))
 			};
 		}
-		todo!("all chains failed. RIP")
+
+		Ok(None)
 	}
 
 	/// Write a range of blocks.
+	///
+	/// The whitelist indicates which chains to write to.
 	///
 	/// # Panics
 	///
@@ -332,7 +341,12 @@ impl<D: Dev> DevSet<D> {
 	/// If the buffer overlaps more than two devices.
 	///
 	/// If the write is be out of bounds.
-	pub async fn write(&self, lba: u64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
+	pub async fn write(
+		&self,
+		lba: u64,
+		data: SetBuf<'_, D>,
+		whitelist: Set256,
+	) -> Result<(), Error<D>> {
 		assert!(
 			data.get().len() % (1usize << self.block_size()) == 0,
 			"data len isn't a multiple of block size"
@@ -345,6 +359,8 @@ impl<D: Dev> DevSet<D> {
 		// Write to all mirrors
 		self.devices
 			.iter()
+			.enumerate()
+			.filter_map(|(i, chain)| whitelist.get(i.try_into().unwrap()).then(|| chain))
 			.map(|chain| {
 				// Do a binary search for the start device.
 				let node_i = chain
@@ -548,6 +564,11 @@ async fn save_header<D: Dev>(
 pub struct Set256(u128, u128);
 
 impl Set256 {
+	/// Create a new set with all bits set.
+	pub fn set_all() -> Self {
+		Self(u128::MAX, u128::MAX)
+	}
+
 	pub fn get(&self, bit: u8) -> bool {
 		if bit < 0x80 {
 			self.0 & 1 << bit > 0
