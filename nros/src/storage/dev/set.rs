@@ -459,11 +459,6 @@ impl<D: Dev> DevSet<D> {
 		Ok((node, buf))
 	}
 
-	/// Flush & ensure all writes have completed.
-	pub async fn fence(&self) -> Result<(), Error<D>> {
-		todo!()
-	}
-
 	/// Allocate memory for writing.
 	pub async fn alloc(&self, size: usize) -> Result<SetBuf<'_, D>, Error<D>> {
 		self.devices[0][0]
