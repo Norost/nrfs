@@ -214,7 +214,7 @@ impl<D: Dev> DevSet<D> {
 			max_record_size: MaxRecordSize::from_raw(header.max_record_length_p2).expect("todo"),
 			compression: Compression::from_raw(header.compression).expect("todo"),
 			uid: header.uid,
-			block_count: header.block_count.into(),
+			block_count: header.total_block_count.into(),
 
 			object_list: header.object_list.into(),
 			allocation_log: header.allocation_log.into(),
