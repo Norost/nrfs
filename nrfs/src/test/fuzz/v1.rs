@@ -391,7 +391,7 @@ impl<'a> Test<'a> {
 								continue
 							};
 							for (i, c) in (offt..offt + u64::try_from(l).unwrap()).zip(&*buf) {
-								assert_eq!(contents.contains(&i), *c == 1);
+								assert_eq!(u8::from(contents.contains(&i)), *c);
 							}
 						}
 					}
@@ -475,7 +475,6 @@ impl<'a> Test<'a> {
 								// TODO find a nice way to detect false dangling status while avoiding false positives.
 								// See fuzz_dangling_present_false_positive
 								/*
-								dbg!(&state);
 								let d = state_mut(&mut state, to_path.iter().copied());
 								assert!(d.is_none(), "target directory is present in state");
 								*/
@@ -1109,6 +1108,49 @@ fn fuzz_dangling_present_false_positive() {
 				ext: Extensions { unix: None, mtime: None },
 			},
 			Transfer { from_dir_idx: 0, from: b"\0".into(), to_dir_idx: 1, to: b"\0".into() },
+		],
+	)
+	.run()
+}
+
+/// Heap deallocations did not zero out memory, which can result in use-after-frees.
+#[test]
+fn unzeroed_deallocation() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile {
+				dir_idx: 0,
+				name: b"\0".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Get { dir_idx: 0, name: b"\0".into() },
+			Write { file_idx: 1, offset: 245, amount: 768 },
+			Resize { file_idx: 1, len: 0 },
+			Resize { file_idx: 1, len: 255 },
+			Read { file_idx: 1, offset: 8298290729805977344, amount: 41 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn unzeroed_deallocation_long_name() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateFile {
+				dir_idx: 0,
+				name: (&[b'x'; 31]).try_into().unwrap(),
+				ext: Default::default(),
+			},
+			Get { dir_idx: 0, name: (&[b'x'; 31]).try_into().unwrap() },
+			Write { file_idx: 1, offset: 245, amount: 1 },
+			Resize { file_idx: 1, len: 0 },
+			Resize { file_idx: 1, len: 255 },
+			Read { file_idx: 1, offset: 18409113286005899008, amount: 255 },
 		],
 	)
 	.run()

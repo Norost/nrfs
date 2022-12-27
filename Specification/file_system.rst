@@ -393,6 +393,11 @@ The length of each entry may never be 0.
 
 The size of the log is determined by the total size of the map object.
 
+Unallocated regions **must** be zeroed [#]_.
+
+.. [#] Requiring unallocating regions to be zeroed improves compression
+   efficiency and simplifies implementations.
+
 
 Extensions
 ----------
