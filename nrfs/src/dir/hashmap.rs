@@ -305,11 +305,10 @@ impl<'a, D: Dev> HashMap<'a, D> {
 	pub(super) async fn save_heap_alloc_log(&self, log: &RangeSet<u64>) -> Result<(), Error<D>> {
 		// Get log.
 		let mut log_offt = self.heap_alloc_log_base();
-		let log_len = log.iter().count();
 
 		// Ensure there is enough capacity.
 		self.map
-			.resize(log_offt + 16 * u64::try_from(log_len).unwrap())
+			.resize(log_offt + 16 * u64::try_from(log.len()).unwrap())
 			.await?;
 
 		// Write log.

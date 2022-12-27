@@ -575,9 +575,9 @@ impl<'a, D: Dev> Dir<'a, D> {
 		drop(data);
 
 		// Write log
-		let count = log.iter().count();
 		let obj = self.fs.storage.get(self.id).await?;
-		obj.resize(base + u64::try_from(count).unwrap() * 8).await?;
+		obj.resize(base + u64::try_from(log.len()).unwrap() * 8)
+			.await?;
 		for (i, r) in log.iter().enumerate() {
 			let offt = u64::try_from(i).unwrap() * 8;
 			let mut buf = [0; 8];
