@@ -81,7 +81,6 @@ impl Allocator {
 
 		// Iterate stack from top to bottom
 		let mut record = store.devices.allocation_log.get();
-		let mut ignore = RangeSet::new(); // ranges that are already covered by a recent entry.
 		while record.length > 0 {
 			// Append to stack for later ops
 			stack.push(record);
@@ -96,34 +95,39 @@ impl Allocator {
 			let record_blocks =
 				u64::try_from(store.calc_block_count(record.length.into())).unwrap();
 			alloc_map.insert(lba..lba + record_blocks);
-			ignore.insert(lba..lba + record_blocks);
 
 			// Add entries
 			let entry_mask = mem::size_of::<Entry>() - 1;
-			for i in (mem::size_of::<Record>()..(end + entry_mask) & !entry_mask)
-				.step_by(16)
-				.rev()
-			{
+			for i in (mem::size_of::<Record>()..(end + entry_mask) & !entry_mask).step_by(16) {
 				// Get entry
 				let max_len = (end - i).min(mem::size_of::<Entry>());
 				let mut entry = Entry::default();
 				entry.as_mut()[..max_len].copy_from_slice(&data[i..][..max_len]);
 
-				let alloc = entry.size & 1 << 63 == 0;
-				let size = entry.size & ((1 << 63) - 1);
-				let range = u64::from(entry.lba)..u64::from(entry.lba) + size;
+				let (mut start, end) = (u64::from(entry.lba), u64::from(entry.lba + entry.size));
 
-				// Only fill in gaps that haven't got a more recent log entry.
-				for gap in ignore.gaps(&range) {
-					if alloc {
-						alloc_map.insert(gap);
-					} else {
-						alloc_map.remove(gap);
+				// Xor with overlapping ranges.
+				while start < end {
+					// Get end of first next range.
+					let range = alloc_map.gaps(&(start..end)).next().unwrap_or(end..end);
+					// Determine mid point.
+					let mid = range.end.min(end);
+					// The first range we got indicates free memory, so current state is:
+					//
+					//   |AAAAAAAAAA|DDDDDDDDD|
+					//   ^          ^         ^
+					// start       mid       end
+					//
+					// Mark the first half as deallocated and the second half as allocated.
+					if start < mid {
+						alloc_map.insert(start..mid);
 					}
+					if mid < end {
+						alloc_map.remove(mid..end);
+					}
+					// Begin next range.
+					start = end;
 				}
-
-				// Ignore in later entries.
-				ignore.insert(range);
 			}
 
 			// Next record
