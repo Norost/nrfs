@@ -46,7 +46,7 @@ fn equal_2() {
 		drop(obj);
 		let devs = s.unmount().await.unwrap();
 
-		let s = Nros::load(devs, 1 << 14, 1 << 14).await.unwrap();
+		let s = Nros::load(devs, 1 << 14, 1 << 14, true).await.unwrap();
 		let obj = s.get(0).await.unwrap();
 		let buf = &mut [0; 1 << 15];
 		obj.read(0, buf).await.unwrap();

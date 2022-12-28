@@ -144,7 +144,8 @@ impl<D: Dev> Nrfs<D> {
 		read_only: bool,
 	) -> Result<Self, Error<D>> {
 		Ok(Self {
-			storage: nros::Nros::load(devices, global_cache_size, dirty_cache_size).await?,
+			storage: nros::Nros::load(devices, global_cache_size, dirty_cache_size, !read_only)
+				.await?,
 			data: Default::default(),
 			read_only,
 		})

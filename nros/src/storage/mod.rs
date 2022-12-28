@@ -43,13 +43,16 @@ where
 	device_read_failures: Cell<u64>,
 	/// Amount of record unpack failures.
 	record_unpack_failures: Cell<u64>,
+
+	/// Whether to repair broken records or not.
+	allow_repair: bool,
 }
 
 impl<D> Store<D>
 where
 	D: Dev,
 {
-	pub async fn new(devices: DevSet<D>) -> Result<Self, Error<D>> {
+	pub async fn new(devices: DevSet<D>, allow_repair: bool) -> Result<Self, Error<D>> {
 		let mut slf = Self {
 			allocator: Default::default(),
 			devices,
@@ -60,6 +63,7 @@ where
 			unpacked_bytes_written: Default::default(),
 			device_read_failures: Default::default(),
 			record_unpack_failures: Default::default(),
+			allow_repair,
 		};
 		slf.allocator = Allocator::load(&slf).await?.into();
 		Ok(slf)
@@ -115,8 +119,10 @@ where
 				}
 			}
 		};
-		// Write to all devices where failure was encountered.
-		self.devices.write(lba, data, blacklist).await?;
+		if self.allow_repair {
+			// Write to all devices where failure was encountered.
+			self.devices.write(lba, data, blacklist).await?;
+		}
 
 		self.packed_bytes_read
 			.update(|x| x + u64::from(u32::from(record.length)));

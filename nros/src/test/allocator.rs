@@ -13,7 +13,7 @@ fn write_remount_read() {
 		let id = obj.id();
 		drop(obj);
 		let devs = s.unmount().await.unwrap();
-		let s = Nros::load(devs, 1 << 12, 1 << 12).await.unwrap();
+		let s = Nros::load(devs, 1 << 12, 1 << 12, true).await.unwrap();
 
 		let obj = s.get(id).await.unwrap();
 		let mut buf = [0];
@@ -36,7 +36,7 @@ fn write_remount_write_read() {
 		let id = obj.id();
 		drop(obj);
 		let devs = s.unmount().await.unwrap();
-		let s = Nros::load(devs, 1 << 12, 1 << 12).await.unwrap();
+		let s = Nros::load(devs, 1 << 12, 1 << 12, true).await.unwrap();
 
 		let obj_1 = s.get(id).await.unwrap();
 		let obj_2 = s.create().await.unwrap();
