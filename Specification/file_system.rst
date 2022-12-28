@@ -449,7 +449,7 @@ name: "mtime"
 
 The modification time extension adds a signed 64-bit time stamp to all entries.
 
-It is expressed in milliseconds, which gives it a range of ~584 million years.
+It is expressed in microseconds, which gives it a range of ~585000 years.
 The timestamp is relative to the UNIX epoch.
 
 .. table:: Extension data

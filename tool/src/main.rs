@@ -178,7 +178,7 @@ async fn make(args: Make) {
 					.modified()
 					.ok()
 					.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-					.map(|t| t.as_millis().try_into().unwrap_or(i64::MAX))
+					.map(|t| t.as_micros().try_into().unwrap_or(i64::MAX))
 					.unwrap_or(0),
 			});
 
@@ -251,12 +251,11 @@ async fn dump(args: Dump) {
 			}
 
 			if let Some(t) = data.ext_mtime {
-				let secs = (t.mtime / 1000) as i64;
-				let millis = t.mtime.rem_euclid(1000) as u32;
-				let t =
-					chrono::NaiveDateTime::from_timestamp_opt(secs, millis * 1_000_000).unwrap();
+				let secs = (t.mtime / 1_000_000) as i64;
+				let micros = t.mtime.rem_euclid(1_000_000) as u32;
+				let t = chrono::NaiveDateTime::from_timestamp_opt(secs, micros * 1_000).unwrap();
 				// Use format!() since NaiveDateTime doesn't respect flags
-				print!("{:<23}", format!("{}", t));
+				print!("{:<26}", format!("{}", t));
 			}
 
 			let name = e.key(&data).await.unwrap();

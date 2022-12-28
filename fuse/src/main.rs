@@ -74,9 +74,9 @@ impl Fs {
 
 		let mtime = data.ext_mtime.map_or(UNIX_EPOCH, |t| {
 			if t.mtime > 0 {
-				UNIX_EPOCH.checked_add(Duration::from_millis(t.mtime as _))
+				UNIX_EPOCH.checked_add(Duration::from_micros(t.mtime as _))
 			} else {
-				UNIX_EPOCH.checked_sub(Duration::from_millis(-i128::from(t.mtime) as _))
+				UNIX_EPOCH.checked_sub(Duration::from_micros(-i128::from(t.mtime) as _))
 			}
 			.unwrap()
 		});
@@ -661,8 +661,8 @@ fn mtime_now() -> nrfs::dir::ext::mtime::Entry {
 fn mtime_sys(t: SystemTime) -> nrfs::dir::ext::mtime::Entry {
 	nrfs::dir::ext::mtime::Entry {
 		mtime: t.duration_since(UNIX_EPOCH).map_or_else(
-			|t| -t.duration().as_millis().try_into().unwrap_or(i64::MAX),
-			|t| t.as_millis().try_into().unwrap_or(i64::MAX),
+			|t| -t.duration().as_micros().try_into().unwrap_or(i64::MAX),
+			|t| t.as_micros().try_into().unwrap_or(i64::MAX),
 		),
 	}
 }
