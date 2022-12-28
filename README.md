@@ -5,10 +5,10 @@
 &check; = implemented, &cross; = planned
 
 * &check; Error detection
-* &cross; Error correction (with mirrors only!)
+* &check; Error correction (with mirrors only!)
 * &check; Compression
 * &check; Transactional updates
-* &cross; Mirroring
+* &check; Mirroring
 * &cross; Defragmentation
 * &check; Sparse objects
 * &cross; Out of band deduplication (+ copy-on-write).
