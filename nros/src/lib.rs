@@ -77,9 +77,9 @@ macro_rules! trace {
 }
 
 mod cache;
-pub mod header;
+mod header;
 mod record;
-pub mod storage;
+mod storage;
 #[cfg(any(test, fuzzing))]
 pub mod test;
 mod util;
@@ -113,7 +113,7 @@ impl<D: Dev> Nros<D> {
 		C: IntoIterator<Item = D>,
 	{
 		let devs = DevSet::new(mirrors, block_size, max_record_size, compression).await?;
-		Self::load_inner(devs, read_cache_size, write_cache_size).await
+		Self::load_inner(devs, read_cache_size, write_cache_size, true).await
 	}
 
 	/// Load an existing object store.
@@ -121,9 +121,10 @@ impl<D: Dev> Nros<D> {
 		devices: Vec<D>,
 		read_cache_size: usize,
 		write_cache_size: usize,
+		allow_repair: bool,
 	) -> Result<Self, Error<D>> {
-		let devs = DevSet::load(devices).await?;
-		Self::load_inner(devs, read_cache_size, write_cache_size).await
+		let devs = DevSet::load(devices, allow_repair).await?;
+		Self::load_inner(devs, read_cache_size, write_cache_size, allow_repair).await
 	}
 
 	/// Load an object store.
@@ -131,8 +132,9 @@ impl<D: Dev> Nros<D> {
 		devices: DevSet<D>,
 		read_cache_size: usize,
 		write_cache_size: usize,
+		allow_repair: bool,
 	) -> Result<Self, Error<D>> {
-		let store = Store::new(devices).await?;
+		let store = Store::new(devices, allow_repair).await?;
 		let store = Cache::new(store, read_cache_size, write_cache_size);
 		Ok(Self { store })
 	}

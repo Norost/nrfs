@@ -74,7 +74,6 @@ Header
 ~~~~~~
 
 A header is placed at the start and end of a volume.
-A header has a variable size, up to 64 KiB.
 
 .. table:: FS Header
   :align: center
@@ -86,9 +85,9 @@ A header has a variable size, up to 64 KiB.
   |    0 |                                                       |
   +------+            Magic string ("Nora Reliable FS")          |
   |    8 |                                                       |
-  +------+------+------+------+------+------+--------------------+
-  |   16 | MirI | MirC | RLen | BLen | CAlg |  Version  (0.2.0)  |
-  +------+------+------+------+------+------+--------------------+
+  +------+------+------+------+------+------+------+-------------+
+  |   16 | MirI | MirC | RLen | BLen | CAlg | Ver  |             |
+  +------+------+------+------+------+------+------+-------------+
   |   24 |                                                       |
   +------+                          UID                          |
   |   32 |                                                       |
@@ -117,16 +116,23 @@ A header has a variable size, up to 64 KiB.
   +------+-------------------------------------------------------+
   |  128 |                         XXH3                          |
   +------+-------------------------------------------------------+
-  |  136 |                      Generation                       |
+  |  136 |                                                       |
+  +------+                                                       |
+  |  ... |                       Reserved                        |
+  +------+                                                       |
+  |  248 |                                                       |
   +------+-------------------------------------------------------+
-  |  ... |                                                       |
-  +------+              Free for use by filesystem               |
+  |  256 |                                                       |
+  +------+                                                       |
+  |  ... |              Free for use by filesystem               |
+  +------+                                                       |
   |  504 |                                                       |
   +------+-------------------------------------------------------+
 
 * Magic string: Must always be "Nora reliable FS"
 
-* Version: The version of the data storage format.
+* Vers: The version of the data storage format.
+  Must have the value 2 as of writing.
 
 * CAlg: The default compression algorithm to use.
 
@@ -164,9 +170,14 @@ A header has a variable size, up to 64 KiB.
 
 * Generation: Counts updates. Wraps arounds.
 
+* Reserved: unused space that is set aside for any potential updates to this
+  specification.
+  **Must** be zeroed.
+
 All bytes between 256 and 512 are free for use by the filesystem layer.
 
   When updating the headers, ensure the updates *do not* happen concurrently.
+  That is, update all the start headers first, then the end headers.
 
 
 Record
@@ -279,9 +290,9 @@ The bottom of the stack denotes the start of the log.
    * There are no parent records that need to be modified.
 
    Additionally, deriving the allocation status of any block can trivially be
-   determined while iterating:
-   the *first* (de)allocation entry for any block indicates it status.
-   Any entries lower on the stack for that block can be ignored.
+   determined while iterating by "xor"ing the entries together.
+   i.e. the status of a block is indicates by the amount of entries that
+   refer to said block.
 
 The space used by records for the stack are **not** explicitly recorded in the
 log [#]_.
@@ -317,5 +328,7 @@ log [#]_.
   |    8 |                          Size                         |
   +------+-------------------------------------------------------+
 
-If the high bit of Size is set the entry is a deallocation.
-Otherwise it is an allocation.
+Each log entry inverts the status of the range covered (i.e. ``xor``).
+Each log entry indicates either an allocation or deallocation,
+never both partially.
+The length of each entry may never be 0.

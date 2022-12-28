@@ -1,5 +1,5 @@
 use {
-	super::run,
+	super::{run, Set256},
 	crate::{
 		storage::dev::{Allocator, Buf, Dev, DevSet, MemDev},
 		BlockSize, Compression, MaxRecordSize,
@@ -69,19 +69,25 @@ fn devset_1_read_write() {
 		assert_eq!(buf2k.get().len(), 4 * 512);
 
 		buf1k.get_mut().fill(0x11);
-		set.write(1.try_into().unwrap(), buf1k).await.unwrap();
-		let rd1k = set
-			.read(1.try_into().unwrap(), 2 * 512, Default::default())
+		set.write(1.try_into().unwrap(), buf1k, Set256::set_all())
 			.await
+			.unwrap();
+		let (rd1k, _) = set
+			.read(1.try_into().unwrap(), 2 * 512, &Default::default())
+			.await
+			.unwrap()
 			.unwrap();
 		assert_eq!(rd1k.get(), [0x11; 2 * 512]);
 
 		buf2k.get_mut().fill(0x22);
-		set.write(2.try_into().unwrap(), buf2k).await.unwrap();
-
-		let rd1k = set
-			.read(1.try_into().unwrap(), 5 * 512, Default::default())
+		set.write(2.try_into().unwrap(), buf2k, Set256::set_all())
 			.await
+			.unwrap();
+
+		let (rd1k, _) = set
+			.read(1.try_into().unwrap(), 5 * 512, &Default::default())
+			.await
+			.unwrap()
 			.unwrap();
 		assert_eq!(&rd1k.get()[..512], [0x11; 512]);
 		assert_eq!(&rd1k.get()[512..], [0x22; 512 * 4]);

@@ -14,10 +14,9 @@ mod set;
 
 #[cfg(not(feature = "no-std"))]
 pub use fs::{FileDev, FileDevError};
-pub use {
-	mem::{MemDev, MemDevError},
-	set::DevSet,
-};
+pub use mem::{MemDev, MemDevError};
+
+pub(crate) use set::{DevSet, Set256};
 
 use {crate::BlockSize, core::future::Future};
 
@@ -120,4 +119,9 @@ pub trait Buf: Clone {
 
 	/// Shrink the buffer.
 	fn shrink(&mut self, len: usize);
+
+	/// The length of this buffer, in bytes.
+	fn len(&self) -> usize {
+		self.get().len()
+	}
 }

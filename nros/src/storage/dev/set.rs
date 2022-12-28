@@ -33,11 +33,6 @@ pub struct DevSet<D: Dev> {
 	block_count: u64,
 	/// The unique identifier of this filesystem.
 	uid: [u8; 16],
-	/// A counter that indicates the total amount of updates to this filesystem.
-	/// Wraps around (in a couple thousands of years).
-	///
-	/// Used to ensure data was properly flushed to all disks on each transaction.
-	generation: Cell<u64>,
 
 	pub allocation_log: Cell<Record>,
 	pub object_list: Cell<Record>,
@@ -122,15 +117,24 @@ impl<D: Dev> DevSet<D> {
 			compression,
 			block_count,
 			uid: *b" TODO TODO TODO ",
-			generation: 0.into(),
 			allocation_log: Default::default(),
 			object_list: Default::default(),
 		})
 	}
 
 	/// Load an existing device set.
-	pub async fn load(devices: Vec<D>) -> Result<Self, Error<D>> {
-		// Collect both head & tail headers.
+	///
+	/// `read_only` prevents fixing any headers that may be broken.
+	pub async fn load(devices: Vec<D>, read_only: bool) -> Result<Self, Error<D>> {
+		// We're looking to retrieve two types of data from the devices:
+		//
+		// 1. Global info that is shared among all devices.
+		// 2. Per-device info that we need to retrieve per device.
+		//
+		// For global info any valid header from any device will do.
+		// For per-device info we need any valid header per device.
+
+		// Collect both start & end headers.
 		let headers = devices
 			.iter()
 			.map(|d| {
@@ -142,52 +146,78 @@ impl<D: Dev> DevSet<D> {
 			.collect::<Vec<_>>()
 			.await;
 
-		// Get global info from any valid header.
+		let has_broken_headers = Cell::new(false);
+		let mut uid = None;
+		let mut uid_mismatch = false;
+
+		// 1. Global info that is shared among all devices.
+		//
+		// Prefer start headers as those are more likely to be up to date than end headers.
 		let header = headers
 			.iter()
-			.flat_map(|(h, t)| [h, t])
-			.filter_map(|h| h.as_ref().ok())
+			.map(|(h, _)| h)
+			.chain(headers.iter().map(|(_, h)| h))
+			.flat_map(|buf| {
+				has_broken_headers.update(|x| x | buf.as_ref().is_err());
+				buf.as_ref().ok()
+			})
 			.find_map(|buf| {
 				let mut header = Header::default();
 				header
 					.as_mut()
 					.copy_from_slice(&buf.get()[..mem::size_of::<Header>()]);
-				header.verify_xxh3().then_some(header)
+
+				let valid = header.verify_xxh3();
+				has_broken_headers.update(|x| x | !valid);
+
+				uid_mismatch |= *uid.get_or_insert(header.uid) != header.uid;
+
+				valid.then_some(header)
 			})
 			.unwrap_or_else(|| todo!("no valid headers"));
 
-		// Check if all head or all tail headers are valid.
-		//
-		// TODO check xxh3 *and* generation.
-		//let (all_head, all_tail) = headers.iter().map(|
+		if uid_mismatch {
+			todo!("return error when dealing with mismatched UIDs");
+		}
 
 		// Build mirrors
 		let mut mirrors = (0..u8::from(header.mirror_count))
 			.map(|_| Vec::new())
 			.collect::<Vec<_>>();
-		for (i, (head, tail)) in headers.iter().enumerate() {
-			let head = head.as_ref().unwrap_or_else(|_| todo!());
-			let mut header = Header::default();
-			header
-				.as_mut()
-				.copy_from_slice(&head.get()[..mem::size_of::<Header>()]);
-			assert!(header.verify_xxh3(), "todo");
+		for (i, bufs) in headers.iter().enumerate() {
+			// Use any valid header.
+			let get = |buf: &[u8]| {
+				let mut header = Header::default();
+				header
+					.as_mut()
+					.copy_from_slice(&buf[..mem::size_of::<Header>()]);
+				header
+			};
+			let header = match bufs {
+				(Ok(buf), _) if get(buf.get()).verify_xxh3() => get(buf.get()),
+				(_, Ok(buf)) if get(buf.get()).verify_xxh3() => get(buf.get()),
+				(Ok(_), _) | (_, Ok(_)) => todo!("no header with valid xxh3"),
+				(Err(_), Err(_)) => todo!("one device failed, continue with other chains"),
+			};
+
+			// Add to mirror.
 			mirrors
 				.get_mut(usize::from(u8::from(header.mirror_index)))
-				.expect("todo")
+				.expect("todo: invalid mirror index")
 				.push((
 					i,
 					u64::from(header.lba_offset),
 					u64::from(header.block_count),
 				))
 		}
+
+		drop(headers);
+
 		// Sort each device and check for gaps.
 		for chain in mirrors.iter_mut() {
 			chain.sort_unstable_by_key(|(_, lba_offset, _)| *lba_offset);
 			// TODO check gaps
 		}
-
-		drop(headers);
 
 		// TODO avoid conversion to Vec<Option<_>>
 		let mut devices = devices.into_iter().map(|d| Some(d)).collect::<Vec<_>>();
@@ -207,50 +237,79 @@ impl<D: Dev> DevSet<D> {
 			})
 			.collect();
 
-		Ok(Self {
+		let s = Self {
 			devices,
 
 			block_size: BlockSize::from_raw(header.block_length_p2).expect("todo"),
 			max_record_size: MaxRecordSize::from_raw(header.max_record_length_p2).expect("todo"),
 			compression: Compression::from_raw(header.compression).expect("todo"),
 			uid: header.uid,
-			block_count: header.block_count.into(),
+			block_count: header.total_block_count.into(),
 
 			object_list: header.object_list.into(),
 			allocation_log: header.allocation_log.into(),
-			generation: u64::from(header.generation).into(),
-		})
+		};
+
+		// If any headers are broken, fix them now.
+		if !read_only && has_broken_headers.get() {
+			s.save_headers().await?;
+		}
+
+		Ok(s)
 	}
 
-	/// Save headers to the head or tail all devices.
+	/// Save headers to the start and end of all devices.
 	///
-	/// Headers **must** always be saved at the tail before the head.
+	/// This performs a fence before writing to the start
+	/// and another fence before writing to the end.
 	pub async fn save_headers(&self) -> Result<(), Error<D>> {
-		// Allocate buffers for headers & write to tails.
+		// First ensure all data is flushed.
+		self.devices
+			.iter()
+			.flat_map(|chain| chain.iter())
+			.map(|node| node.dev.fence())
+			.collect::<FuturesUnordered<_>>()
+			.try_for_each(|()| future::ready(Ok(())))
+			.await
+			.map_err(Error::Dev)?;
+
+		/// Save a single header to a device.
+		async fn save_header<D: Dev>(
+			tail: bool,
+			node: &Node<D>,
+			header: <D::Allocator as Allocator>::Buf<'_>,
+		) -> Result<(), D::Error> {
+			let lba = if tail { 0 } else { 1 + node.block_count };
+			node.dev.write(lba, header);
+			node.dev.fence().await
+		}
+
+		// Allocate buffers for headers & write to start headers.
 		let fut = self
 			.devices
 			.iter()
-			.map(|chain| {
-				let mut offset = self.block_count;
-				chain.iter().map(move |node| {
-					let len = offset - node.block_offset;
-					offset = node.block_offset;
-					self.create_and_save_header_tail(node, len)
+			.enumerate()
+			.map(|(i, chain)| {
+				chain.iter().map(move |node| async move {
+					let buf = self.create_header(i.try_into().unwrap(), node).await?;
+					let b = buf.clone();
+					save_header(false, node, b).await?;
+					Ok((node, buf))
 				})
 			})
 			.flatten()
 			.collect::<FuturesUnordered<_>>();
 
-		// Wait for tail futures to finish & collect them.
+		// Wait for futures to finish.
 		let fut = fut.try_collect::<Vec<_>>().await.map_err(Error::Dev)?;
 
-		// Now save heads.
+		// Now save to end.
 		let fut: FuturesUnordered<_> = fut
 			.into_iter()
-			.map(|(dev, buf, len)| save_header(false, dev, len, buf))
+			.map(|(node, buf)| save_header(true, node, buf))
 			.collect::<FuturesUnordered<_>>();
 
-		// Wait for head futures to finish
+		// Wait for futures to finish
 		fut.try_for_each(|f| future::ready(Ok(f)))
 			.await
 			.map_err(Error::Dev)
@@ -260,6 +319,10 @@ impl<D: Dev> DevSet<D> {
 	///
 	/// A chain blacklist can be used in case corrupt data was returned.
 	///
+	/// The chain from which the data is read is returned.
+	///
+	/// If all available chains are blacklisted, `None` is returned.
+	///
 	/// # Note
 	///
 	/// If `size` isn't a multiple of the block size.
@@ -267,8 +330,8 @@ impl<D: Dev> DevSet<D> {
 		&self,
 		lba: u64,
 		size: usize,
-		blacklist: Set256,
-	) -> Result<SetBuf<D>, Error<D>> {
+		blacklist: &Set256,
+	) -> Result<Option<(SetBuf<D>, u8)>, (Error<D>, u8)> {
 		assert!(
 			size % (1usize << self.block_size()) == 0,
 			"data len isn't a multiple of block size"
@@ -279,45 +342,71 @@ impl<D: Dev> DevSet<D> {
 
 		// TODO balance loads
 		for (i, chain) in self.devices.iter().enumerate() {
-			if blacklist.get(i.try_into().unwrap()) {
+			let i = u8::try_from(i).unwrap();
+			if blacklist.get(i) {
 				continue;
 			}
 
 			// Do a binary search for the start device.
-			let node = chain
+			let node_i = chain
 				.binary_search_by_key(&lba, |node| node.block_offset)
 				// if offset == lba, then we need that dev
 				// if offset < lba, then we want the previous dev.
 				.map_or_else(|i| i - 1, |i| i);
-			let node = &chain[node];
+			let node = &chain[node_i];
 
-			let block_count = node.block_count;
+			let node_block_end = node.block_offset + node.block_count;
+			let node_lba = lba - node.block_offset + 1;
 
 			// Check if the buffer range falls entirely within the device's range.
 			// If not, split the buffer in two and perform two operations.
-			return if lba_end <= node.block_offset + block_count {
+			return if lba_end <= node_block_end {
 				// No splitting necessary - yay
 				node.dev
-					.read(lba - node.block_offset + 1, size)
-					.await // +1 because header
-					.map(SetBuf)
-					.map_err(Error::Dev)
+					.read(node_lba, size)
+					.await
+					.map(|buf| Some((SetBuf(buf), i)))
+					.map_err(|e| (Error::Dev(e), i))
 			} else {
 				// We need to split - aw
-				todo!()
+				// Figure out midpoint to split.
+				let mid =
+					size - usize::try_from(lba_end - node_block_end << self.block_size()).unwrap();
+				// Allocate two buffers and read into each.
+				let (buf_l, buf_r, mut buf) = futures_util::try_join!(
+					node.dev.read(node_lba, mid),
+					chain[node_i + 1].dev.read(1, size - mid),
+					node.dev.allocator().alloc(size),
+				)
+				.map_err(|e| (Error::Dev(e), i))?;
+				// Merge buffers.
+				let b = buf.get_mut();
+				b[..mid].copy_from_slice(buf_l.get());
+				b[mid..].copy_from_slice(buf_r.get());
+				Ok(Some((SetBuf(buf), i)))
 			};
 		}
-		todo!("all chains failed. RIP")
+
+		Ok(None)
 	}
 
 	/// Write a range of blocks.
+	///
+	/// The whitelist indicates which chains to write to.
 	///
 	/// # Panics
 	///
 	/// If the buffer size isn't a multiple of the block size.
 	///
+	/// If the buffer overlaps more than two devices.
+	///
 	/// If the write is be out of bounds.
-	pub async fn write(&self, lba: u64, data: SetBuf<'_, D>) -> Result<(), Error<D>> {
+	pub async fn write(
+		&self,
+		lba: u64,
+		data: SetBuf<'_, D>,
+		whitelist: Set256,
+	) -> Result<(), Error<D>> {
 		assert!(
 			data.get().len() % (1usize << self.block_size()) == 0,
 			"data len isn't a multiple of block size"
@@ -330,29 +419,47 @@ impl<D: Dev> DevSet<D> {
 		// Write to all mirrors
 		self.devices
 			.iter()
+			.enumerate()
+			.filter_map(|(i, chain)| whitelist.get(i.try_into().unwrap()).then(|| chain))
 			.map(|chain| {
 				// Do a binary search for the start device.
-				let node = chain
+				let node_i = chain
 					.binary_search_by_key(&lba, |node| node.block_offset)
 					// if offset == lba, then we need that dev
 					// if offset < lba, then we want the previous dev.
 					.map_or_else(|i| i - 1, |i| i);
-				let node = &chain[node];
-
-				let block_count = node.block_count;
+				let node = &chain[node_i];
 
 				// Check if the buffer range falls entirely within the device's range.
 				// If not, split the buffer in two and perform two operations.
 				let data = &data;
 				async move {
-					if lba_end <= node.block_offset + block_count {
+					let node_lba_end = node.block_offset + node.block_count;
+					let node_lba = lba - node.block_offset + 1;
+					if lba_end <= node_lba_end {
 						// No splitting necessary - yay
-						node.dev
-							.write(lba - node.block_offset + 1, data.0.clone())
-							.await // +1 because headers
+						node.dev.write(node_lba, data.0.clone()).await // +1 because headers
 					} else {
 						// We need to split - aw
-						todo!()
+						let d = data.get();
+						// Figure out midpoint to split.
+						let mid = d.len()
+							- usize::try_from(lba_end - node_lba_end << self.block_size()).unwrap();
+						// Allocate two buffers, copy halves to each and perform two writes.
+						async fn f<D: Dev>(
+							node: &Node<D>,
+							lba: u64,
+							data: &[u8],
+						) -> Result<(), D::Error> {
+							let mut buf = node.dev.allocator().alloc(data.len()).await?;
+							buf.get_mut().copy_from_slice(data);
+							node.dev.write(lba, buf).await
+						}
+						futures_util::try_join!(
+							f(node, node_lba, &d[..mid]),
+							f(&chain[node_i + 1], 1, &d[mid..])
+						)
+						.map(|((), ())| ())
 					}
 				}
 			})
@@ -365,6 +472,7 @@ impl<D: Dev> DevSet<D> {
 	/// Create a header for writing to a device.
 	async fn create_header<'a>(
 		&self,
+		chain: u8,
 		node: &'a Node<D>,
 	) -> Result<<D::Allocator as Allocator>::Buf<'a>, D::Error> {
 		let mut header = Header {
@@ -372,6 +480,7 @@ impl<D: Dev> DevSet<D> {
 			block_length_p2: self.block_size.to_raw(),
 			max_record_length_p2: self.max_record_size.to_raw(),
 			mirror_count: self.devices.len().try_into().unwrap(),
+			mirror_index: chain,
 
 			uid: self.uid,
 
@@ -382,8 +491,6 @@ impl<D: Dev> DevSet<D> {
 			object_list: self.object_list.get(),
 
 			allocation_log: self.allocation_log.get(),
-
-			generation: self.generation.get().into(),
 
 			..Default::default()
 		};
@@ -396,23 +503,6 @@ impl<D: Dev> DevSet<D> {
 			.await?;
 		buf.get_mut()[..header.as_ref().len()].copy_from_slice(header.as_ref());
 		Ok(buf)
-	}
-
-	/// Create header & save to tail of device
-	async fn create_and_save_header_tail<'a>(
-		&self,
-		node: &'a Node<D>,
-		len: u64,
-	) -> Result<(&'a D, <D::Allocator as Allocator>::Buf<'a>, u64), D::Error> {
-		let buf = self.create_header(node).await?;
-		let b = buf.clone();
-		save_header(true, &node.dev, len, b).await?;
-		Ok((&node.dev, buf, len))
-	}
-
-	/// Flush & ensure all writes have completed.
-	pub async fn fence(&self) -> Result<(), Error<D>> {
-		todo!()
 	}
 
 	/// Allocate memory for writing.
@@ -484,39 +574,15 @@ impl<D: Dev> SetBuf<'_, D> {
 	}
 }
 
-/// Generic NROS header.
-/// That is, a header that has no device-specific information.
-#[derive(Clone, Copy, Debug)]
-pub struct GenericHeader {
-	pub version: u32,
-	pub mirror_count: u8,
-	pub uid: u64,
-
-	pub object_list: Record,
-
-	pub allocation_log_lba: u64,
-	pub allocation_log_length: u64,
-
-	pub generation: u32,
-}
-
-/// Save a single header to a device.
-async fn save_header<D: Dev>(
-	tail: bool,
-	dev: &D,
-	len: u64,
-	header: <D::Allocator as Allocator>::Buf<'_>,
-) -> Result<(), D::Error> {
-	let lba = if tail { 0 } else { len };
-
-	dev.write(lba, header);
-	dev.fence().await
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Set256(u128, u128);
 
 impl Set256 {
+	/// Create a new set with all bits set.
+	pub fn set_all() -> Self {
+		Self(u128::MAX, u128::MAX)
+	}
+
 	pub fn get(&self, bit: u8) -> bool {
 		if bit < 0x80 {
 			self.0 & 1 << bit > 0

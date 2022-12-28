@@ -6,9 +6,12 @@ use {
 	alloc::vec::Vec,
 	allocator::Allocator,
 	core::cell::{Cell, RefCell},
+	dev::Set256,
 };
 
-pub use dev::{Dev, DevSet};
+pub(crate) use dev::DevSet;
+
+pub use dev::Dev;
 
 /// A single store of records.
 ///
@@ -36,13 +39,20 @@ where
 	unpacked_bytes_read: Cell<u64>,
 	/// Unpacked bytes written.
 	unpacked_bytes_written: Cell<u64>,
+	/// Amount of device read failures.
+	device_read_failures: Cell<u64>,
+	/// Amount of record unpack failures.
+	record_unpack_failures: Cell<u64>,
+
+	/// Whether to repair broken records or not.
+	allow_repair: bool,
 }
 
 impl<D> Store<D>
 where
 	D: Dev,
 {
-	pub async fn new(devices: DevSet<D>) -> Result<Self, Error<D>> {
+	pub async fn new(devices: DevSet<D>, allow_repair: bool) -> Result<Self, Error<D>> {
 		let mut slf = Self {
 			allocator: Default::default(),
 			devices,
@@ -51,6 +61,9 @@ where
 			packed_bytes_destroyed: Default::default(),
 			unpacked_bytes_read: Default::default(),
 			unpacked_bytes_written: Default::default(),
+			device_read_failures: Default::default(),
+			record_unpack_failures: Default::default(),
+			allow_repair,
 		};
 		slf.allocator = Allocator::load(&slf).await?.into();
 		Ok(slf)
@@ -72,14 +85,42 @@ where
 			.assert_alloc(lba, blocks.try_into().unwrap());
 
 		let count = blocks << self.block_size();
-		let data = self
-			.devices
-			.read(lba.try_into().unwrap(), count, Default::default())
-			.await?;
+
+		// Attempt to read the record from any chain.
+		//
+		// If one of the chains fail, try another until we run out.
+		// If we run out of chains, return the last error.
+		// If we find a successful chain, copy the record to the other chains and log an error.
 		let mut v = Vec::new();
-		record
-			.unpack(&data.get()[..len as _], &mut v, self.max_record_size())
-			.map_err(Error::RecordUnpack)?;
+		let mut blacklist = Set256::default();
+		let mut last_err = None;
+		let data = loop {
+			let res = self
+				.devices
+				.read(lba.try_into().unwrap(), count, &blacklist)
+				.await;
+			let (data, chain) = match res {
+				Ok(Some(res)) => res,
+				Ok(None) => return Err(last_err.expect("no chains were tried")),
+				Err((e, chain)) => {
+					blacklist.set(chain, true);
+					last_err = Some(e);
+					continue;
+				}
+			};
+			match record.unpack(&data.get()[..len as _], &mut v, self.max_record_size()) {
+				Ok(()) => break data,
+				Err(e) => {
+					self.record_unpack_failures.update(|x| x + 1);
+					blacklist.set(chain, true);
+					last_err = Some(Error::RecordUnpack(e));
+				}
+			}
+		};
+		if self.allow_repair {
+			// Write to all devices where failure was encountered.
+			self.devices.write(lba, data, blacklist).await?;
+		}
 
 		self.packed_bytes_read
 			.update(|x| x + u64::from(u32::from(record.length)));
@@ -121,7 +162,9 @@ where
 
 		// Write buffer.
 		rec.lba = lba.into();
-		self.devices.write(lba.try_into().unwrap(), buf).await?;
+		self.devices
+			.write(lba.try_into().unwrap(), buf, Set256::set_all())
+			.await?;
 
 		self.packed_bytes_written
 			.update(|x| x + u64::from(u32::from(rec.length)));
@@ -193,13 +236,22 @@ where
 
 	/// Get statistics for this session.
 	pub fn statistics(&self) -> Statistics {
-		Statistics {
-			allocation: self.allocator.borrow().statistics,
-			packed_bytes_read: self.packed_bytes_read.get(),
-			packed_bytes_written: self.packed_bytes_written.get(),
-			packed_bytes_destroyed: self.packed_bytes_destroyed.get(),
-			unpacked_bytes_read: self.unpacked_bytes_read.get(),
-			unpacked_bytes_written: self.unpacked_bytes_written.get(),
+		macro_rules! s {
+			{$($f:ident)*} => {
+				Statistics {
+					allocation: self.allocator.borrow().statistics,
+					$($f: self.$f.get(),)*
+				}
+			}
+		}
+		s! {
+			packed_bytes_read
+			packed_bytes_written
+			packed_bytes_destroyed
+			unpacked_bytes_read
+			unpacked_bytes_written
+			device_read_failures
+			record_unpack_failures
 		}
 	}
 }
@@ -227,4 +279,8 @@ pub struct Statistics {
 	pub unpacked_bytes_read: u64,
 	/// Unpacked bytes written.
 	pub unpacked_bytes_written: u64,
+	/// Amount of device read failures.
+	pub device_read_failures: u64,
+	/// Amount of record unpack failures.
+	pub record_unpack_failures: u64,
 }

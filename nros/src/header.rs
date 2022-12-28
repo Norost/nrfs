@@ -1,6 +1,6 @@
 use {
 	crate::{Compression, MaxRecordSize, Record},
-	core::fmt,
+	core::{fmt, mem},
 	endian::u64le,
 };
 
@@ -8,7 +8,8 @@ use {
 pub(crate) struct Header {
 	pub magic: [u8; 16],
 
-	pub version: [u8; 3],
+	pub padding: [u8; 2],
+	pub version: u8,
 	pub compression: u8,
 	pub block_length_p2: u8,
 	pub max_record_length_p2: u8,
@@ -27,10 +28,13 @@ pub(crate) struct Header {
 	pub allocation_log: Record,
 
 	pub xxh3: u64le,
-	pub generation: u64le,
 
-	pub extra: [u8; 512 - 136],
+	pub reserved: [u8; 256 - 136],
+
+	pub extra: [u8; 512 - 256],
 }
+
+const _: () = assert!(mem::size_of::<Header>() == 512);
 
 raw!(Header);
 
@@ -39,6 +43,7 @@ impl Default for Header {
 		Self {
 			magic: Self::MAGIC,
 
+			padding: [0; 2],
 			version: Self::VERSION,
 			compression: Compression::Lz4.to_raw(),
 			block_length_p2: Default::default(),
@@ -56,9 +61,10 @@ impl Default for Header {
 			allocation_log: Default::default(),
 
 			xxh3: Default::default(),
-			generation: Default::default(),
 
-			extra: [0; 512 - 136],
+			reserved: [0; 256 - 136],
+
+			extra: [0; 512 - 256],
 		}
 	}
 }
@@ -67,12 +73,7 @@ impl Header {
 	/// The magic every header begins with.
 	pub const MAGIC: [u8; 16] = *b"Nora Reliable FS";
 	/// The version of the on-disk format.
-	pub const VERSION: [u8; 3] = [0, 2, 0];
-
-	/// Check if the magic is proper & the version is compatible.
-	pub fn verify_compatible(&mut self) -> bool {
-		self.magic == Self::MAGIC && self.version == Self::VERSION
-	}
+	pub const VERSION: u8 = 2;
 
 	/// Check if the header data is intact.
 	pub fn verify_xxh3(&mut self) -> bool {
@@ -88,14 +89,6 @@ impl Header {
 		self.xxh3 = 0.into();
 		self.xxh3 = xxhash_rust::xxh3::xxh3_64(self.as_ref()).into();
 	}
-
-	/// Check whether two headers are part of the same filesystem.
-	pub fn compatible(&self, other: &Self) -> bool {
-		// Comparing other headers *shouldn't* be necessary unless
-		// we're deliberately being screwed with - in which case all
-		// bets are off anyways.
-		self.uid == other.uid && self.generation == other.generation
-	}
 }
 
 impl fmt::Debug for Header {
@@ -105,8 +98,7 @@ impl fmt::Debug for Header {
 		// TODO use Utf8Lossy when it is stabilized.
 		f.field("magic", &String::from_utf8_lossy(&self.magic));
 
-		let [a, b, c] = self.version;
-		f.field("version", &format_args!("v{}.{}.{}", a, b, c));
+		f.field("version", &self.version);
 		if let Some(c) = Compression::from_raw(self.compression) {
 			f.field("compression", &c);
 		} else {
@@ -137,7 +129,6 @@ impl fmt::Debug for Header {
 		f.field("allocation_log", &self.allocation_log);
 
 		f.field("xxh3", &self.xxh3);
-		f.field("generation", &self.generation);
 
 		f.finish_non_exhaustive()
 	}
