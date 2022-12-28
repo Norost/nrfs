@@ -239,8 +239,8 @@ impl<'a> Test<'a> {
 									State::File {
 										contents: Default::default(),
 										indices: Default::default(),
-										ext_unix: Default::default(),
-										ext_mtime: Default::default(),
+										ext_unix: ext.unix.unwrap_or_default(),
+										ext_mtime: ext.mtime.unwrap_or_default(),
 									},
 								);
 								assert!(r.is_none());
@@ -273,8 +273,8 @@ impl<'a> Test<'a> {
 									State::Dir {
 										children: Default::default(),
 										indices: Default::default(),
-										ext_unix: Default::default(),
-										ext_mtime: Default::default(),
+										ext_unix: ext.unix.unwrap_or_default(),
+										ext_mtime: ext.mtime.unwrap_or_default(),
 									},
 								);
 								assert!(r.is_none());
@@ -521,12 +521,16 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::SetExtUnix { idx, ext } => {
-						let Some((entry, _, _)) = get(&self.fs, &refs, &mut state, idx) else { continue };
+						let Some((entry, _, e)) = get(&self.fs, &refs, &mut state, idx) else { continue };
 						entry.set_ext_unix(&ext).await.unwrap();
+						// TODO keep track of dangling objects.
+						e.map(|e| *e.ext_unix_mut() = ext);
 					}
 					Op::SetExtMtime { idx, ext } => {
-						let Some((entry, _, _)) = get(&self.fs, &refs, &mut state, idx) else { continue };
+						let Some((entry, _, e)) = get(&self.fs, &refs, &mut state, idx) else { continue };
 						entry.set_ext_mtime(&ext).await.unwrap();
+						// TODO keep track of dangling objects.
+						e.map(|e| *e.ext_mtime_mut() = ext);
 					}
 					Op::GetExt { idx } => {
 						let Some((entry, _, e)) = get(&self.fs, &refs, &mut state, idx) else { continue };
