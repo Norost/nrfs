@@ -146,7 +146,9 @@ impl<D: Dev> DevSet<D> {
 			.collect::<Vec<_>>()
 			.await;
 
-		let mut has_broken_headers = Cell::new(false);
+		let has_broken_headers = Cell::new(false);
+		let mut uid = None;
+		let mut uid_mismatch = false;
 
 		// 1. Global info that is shared among all devices.
 		//
@@ -164,11 +166,19 @@ impl<D: Dev> DevSet<D> {
 				header
 					.as_mut()
 					.copy_from_slice(&buf.get()[..mem::size_of::<Header>()]);
+
 				let valid = header.verify_xxh3();
 				has_broken_headers.update(|x| x | !valid);
+
+				uid_mismatch |= *uid.get_or_insert(header.uid) != header.uid;
+
 				valid.then_some(header)
 			})
 			.unwrap_or_else(|| todo!("no valid headers"));
+
+		if uid_mismatch {
+			todo!("return error when dealing with mismatched UIDs");
+		}
 
 		// Build mirrors
 		let mut mirrors = (0..u8::from(header.mirror_count))
@@ -187,7 +197,7 @@ impl<D: Dev> DevSet<D> {
 				(Ok(buf), _) if get(buf.get()).verify_xxh3() => get(buf.get()),
 				(_, Ok(buf)) if get(buf.get()).verify_xxh3() => get(buf.get()),
 				(Ok(_), _) | (_, Ok(_)) => todo!("no header with valid xxh3"),
-				(Err(e), Err(_)) => todo!("one device failed, continue with other chains"),
+				(Err(_), Err(_)) => todo!("one device failed, continue with other chains"),
 			};
 
 			// Add to mirror.

@@ -75,11 +75,6 @@ impl Header {
 	/// The version of the on-disk format.
 	pub const VERSION: u8 = 2;
 
-	/// Check if the magic is proper & the version is compatible.
-	pub fn verify_compatible(&mut self) -> bool {
-		self.magic == Self::MAGIC && self.version == Self::VERSION
-	}
-
 	/// Check if the header data is intact.
 	pub fn verify_xxh3(&mut self) -> bool {
 		let cur = self.xxh3;
@@ -93,14 +88,6 @@ impl Header {
 	pub fn update_xxh3(&mut self) {
 		self.xxh3 = 0.into();
 		self.xxh3 = xxhash_rust::xxh3::xxh3_64(self.as_ref()).into();
-	}
-
-	/// Check whether two headers are part of the same filesystem.
-	pub fn compatible(&self, other: &Self) -> bool {
-		// Comparing other headers *shouldn't* be necessary unless
-		// we're deliberately being screwed with - in which case all
-		// bets are off anyways.
-		self.uid == other.uid
 	}
 }
 
