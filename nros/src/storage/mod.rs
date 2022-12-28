@@ -95,7 +95,6 @@ where
 		let mut blacklist = Set256::default();
 		let mut last_err = None;
 		let data = loop {
-			dbg!();
 			let res = self
 				.devices
 				.read(lba.try_into().unwrap(), count, &blacklist)
@@ -112,7 +111,6 @@ where
 			match record.unpack(&data.get()[..len as _], &mut v, self.max_record_size()) {
 				Ok(()) => break data,
 				Err(e) => {
-					dbg!(chain);
 					self.record_unpack_failures.update(|x| x + 1);
 					blacklist.set(chain, true);
 					last_err = Some(Error::RecordUnpack(e));

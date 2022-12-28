@@ -346,7 +346,6 @@ impl<D: Dev> DevSet<D> {
 			if blacklist.get(i) {
 				continue;
 			}
-			dbg!(i);
 
 			// Do a binary search for the start device.
 			let node_i = chain
