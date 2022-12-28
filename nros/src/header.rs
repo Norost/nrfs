@@ -28,9 +28,8 @@ pub(crate) struct Header {
 	pub allocation_log: Record,
 
 	pub xxh3: u64le,
-	pub generation: u64le,
 
-	pub reserved: [u8; 256 - 144],
+	pub reserved: [u8; 256 - 136],
 
 	pub extra: [u8; 512 - 256],
 }
@@ -62,9 +61,8 @@ impl Default for Header {
 			allocation_log: Default::default(),
 
 			xxh3: Default::default(),
-			generation: Default::default(),
 
-			reserved: [0; 256 - 144],
+			reserved: [0; 256 - 136],
 
 			extra: [0; 512 - 256],
 		}
@@ -102,7 +100,7 @@ impl Header {
 		// Comparing other headers *shouldn't* be necessary unless
 		// we're deliberately being screwed with - in which case all
 		// bets are off anyways.
-		self.uid == other.uid && self.generation == other.generation
+		self.uid == other.uid
 	}
 }
 
@@ -144,7 +142,6 @@ impl fmt::Debug for Header {
 		f.field("allocation_log", &self.allocation_log);
 
 		f.field("xxh3", &self.xxh3);
-		f.field("generation", &self.generation);
 
 		f.finish_non_exhaustive()
 	}

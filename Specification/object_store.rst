@@ -74,7 +74,6 @@ Header
 ~~~~~~
 
 A header is placed at the start and end of a volume.
-A header has a variable size, up to 64 KiB.
 
 .. table:: FS Header
   :align: center
@@ -117,9 +116,7 @@ A header has a variable size, up to 64 KiB.
   +------+-------------------------------------------------------+
   |  128 |                         XXH3                          |
   +------+-------------------------------------------------------+
-  |  136 |                      Generation                       |
-  +------+-------------------------------------------------------+
-  |  144 |                                                       |
+  |  136 |                                                       |
   +------+                                                       |
   |  ... |                       Reserved                        |
   +------+                                                       |
@@ -180,6 +177,7 @@ A header has a variable size, up to 64 KiB.
 All bytes between 256 and 512 are free for use by the filesystem layer.
 
   When updating the headers, ensure the updates *do not* happen concurrently.
+  That is, update all the start headers first, then the end headers.
 
 
 Record

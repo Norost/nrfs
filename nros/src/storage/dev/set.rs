@@ -33,11 +33,6 @@ pub struct DevSet<D: Dev> {
 	block_count: u64,
 	/// The unique identifier of this filesystem.
 	uid: [u8; 16],
-	/// A counter that indicates the total amount of updates to this filesystem.
-	/// Wraps around (in a couple thousands of years).
-	///
-	/// Used to ensure data was properly flushed to all disks on each transaction.
-	generation: Cell<u64>,
 
 	pub allocation_log: Cell<Record>,
 	pub object_list: Cell<Record>,
@@ -122,7 +117,6 @@ impl<D: Dev> DevSet<D> {
 			compression,
 			block_count,
 			uid: *b" TODO TODO TODO ",
-			generation: 0.into(),
 			allocation_log: Default::default(),
 			object_list: Default::default(),
 		})
@@ -244,7 +238,6 @@ impl<D: Dev> DevSet<D> {
 
 			object_list: header.object_list.into(),
 			allocation_log: header.allocation_log.into(),
-			generation: u64::from(header.generation).into(),
 		};
 
 		// If any headers are broken, fix them now.
@@ -489,8 +482,6 @@ impl<D: Dev> DevSet<D> {
 			object_list: self.object_list.get(),
 
 			allocation_log: self.allocation_log.get(),
-
-			generation: self.generation.get().into(),
 
 			..Default::default()
 		};
