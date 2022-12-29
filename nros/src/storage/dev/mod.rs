@@ -13,8 +13,8 @@ mod mem;
 mod set;
 
 #[cfg(not(feature = "no-std"))]
-pub use fs::{FileDev, FileDevError};
-pub use mem::{MemDev, MemDevError};
+pub use fs::{FileAllocator, FileDev, FileDevError};
+pub use mem::{MemAllocator, MemDev, MemDevError};
 
 pub(crate) use set::{DevSet, Set256};
 

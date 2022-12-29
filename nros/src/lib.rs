@@ -4,6 +4,7 @@
 #![feature(hash_drain_filter)]
 #![feature(int_roundings)]
 #![feature(iterator_try_collect)]
+#![feature(map_try_insert)]
 #![feature(nonzero_min_max)]
 #![feature(pin_macro)]
 #![feature(slice_flatten)]
@@ -70,10 +71,51 @@ macro_rules! n2e {
 
 /// Tracing in debug mode only.
 macro_rules! trace {
-	($($arg:tt)*) => {{
+	($($arg:tt)*) => {
 		#[cfg(feature = "trace")]
-		eprintln!("[DEBUG] {}", format_args!($($arg)*));
-	}};
+		$crate::trace::print_debug(&format_args!($($arg)*));
+		let _t = $crate::trace::Trace::new();
+	};
+}
+
+#[cfg(not(feature = "trace"))]
+mod trace {
+	pub struct Trace;
+
+	impl Trace {
+		#[inline(always)]
+		pub fn new() {}
+	}
+}
+
+#[cfg(feature = "trace")]
+mod trace {
+	use core::{cell::Cell, fmt::Arguments};
+
+	thread_local! {
+		static DEPTH: Cell<usize> = Cell::new(0);
+	}
+
+	pub fn print_debug(args: &Arguments<'_>) {
+		DEPTH.with(|depth| {
+			eprintln!("[nros]{:>pad$} {}", "", args, pad = depth.get() * 2);
+		})
+	}
+
+	pub struct Trace;
+
+	impl Trace {
+		pub fn new() -> Self {
+			DEPTH.with(|depth| depth.update(|x| x + 1));
+			Self
+		}
+	}
+
+	impl Drop for Trace {
+		fn drop(&mut self) {
+			DEPTH.with(|depth| depth.update(|x| x - 1));
+		}
+	}
 }
 
 mod cache;

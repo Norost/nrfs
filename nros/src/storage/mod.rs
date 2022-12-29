@@ -143,7 +143,7 @@ where
 			.devices
 			.alloc(max_blks << self.block_size().to_raw())
 			.await?;
-		let mut rec = Record::pack(&data, buf.get_mut(), self.compression(), self.block_size());
+		let mut rec = Record::pack(data, buf.get_mut(), self.compression(), self.block_size());
 
 		// Strip unused blocks from the buffer
 		let blks = self.calc_block_count(rec.length.into());

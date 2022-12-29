@@ -2,6 +2,7 @@ pub mod fuzz;
 
 mod allocator;
 mod cache;
+mod concurrency;
 mod dev;
 mod raid;
 mod record;

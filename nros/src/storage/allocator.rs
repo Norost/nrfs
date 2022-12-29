@@ -150,6 +150,7 @@ impl Allocator {
 			return Some(0);
 		}
 		trace!("alloc {}", blocks);
+		//todo!();
 		for r in self.alloc_map.gaps(&(0..block_count)) {
 			if r.end - r.start >= blocks {
 				self.alloc_map.insert(r.start..r.start + blocks);

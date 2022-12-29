@@ -120,6 +120,7 @@ impl<'a> ResizeLock<'a> {
 		id: u64,
 	) -> impl Future<Output = ResizeLock<'a>> + 'a {
 		future::poll_fn(move |cx| {
+			return Poll::Ready(Self { data, id });
 			let mut d = data.borrow_mut();
 			let tree = d.data.get_mut(&id).expect("cache entry by id not present");
 			match &mut tree.lock {
@@ -139,6 +140,7 @@ impl<'a> ResizeLock<'a> {
 /// Release the lock.
 impl Drop for ResizeLock<'_> {
 	fn drop(&mut self) {
+		return;
 		let mut data = self.data.borrow_mut();
 		let tree = data
 			.data
