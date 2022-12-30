@@ -1,5 +1,6 @@
 mod entry;
 mod key;
+mod lock;
 mod lru;
 mod tree;
 mod tree_data;
@@ -19,10 +20,11 @@ use {
 	},
 	entry::Entry,
 	key::Key,
+	lock::ResizeLock,
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
 	std::collections::hash_map,
-	tree_data::{FmtTreeData, ReadWriteLock, ResizeLock, TreeData},
+	tree_data::{FmtTreeData, TreeData},
 };
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
@@ -50,6 +52,8 @@ pub(crate) struct CacheData {
 	///
 	/// If any wakers have been registered during the flush the entry will not be evicted.
 	flushing: FxHashMap<Key, Vec<Waker>>,
+	/// Trees that are being resized.
+	resizing: FxHashMap<u64, ResizeLock>,
 	/// Used object IDs.
 	used_objects_ids: RangeSet<u64>,
 	/// Whether we're already flushing.
@@ -77,6 +81,7 @@ impl fmt::Debug for CacheData {
 			.field("lrus", &self.lrus)
 			.field("fetching", &self.fetching)
 			.field("flushing", &self.flushing)
+			.field("resizing", &self.resizing)
 			.field("used_objects_ids", &self.used_objects_ids)
 			.field("is_flushing", &self.is_flushing)
 			.finish()
@@ -182,6 +187,7 @@ impl<D: Dev> Cache<D> {
 				},
 				fetching: Default::default(),
 				flushing: Default::default(),
+				resizing: Default::default(),
 				used_objects_ids,
 				is_flushing: false,
 			}),
@@ -250,12 +256,14 @@ impl<D: Dev> Cache<D> {
 
 	/// Create an object.
 	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
+		trace!("create");
 		let id = self.create_many::<1>().await?;
 		Tree::new(self, id).await
 	}
 
 	/// Create many adjacent objects.
 	pub async fn create_many<const N: usize>(&self) -> Result<u64, Error<D>> {
+		trace!("create_many {}", N);
 		// Allocate
 		let id = self.alloc_ids(N.try_into().unwrap());
 
@@ -272,6 +280,7 @@ impl<D: Dev> Cache<D> {
 
 	/// Get an object.
 	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
+		trace!("get {}", id);
 		Tree::new(self, id).await
 	}
 
@@ -301,13 +310,9 @@ impl<D: Dev> Cache<D> {
 		// as there is no await point in between the period the lock is released.
 
 		// Move
-		{
-			let _locks_from = ResizeLock::new(&self.data, from).await;
-			let _locks_to = ResizeLock::new(&self.data, to).await;
-			let rec = self.get_object_root(from).await?;
-			self.set_object_root(to, &rec).await?;
-			self.set_object_root(from, &Default::default()).await?;
-		}
+		let rec = self.get_object_root(from).await?;
+		self.set_object_root(to, &rec).await?;
+		self.set_object_root(from, &Default::default()).await?;
 
 		// Move object data & fix LRU entries.
 		{
@@ -482,25 +487,18 @@ impl<D: Dev> Cache<D> {
 
 	/// Fetch an entry and immediately destroy it.
 	///
-	/// # Panics
+	/// # Note
 	///
-	/// If the entry is not present.
-	async fn destroy_entry(
-		&self,
-		key: Key,
-		record: &Record,
-		max_depth: u8,
-	) -> Result<Vec<u8>, Error<D>> {
-		self.fetch_entry(key, record, max_depth).await?;
-		let entry = key
-			.remove_entry(&mut self.data.borrow_mut().data)
-			.expect("no entry");
-		self.data
-			.borrow_mut()
-			.lrus
-			.adjust_cache_removed_entry(&entry);
+	/// Nothing may attempt to fetch this entry during or after this call!
+	fn destroy_entry(&self, key: Key, record: &Record) {
+		// Check if the entry is present.
+		// If yes, remove it.
+		// If not, don't bother fetching it as that is a waste of time.
 		self.store.destroy(record);
-		Ok(entry.data)
+		let mut data = self.data.borrow_mut();
+		if let Some(entry) = key.remove_entry(&mut data.data) {
+			data.lrus.adjust_cache_removed_entry(&entry);
+		}
 	}
 
 	/// Get a mutable reference to an object's data.
@@ -551,6 +549,41 @@ impl<D: Dev> Cache<D> {
 		}
 		data.is_flushing = true;
 
+		trace!("flush");
+
+		let update_record = |key: Key, rec: Record| async move {
+			// Store a record in the appropriate place.
+			//
+			// First check if the tree is being resized.
+			// If so, check if the record is out of range.
+			// If it is, it must be destroyed at a later point.
+			// For efficiency and ease, avoid fetching its parent record and store it in a queue
+			// to be destroyed later.
+			let mut data = self.data.borrow_mut();
+			if let Some(lock) = data.resizing.get_mut(&key.id()).and_then(|lock| {
+				// Determine maximum offset at given level.
+				// If new_len is 0, then the entry is guaranteed to be out of range.
+				if lock.new_len == 0 {
+					Some(lock)
+				} else {
+					let max_offset =
+						tree::calc_offset(self.max_record_size(), lock.new_len - 1, key.depth());
+					(key.offset() > max_offset).then(|| lock)
+				}
+			}) {
+				lock.destroy_records
+					.insert((key.depth(), key.offset()), rec);
+			} else {
+				drop(data);
+				Tree::new(self, key.id())
+					.await?
+					.update_record(key.depth(), key.offset(), rec)
+					.await?;
+				data = self.data.borrow_mut();
+			};
+			Ok(data)
+		};
+
 		while data.lrus.dirty.cache_size > data.lrus.dirty.cache_max {
 			// Remove last written to entry.
 			let &key = data
@@ -559,16 +592,6 @@ impl<D: Dev> Cache<D> {
 				.lru
 				.last()
 				.expect("no nodes despite non-zero write cache size");
-
-			// Avoid flushing during a resize, as it can mess up the reference to the root record.
-			if data
-				.data
-				.get(&key.id())
-				.expect("invalid object")
-				.is_resize_locked()
-			{
-				break; // TODO continue with another record or object.
-			}
 
 			// Prevent record from being modified while flushing.
 			// This also briefly prevents reads but w/e.
@@ -592,13 +615,9 @@ impl<D: Dev> Cache<D> {
 			let rec = self.store.write(&entry.data).await?;
 			drop(entry); // FIXME RefMut across await point!
 
-			// Store the record in the appropriate place.
-			let obj = Tree::new(self, key.id()).await?;
-			obj.update_record(key.depth(), key.offset(), rec).await?;
-			drop(obj);
+			data = update_record(key, rec).await?;
 
 			// Wake tasks that are waiting for this entry.
-			data = self.data.borrow_mut();
 			let wakers = data
 				.flushing
 				.remove(&key)
@@ -617,15 +636,6 @@ impl<D: Dev> Cache<D> {
 				.last()
 				.expect("no nodes despite non-zero write cache size");
 
-			if data
-				.data
-				.get(&key.id())
-				.expect("invalid object")
-				.is_resize_locked()
-			{
-				break; // TODO continue with another record or object.
-			}
-
 			drop(data);
 			let entry = self.remove_entry(key).expect("entry not present");
 
@@ -633,13 +643,10 @@ impl<D: Dev> Cache<D> {
 				// Store record.
 				// TODO try to do concurrent writes.
 				let rec = self.store.write(&entry.data).await?;
-
-				// Store the record in the appropriate place.
-				let obj = Tree::new(self, key.id()).await?;
-				obj.update_record(key.depth(), key.offset(), rec).await?;
+				data = update_record(key, rec).await?;
+			} else {
+				data = self.data.borrow_mut();
 			}
-
-			data = self.data.borrow_mut();
 		}
 
 		data.is_flushing = false;

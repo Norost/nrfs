@@ -81,7 +81,7 @@ impl Key {
 		let level = &mut tree.data[usize::from(self.depth())];
 		let entry = level.remove(&self.offset())?;
 		// If the tree has no cached records left, remove it.
-		if level.is_empty() && tree.data.iter().all(|lvl| lvl.is_empty()) {
+		if level.is_empty() && tree.is_empty() {
 			data.remove(&self.id());
 		}
 		Some(entry)

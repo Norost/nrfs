@@ -11,6 +11,10 @@ edition = "2021"
 # usage of each transaction.
 never-overwrite-in-transaction = []
 trace = []
+# Track allocations
+#
+# This saves the stack trace for each allocation.
+debug-trace-alloc = []
 
 [dependencies.arena]
 git = "https://git.sr.ht/~demindiro/arena"

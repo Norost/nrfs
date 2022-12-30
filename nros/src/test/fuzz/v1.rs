@@ -308,8 +308,8 @@ fn cache_move_object_stale_lru() {
 		[
 			Create { size: 18446721160059038699 },
 			Create { size: 18442240474082180864 },
-			Move { from_idx: 1600085852, to_idx: 1600085855 },
-			Write { idx: 1600085855, offset: 6872316419617283935, amount: 24415 },
+			Move { from_idx: 0, to_idx: 1 },
+			Write { idx: 1, offset: 6872316419617283935, amount: 24415 },
 		],
 	)
 	.run()

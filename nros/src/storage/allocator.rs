@@ -39,6 +39,10 @@ pub(super) struct Allocator {
 	///
 	/// Used for debugging.
 	pub(super) statistics: Statistics,
+	#[cfg(feature = "debug-trace-alloc")]
+	debug_alloc_traces: rustc_hash::FxHashMap<u64, std::backtrace::Backtrace>,
+	#[cfg(feature = "debug-trace-alloc")]
+	debug_dealloc_traces: rustc_hash::FxHashMap<u64, std::backtrace::Backtrace>,
 }
 
 /// Statistics for this session.
@@ -65,6 +69,10 @@ impl Default for Allocator {
 			dirty_map: Default::default(),
 			stack: Default::default(),
 			statistics: Default::default(),
+			#[cfg(feature = "debug-trace-alloc")]
+			debug_alloc_traces: Default::default(),
+			#[cfg(feature = "debug-trace-alloc")]
+			debug_dealloc_traces: Default::default(),
 		}
 	}
 }
@@ -131,10 +139,10 @@ impl Allocator {
 			}
 
 			// Next record
-			record = util::get_record(&data, 0);
+			record = util::get_record(&data, 0).unwrap_or_default();
 		}
 
-		trace!("    ==>  {:?}", &alloc_map);
+		trace!("==>  {:?}", &alloc_map);
 
 		Ok(Self {
 			alloc_map,
@@ -142,6 +150,10 @@ impl Allocator {
 			dirty_map: Default::default(),
 			stack,
 			statistics: Default::default(),
+			#[cfg(feature = "debug-trace-alloc")]
+			debug_alloc_traces: Default::default(),
+			#[cfg(feature = "debug-trace-alloc")]
+			debug_dealloc_traces: Default::default(),
 		})
 	}
 
@@ -157,9 +169,21 @@ impl Allocator {
 				self.dirty_map.insert(r.start..r.start + blocks);
 				self.statistics.allocations += 1;
 				self.statistics.allocated_blocks += blocks;
+				#[cfg(feature = "debug-trace-alloc")]
+				{
+					for i in r.clone() {
+						self.debug_dealloc_traces.remove(&i);
+					}
+					let r = self
+						.debug_alloc_traces
+						.insert(r.start, std::backtrace::Backtrace::capture());
+					assert!(r.is_none(), "double alloc");
+				}
+				trace!("--> {}", r.start);
 				return Some(r.start);
 			}
 		}
+		trace!("--> N/A");
 		None
 	}
 
@@ -170,6 +194,18 @@ impl Allocator {
 			return;
 		}
 		trace!("free {}, len {}", start, blocks);
+
+		#[cfg(feature = "debug-trace-alloc")]
+		{
+			self.debug_alloc_traces.remove(&start);
+			let r = self
+				.debug_dealloc_traces
+				.insert(start, std::backtrace::Backtrace::capture());
+			if let Some(r) = r {
+				panic!("double free! Previous deallocation at:\n{:#}", r);
+			}
+		}
+
 		// FIXME really stupid
 		for i in start..start + blocks {
 			debug_assert!(self.alloc_map.contains(&i), "double free (lba: {})", i);
@@ -202,10 +238,18 @@ impl Allocator {
 	where
 		D: Dev,
 	{
-		trace!("save");
-		trace!("  alloc  {:?}", &self.alloc_map);
-		trace!("  dirty  {:?}", &self.dirty_map);
-		trace!("  free   {:?}", &self.free_map);
+		{
+			trace!("save");
+		}
+		{
+			trace!("  alloc  {:?}", &self.alloc_map);
+		}
+		{
+			trace!("  dirty  {:?}", &self.dirty_map);
+		}
+		{
+			trace!("  free   {:?}", &self.free_map);
+		}
 
 		// Update map
 		// TODO it would be nice if we could avoid a Clone.

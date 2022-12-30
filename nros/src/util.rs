@@ -1,15 +1,21 @@
 use {crate::Record, core::mem};
 
 /// Get a record from a slice of raw data.
-pub fn get_record(data: &[u8], index: usize) -> Record {
+///
+/// Returns `None` if the index is completely out of range,
+/// i.e. a zeroed record would be returned.
+pub fn get_record(data: &[u8], index: usize) -> Option<Record> {
 	let offt = index * mem::size_of::<Record>();
+	if offt >= data.len() {
+		return None;
+	}
 
 	let (start, end) = (offt, offt + mem::size_of::<Record>());
 	let (start, end) = (start.min(data.len()), end.min(data.len()));
 
 	let mut record = Record::default();
 	record.as_mut()[..end - start].copy_from_slice(&data[start..end]);
-	record
+	Some(record)
 }
 
 /// Cut off trailing zeroes from [`Vec`].

@@ -313,8 +313,45 @@ fn grow_write_shrink_flush_many() {
 	})
 }
 
+/// Depth = 1
 #[test]
-fn grow_write_flush_shrink_flush_many() {
+fn grow_write_flush_shrink_flush_many_d1() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+
+		for _ in 0..200 {
+			obj.resize(1).await.unwrap();
+			obj.write(0, &[1]).await.unwrap();
+			clear(&s).await;
+			obj.resize(0).await.unwrap();
+			clear(&s).await;
+		}
+	})
+}
+
+/// Depth = 2
+#[test]
+fn grow_write_flush_shrink_flush_many_d2() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+
+		for _ in 0..200 {
+			obj.resize((1 << 10) + 1).await.unwrap();
+			obj.write(0, &[1]).await.unwrap();
+			clear(&s).await;
+			obj.resize(0).await.unwrap();
+			clear(&s).await;
+		}
+	})
+}
+
+/// Depth > 2
+#[test]
+fn grow_write_flush_shrink_flush_many_deep() {
 	run(async {
 		let s = new(MaxRecordSize::K1).await;
 
@@ -325,6 +362,21 @@ fn grow_write_flush_shrink_flush_many() {
 			obj.write(0, &[1]).await.unwrap();
 			clear(&s).await;
 			obj.resize(0).await.unwrap();
+			clear(&s).await;
+		}
+	})
+}
+
+#[test]
+fn write_flush_many() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+		obj.resize(1).await.unwrap();
+
+		for _ in 0..200 {
+			obj.write(0, &[1]).await.unwrap();
 			clear(&s).await;
 		}
 	})

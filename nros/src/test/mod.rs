@@ -35,7 +35,7 @@ async fn new_cap(
 }
 
 async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev> {
-	new_cap(max_record_size, 16, 4096, 4096).await
+	new_cap(max_record_size, 32, 4096, 4096).await
 }
 
 /// Create new object store and poll future ad infinitum.
