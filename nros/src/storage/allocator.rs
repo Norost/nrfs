@@ -226,6 +226,15 @@ impl Allocator {
 	/// Used to detect use-after-frees.
 	#[cfg(debug_assertions)]
 	pub fn assert_alloc(&self, start: u64, blocks: u64) {
+		#[cfg(feature = "debug-trace-alloc")]
+		{
+			if let Some(trace) = self.debug_dealloc_traces.get(&start) {
+				panic!("use-after-free. Freed at\n{}", trace);
+			}
+			if !self.debug_alloc_traces.contains_key(&start) {
+				panic!("use of unallocated memory");
+			}
+		}
 		// FIXME really stupid
 		for i in start..start + blocks {
 			debug_assert!(self.alloc_map.contains(&i), "use-after-free (lba: {})", i);

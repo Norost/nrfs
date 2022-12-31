@@ -56,6 +56,17 @@ pub struct ResizeGuard<'a> {
 impl Drop for ResizeGuard<'_> {
 	fn drop(&mut self) {
 		trace!("ResizeGuard::drop");
+
+		if cfg!(debug_assertions) && !std::thread::panicking() {
+			let data = self.data.borrow_mut();
+			let slf = data.resizing.get(&self.id).unwrap();
+			assert!(
+				slf.destroy_records.is_empty(),
+				"not all records were destroyed\n{:#?}",
+				&slf.destroy_records
+			);
+		}
+
 		// TODO waking literally every single one of them is inefficient.
 		// It is easy though so w/e.
 		self.data

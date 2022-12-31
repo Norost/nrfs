@@ -65,6 +65,7 @@ impl<D: Dev> Cache<D> {
 		&self,
 		id: u64,
 	) -> Result<(ReadWriteGuard<'_>, Record), Error<D>> {
+		trace!("lock_readwrite {}", id);
 		// Acquire lock.
 		let lock = future::poll_fn(move |cx| {
 			// Use 0 as depth until we can safely read the root.
@@ -91,7 +92,8 @@ impl<D: Dev> Cache<D> {
 	pub(super) async fn lock_root_replace(
 		&self,
 		id: u64,
-	) -> Result<(ResizeGuard<'_>, Record), Error<D>> {
+	) -> Result<(RootReplaceGuard<'_>, Record), Error<D>> {
+		trace!("lock_root_replace {}", id);
 		let lock = future::poll_fn(move |cx| {
 			// Use 0 as depth until we can safely read the root.
 			let mut tree = self.get_object_entry_mut(id, 0);
@@ -105,7 +107,7 @@ impl<D: Dev> Cache<D> {
 			}
 			// Acquire a root_replace lock.
 			tree.active_ops = -1;
-			Poll::Ready(ResizeGuard { data: &self.data, id })
+			Poll::Ready(RootReplaceGuard { data: &self.data, id })
 		})
 		.await;
 		let root = box_fut(self.get_object_root(id));
@@ -128,6 +130,7 @@ pub struct ReadWriteGuard<'a> {
 
 impl Drop for ReadWriteGuard<'_> {
 	fn drop(&mut self) {
+		trace!("ReadWriteGuard::drop {}", self.id);
 		let mut data = self.data.borrow_mut();
 		let tree = data.data.get_mut(&self.id).expect("no tree");
 		tree.active_ops -= 1;
@@ -139,13 +142,14 @@ impl Drop for ReadWriteGuard<'_> {
 }
 
 /// Resize guard on a tree.
-pub struct ResizeGuard<'a> {
+pub struct RootReplaceGuard<'a> {
 	data: &'a RefCell<CacheData>,
 	id: u64,
 }
 
-impl Drop for ResizeGuard<'_> {
+impl Drop for RootReplaceGuard<'_> {
 	fn drop(&mut self) {
+		trace!("RootReplaceGuard::drop {}", self.id);
 		let mut data = self.data.borrow_mut();
 		let tree = data.data.get_mut(&self.id).expect("no tree");
 		if cfg!(debug_assertions) && !std::thread::panicking() {

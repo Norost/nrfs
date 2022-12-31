@@ -254,6 +254,22 @@ where
 			record_unpack_failures
 		}
 	}
+
+	/// Ensure all blocks in a range are allocated.
+	///
+	/// Used to detect use-after-frees.
+	#[cfg(debug_assertions)]
+	pub fn assert_alloc(&self, record: &Record) {
+		if record.length > 0 {
+			let blocks = self
+				.calc_block_count(record.length.into())
+				.try_into()
+				.unwrap();
+			self.allocator
+				.borrow_mut()
+				.assert_alloc(record.lba.into(), blocks)
+		}
+	}
 }
 
 #[derive(Clone, Copy, Debug)]

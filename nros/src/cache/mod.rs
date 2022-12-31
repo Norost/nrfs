@@ -286,7 +286,7 @@ impl<D: Dev> Cache<D> {
 
 	/// Remove an entry from the cache.
 	///
-	/// This does *not* flush the entry!
+	/// This does *not* flush the entry if it is dirty!
 	fn remove_entry(&self, key: Key) -> Option<Entry> {
 		let data = { &mut *self.data.borrow_mut() };
 		let entry = key.remove_entry(&mut data.data)?;
@@ -387,6 +387,12 @@ impl<D: Dev> Cache<D> {
 		record: &Record,
 		max_depth: u8,
 	) -> Result<EntryRef<'a, D>, Error<D>> {
+		trace!("fetch_entry {:?} <- {:?}", key, record.lba);
+
+		// Manual sanity check in case entry is already present and Store::read is not called.
+		#[cfg(debug_assertions)]
+		self.store.assert_alloc(record);
+
 		// We take 4 steps:
 		//
 		// 1. First check if the entry is already present.
@@ -485,18 +491,29 @@ impl<D: Dev> Cache<D> {
 		.await
 	}
 
+	/// Try to get an entry directly.
+	fn get_entry(&self, key: Key) -> Option<EntryRef<'_, D>> {
+		let data = self.data.borrow_mut();
+		let (data, lrus) = RefMut::map_split(data, |d| (&mut d.data, &mut d.lrus));
+		RefMut::filter_map(data, |d| key.get_entry_mut(d))
+			.map(|entry| EntryRef { cache: self, entry, key, lrus })
+			.ok()
+	}
+
 	/// Fetch an entry and immediately destroy it.
 	///
 	/// # Note
 	///
 	/// Nothing may attempt to fetch this entry during or after this call!
 	fn destroy_entry(&self, key: Key, record: &Record) {
+		trace!("destroy_entry {:?}", key);
 		// Check if the entry is present.
 		// If yes, remove it.
 		// If not, don't bother fetching it as that is a waste of time.
 		self.store.destroy(record);
 		let mut data = self.data.borrow_mut();
 		if let Some(entry) = key.remove_entry(&mut data.data) {
+			dbg!();
 			data.lrus.adjust_cache_removed_entry(&entry);
 		}
 	}
@@ -563,7 +580,7 @@ impl<D: Dev> Cache<D> {
 			if let Some(lock) = data.resizing.get_mut(&key.id()).and_then(|lock| {
 				// Determine maximum offset at given level.
 				// If new_len is 0, then the entry is guaranteed to be out of range.
-				if lock.new_len == 0 {
+				if key.depth() >= tree::depth(self.max_record_size(), lock.new_len) {
 					Some(lock)
 				} else {
 					let max_offset =

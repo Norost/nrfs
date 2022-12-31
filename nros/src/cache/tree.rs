@@ -369,6 +369,15 @@ impl<'a, D: Dev> Tree<'a, D> {
 				record.length,
 			);
 
+			// Check if this record has been substituted with a record present in the lock cache
+			let mut data = cache.data.borrow_mut();
+			let lock = data.resizing.get_mut(&key.id()).expect("no resizing lock");
+			let record = lock
+				.destroy_records
+				.remove(&(key.depth(), key.offset()))
+				.unwrap_or(*record);
+			drop(data);
+
 			// The actually recursive part, which does require boxing the future
 			#[async_recursion::async_recursion(?Send)]
 			async fn f<D: Dev>(
@@ -377,17 +386,12 @@ impl<'a, D: Dev> Tree<'a, D> {
 				record: &Record,
 				max_depth: u8,
 			) -> Result<(), Error<D>> {
-				// Check if this record has been substituted with a record present in the lock cache
-				let mut data = cache.data.borrow_mut();
-				let lock = data.resizing.get_mut(&key.id()).expect("no resizing lock");
-				let rec = lock.destroy_records.remove(&(key.depth(), key.offset()));
-				let record = rec.as_ref().unwrap_or(record);
-				drop(data);
-
 				// We're a parent node, destroy children.
 				let records_per_parent_p2 = cache.max_record_size().to_raw() - RECORD_SIZE_P2;
+				let mut record = *record;
 				for index in 0.. {
-					let entry = cache.fetch_entry(key, record, max_depth).await?;
+					let entry;
+					(entry, record) = fetch_entry(cache, key, &record, max_depth).await?;
 					let Some(rec) = get_record(&entry.data, index) else { break };
 					drop(entry);
 					let offt =
@@ -399,12 +403,90 @@ impl<'a, D: Dev> Tree<'a, D> {
 			}
 
 			if key.depth() > 0 && record.length > 0 {
-				f(cache, key, record, max_depth).await?
+				f(cache, key, &record, max_depth).await?
 			}
 
-			cache.destroy_entry(key, record);
+			cache.destroy_entry(key, &record);
 
 			Ok(())
+		}
+
+		/// Fetch an entry.
+		///
+		/// Unlike [`Cache::fetch_entry`], this also checks `CacheData::resizing` for out-of-range
+		/// entries that have been flushed.
+		///
+		/// Returns the record, which may be different if it was indeed flushed.
+		async fn fetch_entry<'a, D: Dev>(
+			cache: &'a Cache<D>,
+			key: Key,
+			record: &Record,
+			max_depth: u8,
+		) -> Result<(EntryRef<'a, D>, Record), Error<D>> {
+			trace!("shrink::fetch_entry {:?} <- {:?}", key, record.lba);
+			// Check lock first for new records.
+			let mut data = cache.data.borrow_mut();
+			let lock = data.resizing.get_mut(&key.id()).expect("no resizing lock");
+			let record = lock
+				.destroy_records
+				.remove(&(key.depth(), key.offset()))
+				.unwrap_or(*record);
+			drop(data);
+			// Fetch
+			cache
+				.fetch_entry(key, &record, max_depth)
+				.await
+				.map(|e| (e, record))
+		}
+
+		/// Get a leftmost entry at a specific depth.
+		///
+		/// Unlike [`Tree::get`], this also checks `CacheData::resizing` for out-of-range
+		/// entries that have been flushed.
+		async fn get_left<'a, D: Dev>(
+			cache: &'a Cache<D>,
+			root: &Record,
+			key: Key,
+			max_depth: u8,
+		) -> Result<EntryRef<'a, D>, Error<D>> {
+			trace!("shrink::get_left {:?}", key);
+			// Find first ancestor of new root (or the root itself)
+			let data = cache.data.borrow_mut();
+			let (mut obj, lrus) = RefMut::map_split(data, |d| {
+				(
+					d.data
+						.entry(key.id())
+						.or_insert_with(|| TreeData::new(max_depth)),
+					&mut d.lrus,
+				)
+			});
+
+			let (mut depth, mut record) = (max_depth - 1, *root);
+			for d in key.depth()..max_depth {
+				match RefMut::filter_map(obj, |obj| obj.data[usize::from(d)].get_mut(&0)) {
+					Ok(entry) => {
+						if d == key.depth() {
+							return Ok(EntryRef { cache, entry, key, lrus });
+						}
+						record = get_record(&entry.data, 0).unwrap_or_default();
+						depth = d - 1;
+						break;
+					}
+					Err(o) => obj = o,
+				}
+			}
+			// Recurse downwards
+			debug_assert!(depth < max_depth);
+			debug_assert!(depth >= key.depth());
+			loop {
+				let k = Key::new(key.id(), depth, 0);
+				let (entry, _) = fetch_entry(cache, k, &record, max_depth).await?;
+				if depth == key.depth() {
+					return Ok(entry);
+				}
+				record = get_record(&entry.data, 0).unwrap_or_default();
+				depth -= 1;
+			}
 		}
 
 		let rec_size_p2 = self.max_record_size().to_raw();
@@ -415,26 +497,34 @@ impl<'a, D: Dev> Tree<'a, D> {
 		let new_depth = depth(self.max_record_size(), new_len);
 
 		debug_assert!(cur_len > new_len, "new_len is equal or larger than cur len");
+		dbg!(cur_depth, new_depth);
 
 		// 1. Replace root
 		let (cur_root, new_root) = {
 			// Lock to prevent reads & writes while replacing root.
 			let (_lock, cur_root) = self.cache.lock_root_replace(self.id).await?;
 			// Find new root.
+			// Don't use Self::get as we need to check for flushed entry in the resize lock.
 			let mut new_root = if new_depth == 0 {
 				Record::default()
 			} else if new_depth == cur_depth {
 				cur_root
 			} else {
-				let rec = self.get(new_depth, 0).await?;
-				get_record(&rec.data, 0).unwrap_or_default()
+				let entry = get_left(
+					self.cache,
+					&cur_root,
+					Key::new(self.id, new_depth, 0),
+					cur_depth,
+				)
+				.await?;
+				get_record(&entry.data, 0).unwrap_or_default()
 			};
 			// Set total length and references
 			new_root.total_length = new_len.into();
 			new_root.references = cur_root.references;
 			// Set root.
 			self.cache.set_object_root(self.id, &new_root).await?;
-			(cur_root, new_root)
+			dbg!(cur_root, new_root)
 		};
 
 		// 2. Wipe out-of-range leaves.
@@ -462,21 +552,102 @@ impl<'a, D: Dev> Tree<'a, D> {
 		{
 			let mut root = cur_root;
 			for d in (new_depth.max(1)..cur_depth).rev() {
+				dbg!(&root);
+				dbg!(d);
 				// Destroy all subtrees except the leftmost one.
 				let key = Key::new(self.id, d, 0);
 				for i in 1.. {
-					let entry = self.cache.fetch_entry(key, &root, cur_depth).await?;
+					let entry;
+					(entry, root) = fetch_entry(self.cache, key, &root, cur_depth).await?;
 					let Some(record) = get_record(&entry.data, i) else { break };
 					drop(entry);
 					let k = Key::new(self.id, d - 1, i.try_into().unwrap());
 					destroy(self.cache, k, &record, cur_depth).await?;
 				}
 				// Replace & destroy the root.
-				let entry = self.cache.fetch_entry(key, &root, cur_depth).await?;
+				let entry;
+				(entry, root) = fetch_entry(self.cache, key, &root, cur_depth).await?;
 				let record = get_record(&entry.data, 0).unwrap_or_default();
 				drop(entry);
 				self.cache.destroy_entry(key, &root);
 				root = record;
+
+				// Destroy other subtrees that may be dangling on the same level.
+				// Collect offsets to guarantee O(n) runtime.
+				let offsets = {
+					let data = &mut *self.cache.data.borrow_mut();
+					data.data
+						.entry(self.id)
+						.or_insert_with(|| TreeData::new(new_depth))
+						.data[usize::from(d)]
+					.keys()
+					.copied()
+					.chain(
+						data.resizing
+							.get(&self.id)
+							.unwrap()
+							.destroy_records
+							.keys()
+							.copied()
+							.filter(|&(depth, offt)| depth == d)
+							.map(|(_, offt)| offt),
+					)
+					.collect::<Vec<_>>()
+				};
+
+				for offset in offsets {
+					let key = Key::new(self.id, d, offset);
+					let mut record = None;
+					// Destroy children.
+					for i in 0.. {
+						let entry = if let Some(e) = self.cache.get_entry(key) {
+							e
+						} else {
+							// If it's not in the cache, it has been flushed.
+							// Since it was still in the cache it *had* to be a dirty record.
+							// Since it was a dirty record, a reference is stored in the resize lock.
+							// Check lock first for new records.
+							let rec = if let Some(r) = record {
+								r
+							} else {
+								let mut data = self.cache.data.borrow_mut();
+								let lock =
+									data.resizing.get_mut(&key.id()).expect("no resizing lock");
+								let rec = lock
+									.destroy_records
+									.remove(&(key.depth(), key.offset()))
+									.expect("no entry in resize lock");
+								*record.insert(rec)
+							};
+							self.cache.fetch_entry(key, &rec, cur_depth).await?
+						};
+						let Some(record) = get_record(&entry.data, i) else { break };
+						drop(entry);
+						let offt = (offset << self.max_record_size().to_raw() - RECORD_SIZE_P2)
+							+ u64::try_from(i).unwrap();
+						let k = Key::new(self.id, d - 1, offt);
+						dbg!();
+						destroy(self.cache, k, &record, cur_depth).await?;
+						dbg!();
+					}
+					// Remove the entry if it is still present.
+					if self.cache.remove_entry(key).is_none() {
+						// If it's not in the cache, it has been flushed.
+						// ditto ditto ditto
+						let rec = if let Some(r) = record {
+							r
+						} else {
+							let mut data = self.cache.data.borrow_mut();
+							let lock = data.resizing.get_mut(&key.id()).expect("no resizing lock");
+							let rec = lock
+								.destroy_records
+								.remove(&(key.depth(), key.offset()))
+								.expect("no entry in resize lock");
+							*record.insert(rec)
+						};
+						self.cache.store.destroy(&rec);
+					}
+				}
 			}
 
 			// a. The case of new_depth == 0 must be handled specially.
@@ -485,6 +656,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				self.cache.destroy_entry(key, &root);
 			}
 		}
+		dbg!();
 
 		// 4. Adjust `TreeData` levels array size, if present.
 		if let Some(obj) = self.cache.data.borrow_mut().data.get_mut(&self.id) {
@@ -502,9 +674,11 @@ impl<'a, D: Dev> Tree<'a, D> {
 			v.resize_with(new_depth.into(), Default::default);
 			obj.data = v.into();
 		}
+		dbg!();
 
 		// 5. Trim parent records.
 		for d in (1..new_depth).rev() {
+			dbg!(&d, &self.cache.data.borrow().resizing);
 			// Determine max valid offset for current record.
 			let max_offset = calc_offset(self.max_record_size(), new_len - 1, d);
 
@@ -520,24 +694,74 @@ impl<'a, D: Dev> Tree<'a, D> {
 			//
 			// Collecting the offsets beforehand results in O(n) runtime at a relatively small O(n)
 			// memory cost.
-			let offsets = self.cache.get_object_entry_mut(self.id, new_depth).data[usize::from(d)]
+			let offsets = {
+				let data = &mut *self.cache.data.borrow_mut();
+				data.data
+					.entry(self.id)
+					.or_insert_with(|| TreeData::new(new_depth))
+					.data[usize::from(d)]
 				.keys()
 				.copied()
 				.filter(|&offt| offt > max_offset)
-				.collect::<Vec<_>>();
+				.chain(
+					data.resizing
+						.get(&self.id)
+						.unwrap()
+						.destroy_records
+						.keys()
+						.copied()
+						.filter(|&(depth, offt)| depth == d && offt > max_offset)
+						.map(|(_, offt)| offt),
+				)
+				.collect::<Vec<_>>()
+			};
 
 			// Destroy all subtrees.
 			for offset in offsets {
-				// Guess we'll have to exceed cache limits this once...
-				// TODO would be nice if we didn't have to though, right?
-				let Some(entry) = self.cache.remove_entry(Key::new(self.id, d, offset))
-					else { continue };
+				let key = Key::new(self.id, d, offset);
+				let mut record = None;
 				for index in 0.. {
+					let entry = if let Some(e) = self.cache.get_entry(key) {
+						e
+					} else {
+						// If it's not in the cache, it has been flushed.
+						// ditto ditto ditto
+						let rec = if let Some(r) = record {
+							r
+						} else {
+							let mut data = self.cache.data.borrow_mut();
+							let lock = data.resizing.get_mut(&key.id()).expect("no resizing lock");
+							let rec = lock
+								.destroy_records
+								.remove(&(key.depth(), key.offset()))
+								.expect("no entry in resize lock");
+							*record.insert(rec)
+						};
+						self.cache.fetch_entry(key, &rec, cur_depth).await?
+					};
 					let Some(rec) = get_record(&entry.data, index) else { break };
+					drop(entry);
 					let offt =
 						(offset << rec_size_p2 - RECORD_SIZE_P2) + u64::try_from(index).unwrap();
 					let k = Key::new(self.id, d - 1, offt);
 					destroy(self.cache, k, &rec, new_depth).await?;
+				}
+				// Remove the entry if it is still present.
+				if self.cache.remove_entry(key).is_none() {
+					// If it's not in the cache, it has been flushed.
+					// ditto ditto ditto
+					let rec = if let Some(r) = record {
+						r
+					} else {
+						let mut data = self.cache.data.borrow_mut();
+						let lock = data.resizing.get_mut(&key.id()).expect("no resizing lock");
+						let rec = lock
+							.destroy_records
+							.remove(&(key.depth(), key.offset()))
+							.expect("no entry in resize lock");
+						*record.insert(rec)
+					};
+					self.cache.store.destroy(&rec);
 				}
 			}
 
@@ -575,6 +799,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 					.await?;
 			}*/
 		}
+		dbg!();
 
 		// 6. Trim rightmost leaf.
 		{
@@ -586,6 +811,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 					.await?;
 			}
 		}
+		dbg!();
 
 		// Presto, at last
 		Ok(())
