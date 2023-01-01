@@ -1,6 +1,9 @@
-pub type Idx = arena::Handle<u8>;
+pub type Gen = u8;
+//pub type Gen = ();
+pub type Idx = arena::Handle<Gen>;
 
 const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
+//const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
 
 #[derive(Debug)]
 struct Node<V> {
@@ -24,7 +27,7 @@ pub struct LruList<V> {
 	///
 	/// An arena is used to reduce memory fragmentation and allow the use of smaller indices
 	/// compared to pointers.
-	nodes: arena::Arena<Node<V>, u8>,
+	nodes: arena::Arena<Node<V>, Gen>,
 }
 
 impl<V> Default for LruList<V> {

@@ -50,7 +50,7 @@ impl Key {
 	) -> Option<&'a mut Entry> {
 		data.get_mut(&self.id())
 			.map(|tree| &mut tree.data[usize::from(self.depth())])
-			.and_then(|level| level.get_mut(&self.offset()))
+			.and_then(|level| level.entries.get_mut(&self.offset()))
 	}
 
 	/// Use this `Key` to insert an entry in a cache.
@@ -67,6 +67,7 @@ impl Key {
 		data.entry(self.id())
 			.or_insert(TreeData::new(max_depth))
 			.data[usize::from(self.depth())]
+		.entries
 		.try_insert(self.offset(), entry)
 		.expect("entry was already present")
 	}
@@ -79,9 +80,9 @@ impl Key {
 	pub fn remove_entry<'a>(&self, data: &'a mut FxHashMap<u64, TreeData>) -> Option<Entry> {
 		let tree = data.get_mut(&self.id())?;
 		let level = &mut tree.data[usize::from(self.depth())];
-		let entry = level.remove(&self.offset())?;
+		let entry = level.entries.remove(&self.offset())?;
 		// If the tree has no cached records left, remove it.
-		if level.is_empty() && tree.is_empty() {
+		if level.entries.is_empty() && tree.is_empty() {
 			data.remove(&self.id());
 		}
 		Some(entry)

@@ -18,7 +18,7 @@ use {
 		pin::Pin,
 		task::{Poll, Waker},
 	},
-	entry::Entry,
+	entry::{Entry, EntryRef},
 	key::Key,
 	lock::ResizeLock,
 	rangemap::RangeSet,
@@ -298,6 +298,9 @@ impl<D: Dev> Cache<D> {
 	///
 	/// The old object is destroyed.
 	pub async fn move_object(&self, from: u64, to: u64) -> Result<(), Error<D>> {
+		trace!("move_object {} -> {}", from, to);
+		todo!();
+		/*
 		if from == to {
 			return Ok(()); // Don't even bother.
 		}
@@ -344,6 +347,7 @@ impl<D: Dev> Cache<D> {
 
 		self.dealloc_id(from);
 		Ok(())
+		*/
 	}
 
 	/// Finish the current transaction, committing any changes to the underlying devices.
@@ -420,19 +424,23 @@ impl<D: Dev> Cache<D> {
 			};
 
 			// Insert entry & return it.
-			let (entry, lrus) = RefMut::map_split(data, |data| {
-				let entry = Entry {
-					data: d,
-					global_index: data.lrus.global.lru.insert(key),
-					write_index: None,
-				};
-				data.lrus.global.cache_size += entry.data.len() + CACHE_ENTRY_FIXED_COST;
-				(
-					key.insert_entry(&mut data.data, max_depth, entry),
-					&mut data.lrus,
-				)
+			let (trees, mut lrus) = RefMut::map_split(data, |d| (&mut d.data, &mut d.lrus));
+			let tree = RefMut::map(trees, |t| {
+				t.entry(key.id())
+					.or_insert_with(|| TreeData::new(max_depth))
 			});
-			Poll::Ready(Ok(EntryRef { cache: self, key, entry, lrus }))
+			let levels = RefMut::map(tree, |t| &mut t.data[usize::from(key.depth())]);
+			let (entries, dirty_counters) =
+				RefMut::map_split(levels, |l| (&mut l.entries, &mut l.dirty_counters));
+
+			let entry = RefMut::map(entries, |e| {
+				let entry =
+					Entry { data: d, global_index: lrus.global.lru.insert(key), write_index: None };
+				lrus.global.cache_size += entry.data.len() + CACHE_ENTRY_FIXED_COST;
+				e.try_insert(key.offset(), entry)
+					.expect("entry was already present")
+			});
+			Poll::Ready(Ok(EntryRef::new(self, key, entry, lrus)))
 		};
 
 		let mut fetching = None;
@@ -450,13 +458,9 @@ impl<D: Dev> Cache<D> {
 			}
 
 			// 1. First check if the entry is already present.
-			let (data, lrus) = RefMut::map_split(self.data.borrow_mut(), |data| {
-				(&mut data.data, &mut data.lrus)
-			});
-			if let Ok(entry) = RefMut::filter_map(data, |data| key.get_entry_mut(data)) {
-				return Poll::Ready(Ok(EntryRef { cache: self, key, entry, lrus }));
+			if let Some(entry) = self.get_entry(key) {
+				return Poll::Ready(Ok(entry));
 			}
-			drop(lrus);
 			let mut data = self.data.borrow_mut();
 
 			// 2. Check if the entry is being flushed.
@@ -491,15 +495,6 @@ impl<D: Dev> Cache<D> {
 		.await
 	}
 
-	/// Try to get an entry directly.
-	fn get_entry(&self, key: Key) -> Option<EntryRef<'_, D>> {
-		let data = self.data.borrow_mut();
-		let (data, lrus) = RefMut::map_split(data, |d| (&mut d.data, &mut d.lrus));
-		RefMut::filter_map(data, |d| key.get_entry_mut(d))
-			.map(|entry| EntryRef { cache: self, entry, key, lrus })
-			.ok()
-	}
-
 	/// Fetch an entry and immediately destroy it.
 	///
 	/// # Note
@@ -513,7 +508,6 @@ impl<D: Dev> Cache<D> {
 		self.store.destroy(record);
 		let mut data = self.data.borrow_mut();
 		if let Some(entry) = key.remove_entry(&mut data.data) {
-			dbg!();
 			data.lrus.adjust_cache_removed_entry(&entry);
 		}
 	}
@@ -634,6 +628,19 @@ impl<D: Dev> Cache<D> {
 
 			data = update_record(key, rec).await?;
 
+			// Update dirty counters
+			for (i, level) in data.data.get_mut(&key.id()).unwrap().data[key.depth().into()..]
+				.iter_mut()
+				.enumerate()
+			{
+				let offt = key.offset() >> usize::from(self.max_record_size().to_raw() - 5) * i;
+				let std::collections::hash_map::Entry::Occupied(mut c) = level.dirty_counters.entry(offt) else { panic!() };
+				*c.get_mut() -= 1;
+				if *c.get() == 0 {
+					c.remove();
+				}
+			}
+
 			// Wake tasks that are waiting for this entry.
 			let wakers = data
 				.flushing
@@ -661,6 +668,19 @@ impl<D: Dev> Cache<D> {
 				// TODO try to do concurrent writes.
 				let rec = self.store.write(&entry.data).await?;
 				data = update_record(key, rec).await?;
+
+				// Update dirty counters
+				for (i, level) in data.data.get_mut(&key.id()).unwrap().data[key.depth().into()..]
+					.iter_mut()
+					.enumerate()
+				{
+					let offt = key.offset() >> usize::from(self.max_record_size().to_raw() - 5) * i;
+					let std::collections::hash_map::Entry::Occupied(mut c) = level.dirty_counters.entry(offt) else { panic!() };
+					*c.get_mut() -= 1;
+					if *c.get() == 0 {
+						c.remove();
+					}
+				}
 			} else {
 				data = self.data.borrow_mut();
 			}
@@ -701,64 +721,13 @@ impl<D: Dev> Cache<D> {
 			.data
 			.values()
 			.flat_map(|o| o.data.iter())
-			.flat_map(|m| m.values())
+			.flat_map(|m| m.entries.values())
 			.map(|v| v.data.len() + CACHE_ENTRY_FIXED_COST)
 			.sum::<usize>();
 		assert_eq!(
 			real_global_usage, data.lrus.global.cache_size,
 			"global cache size mismatch"
 		);
-	}
-}
-
-/// Reference to an entry.
-struct EntryRef<'a, D: Dev> {
-	cache: &'a Cache<D>,
-	key: Key,
-	lrus: RefMut<'a, Lrus>,
-	entry: RefMut<'a, Entry>,
-}
-
-impl<'a, D: Dev> EntryRef<'a, D> {
-	/// Modify the entry's data.
-	///
-	/// This may trigger a flush when the closure returns.
-	///
-	/// This consumes the entry to ensure no reference is held across an await point.
-	async fn modify(self, f: impl FnOnce(&mut Vec<u8>)) -> Result<(), Error<D>> {
-		let Self { cache, key, mut lrus, mut entry } = self;
-		let original_len = entry.data.len();
-
-		// Apply modifications.
-		f(&mut entry.data);
-		// Trim zeros, which we always want to do.
-		trim_zeros_end(&mut entry.data);
-
-		// Check if we still need to mark the entry as dirty.
-		// Otherwise promote.
-		if let Some(idx) = entry.write_index {
-			lrus.dirty.lru.promote(idx);
-			lrus.dirty.cache_size += entry.data.len();
-			lrus.dirty.cache_size -= original_len;
-		} else {
-			let idx = lrus.dirty.lru.insert(key);
-			lrus.dirty.cache_size += entry.data.len() + CACHE_ENTRY_FIXED_COST;
-			entry.write_index = Some(idx);
-		}
-		lrus.global.cache_size += entry.data.len();
-		lrus.global.cache_size -= original_len;
-
-		// Flush
-		drop((lrus, entry));
-		cache.flush().await
-	}
-}
-
-impl<'a, D: Dev> Deref for EntryRef<'a, D> {
-	type Target = Entry;
-
-	fn deref(&self) -> &Self::Target {
-		&self.entry
 	}
 }
 

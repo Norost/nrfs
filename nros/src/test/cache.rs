@@ -381,3 +381,144 @@ fn write_flush_many() {
 		}
 	})
 }
+
+/// Zero out an object with a depth of one.
+#[test]
+fn write_zeros_all_small() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+		obj.resize(1024).await.unwrap();
+		obj.write(0, &[1; 1024]).await.unwrap();
+
+		obj.write_zeros(0, 1024).await.unwrap();
+		let buf = &mut [1; 1024];
+		obj.read(0, buf).await.unwrap();
+		assert_eq!(buf, &[0; 1024]);
+	})
+}
+
+/// Zero out left half of an object with a depth of one.
+#[test]
+fn write_zeros_left_small() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+		obj.resize(1024).await.unwrap();
+		obj.write(0, &[1; 1024]).await.unwrap();
+
+		obj.write_zeros(0, 512).await.unwrap();
+		let buf = &mut [2; 1024];
+		obj.read(0, buf).await.unwrap();
+		assert_eq!(&buf[..512], &[0; 512]);
+		assert_eq!(&buf[512..], &[1; 512]);
+	})
+}
+
+/// Zero out right half of an object with a depth of one.
+#[test]
+fn write_zeros_right_small() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+		obj.resize(1024).await.unwrap();
+		obj.write(0, &[1; 1024]).await.unwrap();
+
+		obj.write_zeros(512, 512).await.unwrap();
+		let buf = &mut [2; 1024];
+		obj.read(0, buf).await.unwrap();
+		assert_eq!(&buf[..512], &[1; 512]);
+		assert_eq!(&buf[512..], &[0; 512]);
+	})
+}
+
+/// Zero out an object with a depth >1.
+#[test]
+fn write_zeros_packed_large() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+		obj.resize(1 << 50).await.unwrap();
+		obj.write(0, &[1; 1 << 12]).await.unwrap();
+
+		obj.write_zeros(0, 1 << 50).await.unwrap();
+		let buf = &mut [1; 1 << 12];
+		obj.read(0, buf).await.unwrap();
+		assert_eq!(buf, &[0; 1 << 12]);
+	})
+}
+
+/// Zero out an object with a depth >1.
+#[test]
+fn write_zeros_spread_large() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+		obj.resize(1 << 50).await.unwrap();
+		obj.write(1 << 10, &[1; 1 << 10]).await.unwrap();
+		obj.write(1 << 20, &[1; 1 << 10]).await.unwrap();
+		obj.write(1 << 30, &[1; 1 << 10]).await.unwrap();
+		obj.write(1 << 40, &[1; 1 << 10]).await.unwrap();
+
+		obj.write_zeros(0, 1 << 50).await.unwrap();
+
+		let buf = &mut [2; 1 << 10];
+		obj.read(1 << 10, buf).await.unwrap();
+		assert_eq!(buf, &[0; 1 << 10]);
+
+		let buf = &mut [2; 1 << 10];
+		obj.read(1 << 20, buf).await.unwrap();
+		assert_eq!(buf, &[0; 1 << 10]);
+
+		let buf = &mut [2; 1 << 10];
+		obj.read(1 << 30, buf).await.unwrap();
+		assert_eq!(buf, &[0; 1 << 10]);
+
+		let buf = &mut [2; 1 << 10];
+		obj.read(1 << 40, buf).await.unwrap();
+		assert_eq!(buf, &[0; 1 << 10]);
+	})
+}
+
+/*
+/// Zero out left half of an object with a depth >1.
+#[test]
+fn write_zeros_all_large_left() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+		obj.resize(1 << 50).await.unwrap();
+		obj.write(0, &[1; 1024]).await.unwrap();
+
+		obj.write_zeros(0, 512).await.unwrap();
+		let buf = &mut [2; 1024];
+		obj.read(0, buf).await.unwrap();
+		assert_eq!(&buf[..512], &[0; 512]);
+		assert_eq!(&buf[512..], &[1; 512]);
+	})
+}
+
+/// Zero out right half of an object with a depth >1.
+#[test]
+fn write_zeros_all_large_right() {
+	run(async {
+		let s = new(MaxRecordSize::K1).await;
+
+		let obj = s.create().await.unwrap();
+		obj.resize(1 << 50).await.unwrap();
+		obj.write(0, &[1; 1024]).await.unwrap();
+
+		obj.write_zeros(512, 512).await.unwrap();
+		let buf = &mut [2; 1024];
+		obj.read(0, buf).await.unwrap();
+		assert_eq!(&buf[..512], &[1; 512]);
+		assert_eq!(&buf[512..], &[0; 512]);
+	})
+}
+*/

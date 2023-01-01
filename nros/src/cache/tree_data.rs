@@ -19,7 +19,7 @@ pub struct TreeData {
 	///
 	/// The index in the array is correlated with depth.
 	/// The key is correlated with offset.
-	pub(super) data: Box<[FxHashMap<u64, Entry>]>,
+	pub(super) data: Box<[Level]>,
 	/// Amount of active operations on this tree.
 	///
 	/// - If `0`, no operations are occuring right now.
@@ -31,6 +31,12 @@ pub struct TreeData {
 	active_ops: isize,
 	/// Tasks waiting operate on this tree.
 	wakers: Vec<Waker>,
+}
+
+#[derive(Debug, Default)]
+pub struct Level {
+	pub(super) entries: FxHashMap<u64, Entry>,
+	pub(super) dirty_counters: FxHashMap<u64, usize>,
 }
 
 impl TreeData {
@@ -45,7 +51,7 @@ impl TreeData {
 	/// Whether this [`TreeData`] is empty,
 	/// i.e. there are no cached entries and no active operations.
 	pub fn is_empty(&self) -> bool {
-		self.active_ops == 0 && self.data.iter().all(|m| m.is_empty())
+		self.active_ops == 0 && self.data.iter().all(|m| m.entries.is_empty())
 	}
 
 	/// Fix depth of [`TreeData`] if a false depth of 0 was set.
@@ -224,6 +230,17 @@ impl fmt::Debug for FmtTreeData<'_> {
 			}
 		}
 
+		struct FmtRecordLevel<'a>(&'a Level);
+
+		impl fmt::Debug for FmtRecordLevel<'_> {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				f.debug_struct(stringify!(Level))
+					.field("entries", &FmtRecordMap(&self.0.entries))
+					.field("dirty_counters", &self.0.dirty_counters)
+					.finish()
+			}
+		}
+
 		struct FmtData<'a>(&'a FmtTreeData<'a>);
 
 		impl fmt::Debug for FmtData<'_> {
@@ -237,7 +254,7 @@ impl fmt::Debug for FmtTreeData<'_> {
 				}
 				// Format like records
 				for (i, l) in depths {
-					f.entry(&i, &FmtRecordMap(l));
+					f.entry(&i, &FmtRecordLevel(l));
 				}
 				f.finish()
 			}

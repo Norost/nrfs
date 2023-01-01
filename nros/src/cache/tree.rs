@@ -151,6 +151,148 @@ impl<'a, D: Dev> Tree<'a, D> {
 		Ok(data.len())
 	}
 
+	/// Zero out a range of data.
+	///
+	/// This is more efficient than [`Tree::write`] for clearing large regions.
+	pub async fn write_zeros(&self, offset: u64, len: u64) -> Result<u64, Error<D>> {
+		trace!("write_zeros id {}, offset {}, len {}", self.id, offset, len,);
+		dbg!(&self.cache.data);
+
+		// Since a very large range of the object may need to be zeroed simply inserting leaf
+		// records is not an option.
+		//
+		// To circumvent this, if a zero record is encountered, the loop goes up one level.
+		// When a non-zero record is encountered, the loop goes down one level.
+		// This allows skipping large amount of leaves quickly.
+
+		if len == 0 {
+			return Ok(0);
+		}
+
+		let (_lock, root) = self.cache.lock_readwrite(self.id).await?;
+
+		// Don't even bother if offset exceeds length.
+		let root_len = u64::from(root.total_length);
+		if offset >= root_len {
+			return Ok(0);
+		}
+		let root_depth = depth(self.max_record_size(), root_len);
+
+		// Restrict offset + len to the end of the object.
+		let len = len.min(root_len - offset);
+
+		// Zero out records from left to right
+		let end = offset + len - 1;
+
+		// Trim leftmost record
+		let left_offset = offset >> self.max_record_size();
+		let right_offset = (offset + len - 1) >> self.max_record_size();
+		let left_trim = usize::try_from(offset % (1u64 << self.max_record_size())).unwrap();
+		let right_trim =
+			usize::try_from((offset + len - 1) % (1u64 << self.max_record_size())).unwrap();
+		self.get(0, left_offset)
+			.await?
+			.modify(|data| {
+				if left_offset == right_offset && right_trim < data.len() {
+					// We have to trim a single record left & right.
+					data[left_trim..=right_trim].fill(0);
+				} else {
+					// We have to trim the leftmost record only on the left.
+					data.resize(left_trim, 0);
+				}
+			})
+			.await?;
+
+		// Completely zero records not at edges.
+		let mut depth = 1;
+		let mut offset = left_offset + 1;
+		dbg!(end);
+		'z: while offset <= end >> self.max_record_size() {
+			dbg!(offset);
+			// Go up while records are zero
+			loop {
+				dbg!(depth);
+				// Check if either the entry is empty or there are dirty records to inspect.
+				let offt = offset >> (self.max_record_size().to_raw() - RECORD_SIZE_P2) * depth;
+				let dirty = self.cache.get_object_entry_mut(self.id, root_depth).data
+					[usize::from(depth)]
+				.dirty_counters
+				.contains_key(&offt);
+				// Check if either the entry is empty or there are dirty records to inspect.
+				let entry = self.get(depth, offt).await?;
+				if !entry.data.is_empty() || dirty {
+					break;
+				}
+				depth += 1;
+				if depth >= root_depth {
+					break 'z;
+				}
+			}
+			// Go down to find non-zero child.
+			while depth > 1 {
+				dbg!(depth);
+				let shift = (self.max_record_size().to_raw() - RECORD_SIZE_P2) * depth;
+				let og_offset = offset >> shift;
+				for i in 0.. {
+					let shift = (self.max_record_size().to_raw() - RECORD_SIZE_P2) * (depth - 1);
+					let dirty = self.cache.get_object_entry_mut(self.id, root_depth).data
+						[usize::from(depth - 1)]
+					.dirty_counters
+					.contains_key(&(offset >> shift));
+
+					let record = {
+						let shift = (self.max_record_size().to_raw() - RECORD_SIZE_P2) * depth;
+						let key = Key::new(self.id, depth, offset >> shift);
+						if key.offset() > og_offset {
+							continue 'z;
+						}
+						let entry = self.cache.get_entry(key).expect("no entry");
+						get_record(&entry.data, i).unwrap_or_default()
+					};
+
+					if record.length == 0 && !dirty {
+						offset += 1u64 << shift;
+					} else {
+						depth -= 1;
+						let key = Key::new(self.id, depth, offset >> shift);
+						self.cache.fetch_entry(key, &record, depth).await?;
+						break;
+					}
+				}
+			}
+			// Destroy leaf records & replace with zeros
+			let key = Key::new(
+				self.id,
+				1,
+				offset >> self.max_record_size().to_raw() - RECORD_SIZE_P2,
+			);
+			let entries_per_rec = 1 << self.max_record_size().to_raw() - RECORD_SIZE_P2;
+			let mask = entries_per_rec - 1;
+			dbg!(offset, entries_per_rec);
+			for i in offset / entries_per_rec % entries_per_rec..entries_per_rec {
+				let i = usize::try_from(i).unwrap();
+				let entry = self.cache.get_entry(key).expect("no entry");
+
+				let record = get_record(&entry.data, i).unwrap_or_default();
+				let k = Key::new(
+					self.id,
+					0,
+					(offset & !mask) + u64::try_from(i).unwrap(),
+				);
+
+				drop(entry);
+				self.cache.destroy_entry(k, &record);
+			}
+			let entry = self.cache.get_entry(key).expect("no entry");
+			entry.modify(|data| data.clear()).await?;
+			dbg!(offset);
+			offset = (offset + mask + 1) & !mask;
+			dbg!(offset);
+		}
+
+		Ok(len)
+	}
+
 	/// Read data from a range.
 	///
 	/// Returns the actual amount of bytes read.
@@ -325,6 +467,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 	/// Shrink record tree.
 	async fn shrink(&self, new_len: u64, &cur_root: &Record) -> Result<(), Error<D>> {
 		trace!("shrink id {}, new_len {}", self.id, new_len);
+		todo!();
+		/*
 		// Shrinking is one of the trickiest operations to implement properly.
 		// Things to take care of are:
 		//
@@ -815,6 +959,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 		// Presto, at last
 		Ok(())
+		*/
 	}
 
 	/// Grow record tree.
@@ -959,7 +1104,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 					(&mut data.data, &mut data.lrus)
 				});
 				if let Ok(entry) = RefMut::filter_map(data, |data| key.get_entry_mut(data)) {
-					return Poll::Ready(Some(EntryRef { cache: self.cache, key, entry, lrus }));
+					return Poll::Ready(Some(EntryRef::new(self.cache, key, entry, lrus)));
 				}
 				drop(lrus);
 				let mut data = self.cache.data.borrow_mut();
