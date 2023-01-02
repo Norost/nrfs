@@ -14,8 +14,6 @@ use {
 pub struct ResizeLock {
 	/// The new length of the tree being resized.
 	pub new_len: u64,
-	/// Records of subtrees that have been flushed but should still be destroyed.
-	pub destroy_records: FxHashMap<(u8, u64), Record>,
 	/// Tasks to wake when this lock is released.
 	wakers: Vec<Waker>,
 }
@@ -29,11 +27,7 @@ impl<D: Dev> Cache<D> {
 			match data.resizing.entry(id) {
 				hash_map::Entry::Vacant(e) => {
 					// Acquire lock.
-					e.insert(ResizeLock {
-						new_len,
-						destroy_records: Default::default(),
-						wakers: Default::default(),
-					});
+					e.insert(ResizeLock { new_len, wakers: Default::default() });
 					Poll::Ready(ResizeGuard { data: &self.data, id })
 				}
 				hash_map::Entry::Occupied(e) => {
@@ -56,16 +50,6 @@ pub struct ResizeGuard<'a> {
 impl Drop for ResizeGuard<'_> {
 	fn drop(&mut self) {
 		trace!("ResizeGuard::drop");
-
-		if cfg!(debug_assertions) && !std::thread::panicking() {
-			let data = self.data.borrow_mut();
-			let slf = data.resizing.get(&self.id).unwrap();
-			assert!(
-				slf.destroy_records.is_empty(),
-				"not all records were destroyed\n{:#?}",
-				&slf.destroy_records
-			);
-		}
 
 		// TODO waking literally every single one of them is inefficient.
 		// It is easy though so w/e.

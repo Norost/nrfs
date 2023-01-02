@@ -75,9 +75,10 @@ impl<'a, D: Dev> EntryRef<'a, D> {
 			// Update dirty counters
 			let mut data = self.cache.data.borrow_mut();
 			let levels = &mut data.data.get_mut(&key.id()).unwrap().data;
-			for (i, level) in levels[key.depth().into()..].iter_mut().enumerate() {
-				let offt = key.offset() >> usize::from(cache.max_record_size().to_raw() - 5) * i;
+			let mut offt = key.offset();
+			for level in levels[key.depth().into()..].iter_mut() {
 				*level.dirty_counters.entry(offt).or_insert(0) += 1;
+				offt >>= cache.entries_per_parent_p2();
 			}
 		}
 

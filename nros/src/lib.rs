@@ -1,5 +1,6 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
+#![feature(get_many_mut)]
 #![feature(cell_update)]
 #![feature(hash_drain_filter)]
 #![feature(int_roundings)]

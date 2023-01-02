@@ -1,5 +1,6 @@
 use {
-	super::{Entry, TreeData, OBJECT_LIST_ID},
+	super::{Entry, MaxRecordSize, TreeData, OBJECT_LIST_ID},
+	crate::cache::RECORD_SIZE_P2,
 	core::fmt,
 	rustc_hash::FxHashMap,
 };
@@ -77,13 +78,31 @@ impl Key {
 	/// # Panics
 	///
 	/// If `depth` is out of range.
-	pub fn remove_entry<'a>(&self, data: &'a mut FxHashMap<u64, TreeData>) -> Option<Entry> {
+	pub fn remove_entry<'a>(
+		&self,
+		max_record_size: MaxRecordSize,
+		data: &'a mut FxHashMap<u64, TreeData>,
+	) -> Option<Entry> {
 		let tree = data.get_mut(&self.id())?;
 		let level = &mut tree.data[usize::from(self.depth())];
 		let entry = level.entries.remove(&self.offset())?;
 		// If the tree has no cached records left, remove it.
 		if level.entries.is_empty() && tree.is_empty() {
 			data.remove(&self.id());
+		} else if entry.write_index.is_some() {
+			// Update dirty counters if the entry was dirty.
+			let mut offt = self.offset();
+			for level in
+				data.get_mut(&self.id()).expect("no tree").data[self.depth().into()..].iter_mut()
+			{
+				let std::collections::hash_map::Entry::Occupied(mut c) = level.dirty_counters.entry(offt)
+					else { panic!("no dirty counter") };
+				*c.get_mut() -= 1;
+				if *c.get() == 0 {
+					c.remove();
+				}
+				offt >>= max_record_size.to_raw() - RECORD_SIZE_P2;
+			}
 		}
 		Some(entry)
 	}

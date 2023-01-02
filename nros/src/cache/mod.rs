@@ -30,6 +30,9 @@ use {
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
 const OBJECT_LIST_ID: u64 = 1 << 59; // 2**64 / 2**5 = 2**59, ergo 2**59 is just out of range.
 
+/// Record size as a power-of-two.
+const RECORD_SIZE_P2: u8 = mem::size_of::<Record>().ilog2() as _;
+
 /// Estimated fixed cost for every cached entry.
 ///
 /// This is in addition to the amount of data stored by the entry.
@@ -289,7 +292,7 @@ impl<D: Dev> Cache<D> {
 	/// This does *not* flush the entry if it is dirty!
 	fn remove_entry(&self, key: Key) -> Option<Entry> {
 		let data = { &mut *self.data.borrow_mut() };
-		let entry = key.remove_entry(&mut data.data)?;
+		let entry = key.remove_entry(self.max_record_size(), &mut data.data)?;
 		data.lrus.adjust_cache_removed_entry(&entry);
 		Some(entry)
 	}
@@ -299,8 +302,7 @@ impl<D: Dev> Cache<D> {
 	/// The old object is destroyed.
 	pub async fn move_object(&self, from: u64, to: u64) -> Result<(), Error<D>> {
 		trace!("move_object {} -> {}", from, to);
-		todo!();
-		/*
+
 		if from == to {
 			return Ok(()); // Don't even bother.
 		}
@@ -323,7 +325,7 @@ impl<D: Dev> Cache<D> {
 
 			let obj = data.data.remove(&from).expect("object not present");
 			for level in obj.data.iter() {
-				for entry in level.values() {
+				for entry in level.entries.values() {
 					let key = data
 						.lrus
 						.global
@@ -347,7 +349,6 @@ impl<D: Dev> Cache<D> {
 
 		self.dealloc_id(from);
 		Ok(())
-		*/
 	}
 
 	/// Finish the current transaction, committing any changes to the underlying devices.
@@ -430,14 +431,13 @@ impl<D: Dev> Cache<D> {
 					.or_insert_with(|| TreeData::new(max_depth))
 			});
 			let levels = RefMut::map(tree, |t| &mut t.data[usize::from(key.depth())]);
-			let (entries, dirty_counters) =
-				RefMut::map_split(levels, |l| (&mut l.entries, &mut l.dirty_counters));
 
-			let entry = RefMut::map(entries, |e| {
+			let entry = RefMut::map(levels, |l| {
 				let entry =
 					Entry { data: d, global_index: lrus.global.lru.insert(key), write_index: None };
 				lrus.global.cache_size += entry.data.len() + CACHE_ENTRY_FIXED_COST;
-				e.try_insert(key.offset(), entry)
+				l.entries
+					.try_insert(key.offset(), entry)
 					.expect("entry was already present")
 			});
 			Poll::Ready(Ok(EntryRef::new(self, key, entry, lrus)))
@@ -507,7 +507,7 @@ impl<D: Dev> Cache<D> {
 		// If not, don't bother fetching it as that is a waste of time.
 		self.store.destroy(record);
 		let mut data = self.data.borrow_mut();
-		if let Some(entry) = key.remove_entry(&mut data.data) {
+		if let Some(entry) = key.remove_entry(self.max_record_size(), &mut data.data) {
 			data.lrus.adjust_cache_removed_entry(&entry);
 		}
 	}
@@ -562,39 +562,6 @@ impl<D: Dev> Cache<D> {
 
 		trace!("flush");
 
-		let update_record = |key: Key, rec: Record| async move {
-			// Store a record in the appropriate place.
-			//
-			// First check if the tree is being resized.
-			// If so, check if the record is out of range.
-			// If it is, it must be destroyed at a later point.
-			// For efficiency and ease, avoid fetching its parent record and store it in a queue
-			// to be destroyed later.
-			let mut data = self.data.borrow_mut();
-			if let Some(lock) = data.resizing.get_mut(&key.id()).and_then(|lock| {
-				// Determine maximum offset at given level.
-				// If new_len is 0, then the entry is guaranteed to be out of range.
-				if key.depth() >= tree::depth(self.max_record_size(), lock.new_len) {
-					Some(lock)
-				} else {
-					let max_offset =
-						tree::calc_offset(self.max_record_size(), lock.new_len - 1, key.depth());
-					(key.offset() > max_offset).then(|| lock)
-				}
-			}) {
-				lock.destroy_records
-					.insert((key.depth(), key.offset()), rec);
-			} else {
-				drop(data);
-				Tree::new(self, key.id())
-					.await?
-					.update_record(key.depth(), key.offset(), rec)
-					.await?;
-				data = self.data.borrow_mut();
-			};
-			Ok(data)
-		};
-
 		while data.lrus.dirty.cache_size > data.lrus.dirty.cache_max {
 			// Remove last written to entry.
 			let &key = data
@@ -626,19 +593,22 @@ impl<D: Dev> Cache<D> {
 			let rec = self.store.write(&entry.data).await?;
 			drop(entry); // FIXME RefMut across await point!
 
-			data = update_record(key, rec).await?;
+			Tree::new(self, key.id())
+				.await?
+				.update_record(key.depth(), key.offset(), rec)
+				.await?;
+			data = self.data.borrow_mut();
 
 			// Update dirty counters
-			for (i, level) in data.data.get_mut(&key.id()).unwrap().data[key.depth().into()..]
-				.iter_mut()
-				.enumerate()
+			let mut offt = key.offset();
+			for level in data.data.get_mut(&key.id()).unwrap().data[key.depth().into()..].iter_mut()
 			{
-				let offt = key.offset() >> usize::from(self.max_record_size().to_raw() - 5) * i;
 				let std::collections::hash_map::Entry::Occupied(mut c) = level.dirty_counters.entry(offt) else { panic!() };
 				*c.get_mut() -= 1;
 				if *c.get() == 0 {
 					c.remove();
 				}
+				offt >>= self.entries_per_parent_p2();
 			}
 
 			// Wake tasks that are waiting for this entry.
@@ -667,26 +637,35 @@ impl<D: Dev> Cache<D> {
 				// Store record.
 				// TODO try to do concurrent writes.
 				let rec = self.store.write(&entry.data).await?;
-				data = update_record(key, rec).await?;
 
-				// Update dirty counters
-				for (i, level) in data.data.get_mut(&key.id()).unwrap().data[key.depth().into()..]
-					.iter_mut()
-					.enumerate()
-				{
-					let offt = key.offset() >> usize::from(self.max_record_size().to_raw() - 5) * i;
-					let std::collections::hash_map::Entry::Occupied(mut c) = level.dirty_counters.entry(offt) else { panic!() };
-					*c.get_mut() -= 1;
-					if *c.get() == 0 {
-						c.remove();
-					}
-				}
-			} else {
-				data = self.data.borrow_mut();
+				Tree::new(self, key.id())
+					.await?
+					.update_record(key.depth(), key.offset(), rec)
+					.await?;
 			}
+			data = self.data.borrow_mut();
 		}
 
 		data.is_flushing = false;
+		Ok(())
+	}
+
+	/// Evict an entry from the cache.
+	///
+	/// Does nothing if the entry wasn't present.
+	async fn evict_entry(&self, key: Key) -> Result<(), Error<D>> {
+		trace!("evict_entry {:?}", key);
+		let Some(entry) = self.remove_entry(key) else { return Ok(()) };
+
+		if entry.write_index.is_some() {
+			// Store record.
+			let rec = self.store.write(&entry.data).await?;
+			Tree::new(self, key.id())
+				.await?
+				.update_record(key.depth(), key.offset(), rec)
+				.await?;
+		}
+
 		Ok(())
 	}
 
@@ -728,6 +707,11 @@ impl<D: Dev> Cache<D> {
 			real_global_usage, data.lrus.global.cache_size,
 			"global cache size mismatch"
 		);
+	}
+
+	/// Amount of entries in a parent record as a power of two.
+	fn entries_per_parent_p2(&self) -> u8 {
+		self.max_record_size().to_raw() - RECORD_SIZE_P2
 	}
 }
 
