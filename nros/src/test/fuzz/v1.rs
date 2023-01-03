@@ -727,3 +727,19 @@ fn move_object_stale_root() {
 	)
 	.run();
 }
+
+#[test]
+fn resize_in_range_zeroed() {
+	Test::new(
+		1 << 16,
+		1 << 24,
+		1 << 24,
+		[
+			Create { size: 1025 },
+			Write { idx: 0, offset: 0, amount: 1 },
+			Resize { idx: 0, size: 1 },
+			Read { idx: 0, offset: 0, amount: 1 },
+		],
+	)
+	.run()
+}

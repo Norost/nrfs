@@ -257,14 +257,10 @@ impl<'a, D: Dev> Tree<'a, D> {
 				}
 			}
 			// Destroy leaf records & replace with zeros
-			let key = Key::new(
-				self.id,
-				1,
-				offset >> self.max_record_size().to_raw() - RECORD_SIZE_P2,
-			);
-			let entries_per_rec = 1 << self.max_record_size().to_raw() - RECORD_SIZE_P2;
+			let key = Key::new(self.id, 1, offset >> self.cache.entries_per_parent_p2());
+			let entries_per_rec = 1 << self.cache.entries_per_parent_p2();
 			let mask = entries_per_rec - 1;
-			for i in offset / entries_per_rec % entries_per_rec..entries_per_rec {
+			for i in offset % entries_per_rec..entries_per_rec {
 				let i = usize::try_from(i).unwrap();
 				let entry = self.cache.get_entry(key).expect("no entry");
 
@@ -274,8 +270,15 @@ impl<'a, D: Dev> Tree<'a, D> {
 				drop(entry);
 				self.cache.destroy_entry(k, &record);
 			}
+
+			// FIXME we're clearing way too much if offset + len < new_len
 			let entry = self.cache.get_entry(key).expect("no entry");
-			entry.modify(|data| data.clear()).await?;
+			entry
+				.modify(|data| {
+					let start = usize::try_from(offset % entries_per_rec).unwrap();
+					data.resize(start * mem::size_of::<Record>(), 0);
+				})
+				.await?;
 			offset = (offset + mask + 1) & !mask;
 		}
 
