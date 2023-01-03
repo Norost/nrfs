@@ -650,3 +650,18 @@ fn god_have_mercy_upon_me() {
 	)
 	.run()
 }
+
+#[test]
+fn move_object_not_present() {
+	Test::new(
+		1 << 16,
+		1 << 24,
+		4096,
+		[
+			Create { size: 0 },
+			Create { size: 0 },
+			Move { from_idx: 1, to_idx: 0 },
+		],
+	)
+	.run()
+}

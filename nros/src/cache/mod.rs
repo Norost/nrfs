@@ -65,6 +65,14 @@ pub(crate) struct CacheData {
 	is_flushing: bool,
 }
 
+impl CacheData {
+	/// Deallocate a single object ID.
+	fn dealloc_id(&mut self, id: u64) {
+		debug_assert!(self.used_objects_ids.contains(&id), "double free");
+		self.used_objects_ids.remove(id..id + 1);
+	}
+}
+
 impl fmt::Debug for CacheData {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		struct FmtData<'a>(&'a FxHashMap<u64, TreeData>);
@@ -209,13 +217,6 @@ impl<D: Dev> Cache<D> {
 		unreachable!("more than 2**64 objects allocated");
 	}
 
-	/// Deallocate a single object ID.
-	fn dealloc_id(&self, id: u64) {
-		let mut slf = self.data.borrow_mut();
-		debug_assert!(slf.used_objects_ids.contains(&id), "double free");
-		slf.used_objects_ids.remove(id..id + 1);
-	}
-
 	/// Get an existing root,
 	async fn get_object_root(&self, id: u64) -> Result<Record, Error<D>> {
 		if id == OBJECT_LIST_ID {
@@ -320,10 +321,8 @@ impl<D: Dev> Cache<D> {
 		self.set_object_root(from, &Default::default()).await?;
 
 		// Move object data & fix LRU entries.
-		{
-			let data = { &mut *self.data.borrow_mut() };
-
-			let obj = data.data.remove(&from).expect("object not present");
+		let mut data = self.data.borrow_mut();
+		if let Some(obj) = data.data.remove(&from) {
 			for level in obj.data.iter() {
 				for entry in level.entries.values() {
 					let key = data
@@ -345,9 +344,11 @@ impl<D: Dev> Cache<D> {
 				}
 			}
 			data.data.insert(to, obj);
+		} else {
+			data.data.remove(&to);
 		}
 
-		self.dealloc_id(from);
+		data.dealloc_id(from);
 		Ok(())
 	}
 

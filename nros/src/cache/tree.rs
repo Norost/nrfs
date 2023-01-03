@@ -516,7 +516,10 @@ impl<'a, D: Dev> Tree<'a, D> {
 				for level in v[usize::from(new_depth)..].iter_mut() {
 					// Remove non-dirty entries from LRU.
 					for (offset, entry) in level.entries.drain() {
-						debug_assert!(entry.write_index.is_none(), "not all dirty entries have been flushed");
+						debug_assert!(
+							entry.write_index.is_none(),
+							"not all dirty entries have been flushed"
+						);
 						lrus.adjust_cache_removed_entry(&entry);
 					}
 				}
