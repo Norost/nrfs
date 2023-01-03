@@ -477,7 +477,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 		self.write_zeros(new_len, u64::MAX).await?;
 
 		// 2. Ensure all out-of-range dirty records are flushed.
-		// 3. Destroy too-high records (if depth changed).
 		let new_root = if new_depth < cur_depth {
 			// Destroy out-of-range records.
 			let mut max_offset = new_depth
@@ -498,13 +497,17 @@ impl<'a, D: Dev> Tree<'a, D> {
 				max_offset >>= self.cache.entries_per_parent_p2();
 			}
 
-			// Get new root
-			let new_root = if new_depth == 0 {
-				Default::default()
-			} else {
-				let entry = self.get(new_depth, 0).await?;
-				get_record(&entry.data, 0).unwrap_or_default()
-			};
+			// 3. Destroy too-high records (if depth changed).
+			// Also get new root in meantime.
+			let mut root = self.root().await?.0; // cur_root may be outdated.
+			for d in (new_depth..cur_depth).rev() {
+				let key = Key::new(self.id, d, 0);
+				let entry = self.cache.fetch_entry(key, &root, cur_depth).await?;
+				let rec = get_record(&entry.data, 0).unwrap_or_default();
+				drop(entry);
+				self.cache.destroy_entry(key, &root);
+				root = rec;
+			}
 
 			// Resize to account for new depth
 			let (mut data, mut lrus) = RefMut::map_split(self.cache.data.borrow_mut(), |data| {
@@ -512,7 +515,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 			});
 			if let Some(obj) = data.get_mut(&self.id()) {
 				let mut v = mem::take(&mut obj.data).into_vec();
-				let mut i = 0;
 				for level in v[usize::from(new_depth)..].iter_mut() {
 					// Remove non-dirty entries from LRU.
 					for (offset, entry) in level.entries.drain() {
@@ -527,9 +529,13 @@ impl<'a, D: Dev> Tree<'a, D> {
 				obj.data = v.into();
 			}
 
-			new_root
+			if new_depth == 0 {
+				Default::default()
+			} else {
+				root
+			}
 		} else {
-			// We need to refetch the root as it may have changed due to flushes during write_zeros
+			// We need to refetch the root as it may have changed due to flushes during write_zeros.
 			self.root().await?.0
 		};
 		self.cache.store.assert_alloc(&new_root);

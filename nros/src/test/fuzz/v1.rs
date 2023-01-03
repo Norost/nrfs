@@ -665,3 +665,18 @@ fn move_object_not_present() {
 	)
 	.run()
 }
+
+#[test]
+fn grow_shrink_unflushed_dirty() {
+	Test::new(
+		1 << 16,
+		1024,
+		1024,
+		[
+			Create { size: 6356832 },
+			Resize { idx: 0, size: 18446587333172986083 },
+			Resize { idx: 0, size: 16740721 },
+		],
+	)
+	.run()
+}
