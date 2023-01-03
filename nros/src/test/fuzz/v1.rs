@@ -711,3 +711,19 @@ fn grow_redundant_add_record() {
 	)
 	.run()
 }
+
+#[test]
+fn move_object_stale_root() {
+	Test::new(
+		1 << 16,
+		2556,
+		1279,
+		[
+			Create { size: 514373878767853 },
+			Create { size: 2965947086361143593 },
+			Write { idx: 1, offset: 12804209971436716032, amount: 45443 },
+			Move { from_idx: 1, to_idx: 0 },
+		],
+	)
+	.run();
+}

@@ -57,6 +57,9 @@ pub(crate) struct CacheData {
 	flushing: FxHashMap<Key, Vec<Waker>>,
 	/// Trees that are being resized.
 	resizing: FxHashMap<u64, ResizeLock>,
+	/// Dangling roots,
+	/// i.e. roots of objects that are being moved by [`Cache::move_object`].
+	dangling_roots: FxHashMap<u64, Record>,
 	/// Used object IDs.
 	used_objects_ids: RangeSet<u64>,
 	/// Whether we're already flushing.
@@ -93,6 +96,7 @@ impl fmt::Debug for CacheData {
 			.field("fetching", &self.fetching)
 			.field("flushing", &self.flushing)
 			.field("resizing", &self.resizing)
+			.field("dangling_roots", &self.dangling_roots)
 			.field("used_objects_ids", &self.used_objects_ids)
 			.field("is_flushing", &self.is_flushing)
 			.finish()
@@ -199,6 +203,7 @@ impl<D: Dev> Cache<D> {
 				fetching: Default::default(),
 				flushing: Default::default(),
 				resizing: Default::default(),
+				dangling_roots: Default::default(),
 				used_objects_ids,
 				is_flushing: false,
 			}),
@@ -220,15 +225,17 @@ impl<D: Dev> Cache<D> {
 	/// Get an existing root,
 	async fn get_object_root(&self, id: u64) -> Result<Record, Error<D>> {
 		if id == OBJECT_LIST_ID {
-			Ok(self.store.object_list())
-		} else {
-			let offset = id * (mem::size_of::<Record>() as u64);
-			let list = Tree::new_object_list(self).await?;
-			let mut root = Record::default();
-			let l = list.read(offset, root.as_mut()).await?;
-			debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully read");
-			Ok(root)
+			return Ok(self.store.object_list());
 		}
+		if let Some(root) = self.data.borrow_mut().dangling_roots.get(&id) {
+			return Ok(*root);
+		}
+		let offset = id * (mem::size_of::<Record>() as u64);
+		let list = Tree::new_object_list(self).await?;
+		let mut root = Record::default();
+		let l = list.read(offset, root.as_mut()).await?;
+		debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully read");
+		Ok(root)
 	}
 
 	/// Update an existing root,
@@ -236,12 +243,16 @@ impl<D: Dev> Cache<D> {
 	async fn set_object_root(&self, id: u64, root: &Record) -> Result<(), Error<D>> {
 		if id == OBJECT_LIST_ID {
 			self.store.set_object_list(*root);
-		} else {
-			let offset = id * (mem::size_of::<Record>() as u64);
-			let list = Tree::new_object_list(self).await?;
-			let l = list.write(offset, root.as_ref()).await?;
-			debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully written");
+			return Ok(());
 		}
+		if let Some(r) = self.data.borrow_mut().dangling_roots.get_mut(&id) {
+			*r = *root;
+			return Ok(());
+		}
+		let offset = id * (mem::size_of::<Record>() as u64);
+		let list = Tree::new_object_list(self).await?;
+		let l = list.write(offset, root.as_ref()).await?;
+		debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully written");
 		Ok(())
 	}
 
@@ -308,17 +319,23 @@ impl<D: Dev> Cache<D> {
 			return Ok(()); // Don't even bother.
 		}
 
-		// Free allocations
+		// Free allocations in target object.
 		self.get(to).await?.resize(0).await?;
 
-		// NOTE There is a brief period where the lock is not acquired.
-		// However, as long as the API is singlethreaded this should not be an issue
-		// as there is no await point in between the period the lock is released.
-
-		// Move
+		// Move root out of from object.
 		let rec = self.get_object_root(from).await?;
-		self.set_object_root(to, &rec).await?;
-		self.set_object_root(from, &Default::default()).await?;
+		self.data.borrow_mut().dangling_roots.insert(from, rec);
+		// Clear original root
+		// We can't use set_object_root as it checks dangling_roots
+		let offt = mem::size_of::<Record>() as u64 * from;
+		Tree::new_object_list(self)
+			.await?
+			.write_zeros(offt, mem::size_of::<Record>() as _)
+			.await?;
+
+		// Fetch entry with to object root now to ensure we can store the entry later with
+		// no flushes.
+		let _ = self.get_object_root(to).await?;
 
 		// Move object data & fix LRU entries.
 		let mut data = self.data.borrow_mut();
@@ -349,6 +366,32 @@ impl<D: Dev> Cache<D> {
 		}
 
 		data.dealloc_id(from);
+
+		let root = data
+			.dangling_roots
+			.remove(&from)
+			.expect("from root not dangling");
+
+		// To ensure correctness, manually get the entry that should have already been fetched.
+		let offset = mem::size_of::<Record>() as u64 * to;
+		let key = Key::new(OBJECT_LIST_ID, 0, offset >> self.max_record_size());
+		let (data, lrus) = RefMut::map_split(data, |d| (&mut d.data, &mut d.lrus));
+		let entry = RefMut::map(data, |d| {
+			d.get_mut(&key.id()).expect("no tree").data[usize::from(key.depth())]
+				.entries
+				.get_mut(&key.offset())
+				.expect("no entry")
+		});
+
+		EntryRef::new(self, key, entry, lrus)
+			.modify(|data| {
+				let offt = usize::try_from(offset % (1u64 << self.max_record_size())).unwrap();
+				let len = data.len().max(offt + mem::size_of::<Record>());
+				data.resize(len, 0);
+				data[offt..offt + mem::size_of::<Record>()].copy_from_slice(root.as_ref());
+			})
+			.await?;
+
 		Ok(())
 	}
 
