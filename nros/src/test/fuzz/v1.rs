@@ -680,3 +680,34 @@ fn grow_shrink_unflushed_dirty() {
 	)
 	.run()
 }
+
+#[test]
+fn grow_set_stale_root() {
+	Test::new(
+		1 << 16,
+		1 << 24,
+		1 << 11,
+		[
+			Create { size: u64::MAX },
+			Write { idx: 0, offset: 0x4747474747474747, amount: 0x4747 },
+			Write { idx: 0, offset: 0x4747474747474747, amount: 0x4747 },
+			Create { size: 65 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn grow_redundant_add_record() {
+	Test::new(
+		1 << 16,
+		1 << 20,
+		1 << 10,
+		[
+			Create { size: 919 },
+			Write { idx: 0, offset: 917, amount: 1 },
+			Resize { idx: 0, size: 1025 },
+		],
+	)
+	.run()
+}
