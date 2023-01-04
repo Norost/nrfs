@@ -633,8 +633,11 @@ impl<D: Dev> Cache<D> {
 
 			// Store record.
 			// TODO try to do concurrent writes.
-			let rec = self.store.write(&entry.data).await?;
-			drop(entry); // FIXME RefMut across await point!
+			// TODO avoid expensive clone.
+			let d = entry.data.clone();
+			drop(entry);
+			let rec = self.store.write(&d).await?;
+			drop(d);
 
 			Tree::new(self, key.id())
 				.await?

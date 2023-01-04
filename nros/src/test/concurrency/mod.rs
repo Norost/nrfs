@@ -53,7 +53,6 @@ impl<T: Future> Future for SlowTask<T> {
 			self.delay -= 1;
 			// Necessary because Rust's generated tasks are quite smart apparently.
 			cx.waker().wake_by_ref();
-			dbg!(cx);
 			Poll::Pending
 		}
 	}
