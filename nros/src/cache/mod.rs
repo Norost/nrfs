@@ -8,13 +8,12 @@ mod tree_data;
 pub use tree::Tree;
 
 use {
-	crate::{storage, util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
+	crate::{storage, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{RefCell, RefMut},
 		fmt,
 		future::{self, Future},
 		mem,
-		ops::Deref,
 		pin::Pin,
 		task::{Poll, Waker},
 	},

@@ -1,11 +1,10 @@
 use {
-	super::{Cache, CacheData, Dev, Key, Record},
+	super::{Cache, CacheData, Dev},
 	core::{
 		cell::RefCell,
 		future,
 		task::{Poll, Waker},
 	},
-	rustc_hash::FxHashMap,
 	std::collections::hash_map,
 };
 

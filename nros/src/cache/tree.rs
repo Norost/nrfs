@@ -1,5 +1,5 @@
 use {
-	super::{Cache, EntryRef, Key, TreeData, OBJECT_LIST_ID, RECORD_SIZE_P2},
+	super::{Cache, EntryRef, Key, OBJECT_LIST_ID, RECORD_SIZE_P2},
 	crate::{util::get_record, Dev, Error, MaxRecordSize, Record},
 	core::{cell::RefMut, future, mem, ops::RangeInclusive, task::Poll},
 };
@@ -467,8 +467,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 		// 3. Destroy too-high records (if depth changed).
 		// 4. Replace root
 
-		let rec_size_p2 = self.max_record_size().to_raw();
-
 		let cur_len = u64::from(cur_root.total_length);
 
 		let cur_depth = depth(self.max_record_size(), cur_len);
@@ -486,7 +484,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				.checked_sub(1)
 				.map_or(0, |d| 1 << d * self.cache.entries_per_parent_p2());
 			for d in 0..cur_depth {
-				let mut tree = self.cache.get_object_entry_mut(self.id, cur_depth);
+				let tree = self.cache.get_object_entry_mut(self.id, cur_depth);
 				let offsets = tree.data[usize::from(d)]
 					.dirty_counters
 					.keys()
@@ -520,7 +518,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				let mut v = mem::take(&mut obj.data).into_vec();
 				for level in v[usize::from(new_depth)..].iter_mut() {
 					// Remove non-dirty entries from LRU.
-					for (offset, entry) in level.entries.drain() {
+					for (_, entry) in level.entries.drain() {
 						debug_assert!(
 							entry.write_index.is_none(),
 							"not all dirty entries have been flushed"
@@ -859,15 +857,6 @@ impl<'a, D: Dev> Tree<'a, D> {
 	pub fn id(&self) -> u64 {
 		self.id
 	}
-}
-
-/// Determine offset of a record given a depth and byte offset.
-pub(super) fn calc_offset(record_size: MaxRecordSize, byte_offset: u64, depth: u8) -> u64 {
-	let mut offt = byte_offset >> record_size;
-	for _ in 0..depth {
-		offt >>= record_size.to_raw() - RECORD_SIZE_P2;
-	}
-	offt
 }
 
 /// Determine record range given an offset, record size and length.

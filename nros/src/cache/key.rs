@@ -54,25 +54,6 @@ impl Key {
 			.and_then(|level| level.entries.get_mut(&self.offset()))
 	}
 
-	/// Use this `Key` to insert an entry in a cache.
-	///
-	/// # Panics
-	///
-	/// If an entry was already present.
-	pub fn insert_entry<'a>(
-		&self,
-		data: &'a mut FxHashMap<u64, TreeData>,
-		max_depth: u8,
-		entry: Entry,
-	) -> &'a mut Entry {
-		data.entry(self.id())
-			.or_insert(TreeData::new(max_depth))
-			.data[usize::from(self.depth())]
-		.entries
-		.try_insert(self.offset(), entry)
-		.expect("entry was already present")
-	}
-
 	/// Use this `Key` to remove an entry in a cache.
 	///
 	/// # Panics

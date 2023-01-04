@@ -2,7 +2,6 @@ use {
 	super::{lru, Cache, Key, Lrus, CACHE_ENTRY_FIXED_COST},
 	crate::{util::trim_zeros_end, Dev, Error},
 	core::{cell::RefMut, fmt, ops::Deref},
-	rustc_hash::FxHashMap,
 };
 
 /// A single cache entry.
