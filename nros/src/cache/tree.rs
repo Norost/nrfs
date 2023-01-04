@@ -539,6 +539,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// We need to refetch the root as it may have changed due to flushes during write_zeros.
 			self.root().await?.0
 		};
+		#[cfg(debug_assertions)]
 		self.cache.store.assert_alloc(&new_root);
 
 		// 4. Replace root
