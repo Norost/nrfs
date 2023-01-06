@@ -70,11 +70,11 @@ impl Dev for FileDev {
 
 	fn read<'a>(&self, lba: u64, len: usize) -> Self::ReadTask<'_> {
 		future::ready(self.seek(lba, len).and_then(|()| {
-			let mut buf = vec![0; len].into_boxed_slice();
+			let mut buf = vec![0; len];
 			self.file
 				.borrow_mut()
 				.read_exact(&mut buf)
-				.map(|()| FileBuf(buf.into()))
+				.map(|()| FileBuf(Rc::new(buf)))
 				.map_err(FileDevError::Io)
 		}))
 	}
@@ -125,7 +125,7 @@ impl Allocator for FileAllocator {
 }
 
 #[derive(Clone)]
-pub struct FileBuf(Rc<[u8]>);
+pub struct FileBuf(Rc<Vec<u8>>);
 
 impl Buf for FileBuf {
 	type Error = FileDevError;
@@ -140,6 +140,6 @@ impl Buf for FileBuf {
 
 	fn shrink(&mut self, len: usize) {
 		assert!(len <= self.0.len(), "new len is larger than old len");
-		self.0 = self.0.iter().copied().take(len).collect()
+		Rc::get_mut(&mut self.0).expect("buffer was cloned").resize(len, 0);
 	}
 }

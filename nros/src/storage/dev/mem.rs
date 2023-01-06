@@ -65,7 +65,7 @@ impl Dev for MemDev {
 	fn read<'a>(&self, lba: u64, len: usize) -> Self::ReadTask<'_> {
 		future::ready(
 			self.get_mut(lba, len)
-				.map(|b| MemBuf(b.iter().copied().collect())),
+				.map(|b| MemBuf(Rc::new(b.iter().copied().collect()))),
 		)
 	}
 
@@ -113,7 +113,7 @@ impl Allocator for MemAllocator {
 }
 
 #[derive(Clone)]
-pub struct MemBuf(Rc<[u8]>);
+pub struct MemBuf(Rc<Vec<u8>>);
 
 impl Buf for MemBuf {
 	type Error = MemDevError;
@@ -128,6 +128,6 @@ impl Buf for MemBuf {
 
 	fn shrink(&mut self, len: usize) {
 		assert!(len <= self.0.len(), "new len is larger than old len");
-		self.0 = self.0.iter().copied().take(len).collect()
+		Rc::get_mut(&mut self.0).expect("buffer was cloned").resize(len, 0);
 	}
 }
