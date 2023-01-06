@@ -697,8 +697,56 @@ fn grow_set_stale_root() {
 	.run()
 }
 
+/// This was previously called `grow_redundant_add_record`.
+/// However, contrary to my previous belief, the record added is *not* redundant.
+///
+/// Consider the following tree, where `o` is in cache and `.` is on-disk:
+///
+/// ```
+///     __.__
+///    /     \
+///   .       .
+///  / \     / \
+/// .   .   .   .
+/// ```
+///
+/// Suppose the rightmost leaf gets modified:
+///
+/// ```
+///     __.__
+///    /     \
+///   .       o
+///  / \     / \
+/// .   .   .   o
+/// ```
+///
+/// Suppose the tree is grown and a level is added:
+///
+/// ```
+///       .
+///       |
+///     __.__
+///    /     \
+///   .       o
+///  / \     / \
+/// .   .   .   o
+/// ```
+///
+/// Suppose an attempt to read the leftmost leaf begins:
+///
+/// ```
+///       o
+///       |
+///     __.__
+///    /     \
+///   .       .
+///  / \     / \
+/// .   .   .   o
+/// ```
+///
+/// The leftmost leaf will be considered zero since the root is zero!
 #[test]
-fn grow_redundant_add_record() {
+fn grow_add_record_race() {
 	Test::new(
 		1 << 16,
 		1 << 20,
@@ -738,6 +786,26 @@ fn resize_in_range_zeroed() {
 			Create { size: 1025 },
 			Write { idx: 0, offset: 0, amount: 1 },
 			Resize { idx: 0, size: 1 },
+			Read { idx: 0, offset: 0, amount: 1 },
+		],
+	)
+	.run()
+}
+
+/// This test detected the wrong assumption made in `grow_add_record_race`,
+/// previously called `grow_redundant_add_record`.
+#[test]
+fn write_unmount_write_grow_data_loss() {
+	Test::new(
+		1 << 16,
+		1 << 24,
+		1 << 24,
+		[
+			Create { size: 288230403347578881 },
+			Write { idx: 0, offset: 0, amount: 1 },
+			Remount,
+			Write { idx: 0, offset: 261207326956930858, amount: 14144 },
+			Resize { idx: 0, size: 10376293537170274103 },
 			Read { idx: 0, offset: 0, amount: 1 },
 		],
 	)

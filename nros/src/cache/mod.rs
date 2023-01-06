@@ -8,7 +8,7 @@ mod tree_data;
 pub use tree::Tree;
 
 use {
-	crate::{storage, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
+	crate::{storage, util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
 	core::{
 		cell::{RefCell, RefMut},
 		fmt,
@@ -115,6 +115,16 @@ struct Lrus {
 }
 
 impl Lrus {
+	/// Create a new *dirty* entry.
+	fn create_entry(&mut self, key: Key, mut data: Vec<u8>) -> Entry {
+		trim_zeros_end(&mut data);
+		let global_index = self.global.lru.insert(key);
+		self.global.cache_size += data.len() + CACHE_ENTRY_FIXED_COST;
+		let dirty_index = self.dirty.lru.insert(key);
+		self.dirty.cache_size += data.len() + CACHE_ENTRY_FIXED_COST;
+		Entry { data, global_index, write_index: Some(dirty_index) }
+	}
+
 	/// Adjust cache usage based on manually removed entry.
 	fn adjust_cache_removed_entry(&mut self, entry: &Entry) {
 		self.global.lru.remove(entry.global_index);

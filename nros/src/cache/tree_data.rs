@@ -1,5 +1,5 @@
 use {
-	super::{Cache, CacheData, Dev, Entry, Error, MaxRecordSize, OBJECT_LIST_ID},
+	super::{Cache, CacheData, Dev, Entry, Error, MaxRecordSize, OBJECT_LIST_ID, RECORD_SIZE_P2},
 	crate::Record,
 	core::{
 		cell::RefCell,
@@ -31,6 +31,32 @@ pub struct TreeData {
 	active_ops: isize,
 	/// Tasks waiting operate on this tree.
 	wakers: Vec<Waker>,
+}
+
+impl TreeData {
+	/// Add a new entry.
+	///
+	/// # Panics
+	///
+	/// If the entry is already present.
+	pub fn add_entry(
+		&mut self,
+		max_record_size: MaxRecordSize,
+		depth: u8,
+		offset: u64,
+		entry: Entry,
+	) {
+		// Insert entry
+		let _r = self.data[usize::from(depth)].entries.insert(offset, entry);
+		debug_assert!(_r.is_none(), "entry was already present");
+
+		// If dirty, propagate dirty counters
+		let mut offt = offset;
+		for lvl in self.data.iter_mut().skip(depth.into()) {
+			*lvl.dirty_counters.entry(offt).or_insert(0) += 1;
+			offt >>= max_record_size.to_raw() - RECORD_SIZE_P2;
+		}
+	}
 }
 
 #[derive(Debug, Default)]

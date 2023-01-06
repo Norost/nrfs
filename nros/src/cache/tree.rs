@@ -565,10 +565,11 @@ impl<'a, D: Dev> Tree<'a, D> {
 		// Steps:
 		// 1. Adjust levels array size to new_depth.
 		// 2. Propagate dirty counters up.
-		// 3. Update root record.
+		// 3. Insert parent right above current root record if depth changes.
+		//    Do this without await!
+		// 4. Update root record.
 		//    If depth changes, make it a zero record.
 		//    Otherwise, copy cur_root.
-		// 4. Insert parent right above current root record if depth changes.
 
 		let cur_len = u64::from(cur_root.total_length);
 
@@ -582,9 +583,16 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 		// Check if the depth changed.
 		// If so we need to move the current root.
-		if cur_depth < new_depth {
+		let new_root = if cur_depth < new_depth {
 			// 1. Adjust levels array size to new_depth
-			let mut obj = self.cache.get_object_entry_mut(self.id, cur_depth);
+			let (mut obj, mut lrus) = RefMut::map_split(self.cache.data.borrow_mut(), |data| {
+				(
+					data.data
+						.entry(self.id)
+						.or_insert_with(|| super::TreeData::new(cur_depth)),
+					&mut data.lrus,
+				)
+			});
 			let mut v = mem::take(&mut obj.data).into_vec();
 			v.resize_with(new_depth.into(), Default::default);
 			obj.data = v.into();
@@ -601,44 +609,33 @@ impl<'a, D: Dev> Tree<'a, D> {
 					}
 				}
 			}
-			drop(obj);
 
-			// 3. Update root record.
+			// 3. Insert parent right above current root record if depth changes.
+			//    Do this without await!
+			let key = Key::new(self.id, cur_depth, 0);
+			let data = (*Record { total_length: 0.into(), references: 0.into(), ..cur_root }
+				.as_ref())
+			.into();
+			let entry = lrus.create_entry(key, data);
+			obj.add_entry(self.max_record_size(), key.depth(), key.offset(), entry);
+			drop((obj, lrus));
+
+			// 4. Update root record.
 			//    If depth changes, make it a zero record.
-			let new_root = Record {
+			Record {
 				total_length: new_len.into(),
 				references: cur_root.references,
 				..Default::default()
-			};
-			self.cache.set_object_root(self.id, &new_root).await?;
-
-			// Add a new record on top and move the root to it.
-			// Adding the new record is only necessary if of its descendants is not dirty.
-			// If any are, dirty status will bubble up anyways.
-			if !self.cache.get_object_entry_mut(self.id, new_depth).data[usize::from(cur_depth)]
-				.dirty_counters
-				.contains_key(&0)
-			{
-				let key = Key::new(self.id, cur_depth, 0);
-				let entry = self
-					.cache
-					.fetch_entry(key, &Record::default(), new_depth)
-					.await?;
-				entry
-					.modify(|data| {
-						debug_assert!(data.is_empty(), "data should be empty");
-						data.extend_from_slice(
-							Record { total_length: 0.into(), references: 0.into(), ..cur_root }
-								.as_ref(),
-						);
-					})
-					.await?;
 			}
 		} else {
 			// Just adjust length and presto
-			let new_root = Record { total_length: new_len.into(), ..cur_root };
-			self.cache.set_object_root(self.id, &new_root).await?;
-		}
+			Record { total_length: new_len.into(), ..cur_root }
+		};
+
+		// NOTE This will not race with flush as:
+		// * there are no await points between Tree::root (in Tree::resize) and now.
+		// * the cache entry is already present since cur_root had to be fetched.
+		self.cache.set_object_root(self.id, &new_root).await?;
 
 		Ok(())
 	}
