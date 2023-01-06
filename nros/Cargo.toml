@@ -4,6 +4,8 @@ version = "0.2.0"
 edition = "2021"
 
 [features]
+default = ["std"]
+std = ["rayon"]
 # Disallow writing over records allocated & freed in the same transacion.
 #
 # This option is useful for detecting use-after-frees.
@@ -58,8 +60,15 @@ version = "1.1"
 version = "0.8"
 features = ["xxh3"]
 
+[dependencies.futures-channel]
+version = "0.3"
+
 [dependencies.futures-util]
 version = "0.3"
+
+[dependencies.rayon]
+version = "1.6"
+optional = true
 
 [dev-dependencies.arbitrary]
 version = "1.2"

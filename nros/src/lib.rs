@@ -122,6 +122,7 @@ mod trace {
 mod cache;
 mod header;
 mod record;
+mod resource;
 mod storage;
 #[cfg(any(test, fuzzing))]
 pub mod test;
