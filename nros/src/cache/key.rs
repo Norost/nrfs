@@ -24,7 +24,7 @@ impl Key {
 	/// If `id` (< 2**59) or `depth` (< 14) are out of range.
 	pub fn new(id: u64, depth: u8, offset: u64) -> Self {
 		assert!(id < 1 << 59 || id == OBJECT_LIST_ID, "id out of range");
-		assert!(depth < 14, "depth out of range");
+		assert!(depth <= 14, "depth out of range");
 		Self(id << 4 | u64::from(depth), offset)
 	}
 
