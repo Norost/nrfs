@@ -1,7 +1,7 @@
 mod lz4;
 mod none;
 
-use crate::BlockSize;
+use crate::{BlockSize, Resource};
 
 n2e! {
 	[Compression]
@@ -47,10 +47,15 @@ impl Compression {
 		}
 	}
 
-	pub(crate) fn decompress(self, data: &[u8], buf: &mut Vec<u8>, max_size: usize) -> bool {
+	pub(crate) fn decompress<R: Resource>(
+		self,
+		data: &[u8],
+		buf: &mut R::Buf,
+		max_size: usize,
+	) -> bool {
 		match self {
-			Compression::None => none::decompress(data, buf, max_size),
-			Compression::Lz4 => lz4::decompress(data, buf, max_size),
+			Compression::None => none::decompress::<R>(data, buf, max_size),
+			Compression::Lz4 => lz4::decompress::<R>(data, buf, max_size),
 		}
 	}
 }

@@ -1,7 +1,7 @@
 use super::*;
 
 /// Clear the entire cache of the object store.
-async fn clear(s: &Nros<MemDev>) {
+async fn clear(s: &Nros<MemDev, StdResource>) {
 	s.resize_cache(0, 0).await.unwrap();
 	let stat = s.statistics();
 	assert_eq!(stat.global_usage, 0);

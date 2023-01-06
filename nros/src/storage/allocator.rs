@@ -1,6 +1,6 @@
 use {
 	super::{Dev, Set256, Store},
-	crate::{util, Error, Record},
+	crate::{resource::Buf, util, Error, Record, Resource},
 	core::mem,
 	endian::u64le,
 	futures_util::stream::{FuturesUnordered, TryStreamExt},
@@ -78,9 +78,10 @@ impl Default for Allocator {
 }
 
 impl Allocator {
-	pub async fn load<D>(store: &Store<D>) -> Result<Self, Error<D>>
+	pub async fn load<D, R>(store: &Store<D, R>) -> Result<Self, Error<D>>
 	where
 		D: Dev,
+		R: Resource,
 	{
 		trace!("load");
 
@@ -110,7 +111,7 @@ impl Allocator {
 				// Get entry
 				let max_len = (end - i).min(mem::size_of::<Entry>());
 				let mut entry = Entry::default();
-				entry.as_mut()[..max_len].copy_from_slice(&data[i..][..max_len]);
+				entry.as_mut()[..max_len].copy_from_slice(&data.get()[i..i + max_len]);
 
 				let (mut start, end) = (u64::from(entry.lba), u64::from(entry.lba + entry.size));
 
@@ -139,7 +140,7 @@ impl Allocator {
 			}
 
 			// Next record
-			record = util::get_record(&data, 0).unwrap_or_default();
+			record = util::get_record(data.get(), 0).unwrap_or_default();
 		}
 
 		trace!("==>  {:?}", &alloc_map);
@@ -243,9 +244,10 @@ impl Allocator {
 	}
 
 	/// Save the allocator state.
-	pub async fn save<D>(&mut self, store: &Store<D>) -> Result<(), Error<D>>
+	pub async fn save<D, R>(&mut self, store: &Store<D, R>) -> Result<(), Error<D>>
 	where
 		D: Dev,
+		R: Resource,
 	{
 		{
 			trace!("save");
@@ -287,10 +289,10 @@ impl Allocator {
 		let writes = FuturesUnordered::new();
 
 		let mut prev = Record::default();
-		let mut buf = Vec::with_capacity(rec_size);
+		let mut buf = store.devices.resource.alloc();
 		while iter.peek().is_some() {
 			// Reference previous record
-			buf.clear();
+			buf.resize(0, 0);
 			buf.extend_from_slice(prev.as_ref());
 
 			// Store entries
@@ -307,7 +309,7 @@ impl Allocator {
 			// Pack record
 			util::trim_zeros_end(&mut buf);
 			debug_assert!(
-				!buf.is_empty(),
+				buf.len() > 0,
 				"buffer should have at least one log entry with non-zero size"
 			);
 			let len = store.round_block_size(buf.len().try_into().unwrap());
@@ -316,7 +318,7 @@ impl Allocator {
 			// as it is possible all memory is used up by the current writes.
 			let mut b = store.devices.alloc(len).await?;
 
-			prev = Record::pack(&buf, b.get_mut(), store.compression(), store.block_size());
+			prev = Record::pack(buf.get(), b.get_mut(), store.compression(), store.block_size());
 			let len = store.round_block_size(prev.length.into());
 			b.shrink(len);
 

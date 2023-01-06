@@ -8,7 +8,10 @@ mod tree_data;
 pub use tree::Tree;
 
 use {
-	crate::{storage, util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
+	crate::{
+		resource::Buf, storage, util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record,
+		Resource, Store,
+	},
 	core::{
 		cell::{RefCell, RefMut},
 		fmt,
@@ -35,15 +38,16 @@ const RECORD_SIZE_P2: u8 = mem::size_of::<Record>().ilog2() as _;
 /// Estimated fixed cost for every cached entry.
 ///
 /// This is in addition to the amount of data stored by the entry.
-const CACHE_ENTRY_FIXED_COST: usize = mem::size_of::<Entry>();
+// TODO generic... constants?
+const CACHE_ENTRY_FIXED_COST: usize = 32; //mem::size_of::<Entry<>>();
 
 /// Cache data.
-pub(crate) struct CacheData {
+pub(crate) struct CacheData<R: Resource> {
 	/// Cached records of objects and the object list.
 	///
 	/// The key, in order, is `(id, depth, offset)`.
 	/// Using separate hashmaps allows using only a prefix of the key.
-	data: FxHashMap<u64, TreeData>,
+	data: FxHashMap<u64, TreeData<R>>,
 	/// LRUs to manage cache size.
 	lrus: Lrus,
 	/// Record entries that are currently being fetched.
@@ -67,7 +71,7 @@ pub(crate) struct CacheData {
 	is_flushing: bool,
 }
 
-impl CacheData {
+impl<R: Resource> CacheData<R> {
 	/// Deallocate a single object ID.
 	fn dealloc_id(&mut self, id: u64) {
 		debug_assert!(self.used_objects_ids.contains(&id), "double free");
@@ -75,11 +79,11 @@ impl CacheData {
 	}
 }
 
-impl fmt::Debug for CacheData {
+impl<R: Resource + fmt::Debug> fmt::Debug for CacheData<R> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		struct FmtData<'a>(&'a FxHashMap<u64, TreeData>);
+		struct FmtData<'a, R: Resource>(&'a FxHashMap<u64, TreeData<R>>);
 
-		impl fmt::Debug for FmtData<'_> {
+		impl<R: Resource + fmt::Debug> fmt::Debug for FmtData<'_, R> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				let mut f = f.debug_map();
 				for (&id, data) in self.0.iter() {
@@ -116,7 +120,7 @@ struct Lrus {
 
 impl Lrus {
 	/// Create a new *dirty* entry.
-	fn create_entry(&mut self, key: Key, mut data: Vec<u8>) -> Entry {
+	fn create_entry<R: Resource>(&mut self, key: Key, mut data: R::Buf) -> Entry<R> {
 		trim_zeros_end(&mut data);
 		let global_index = self.global.lru.insert(key);
 		self.global.cache_size += data.len() + CACHE_ENTRY_FIXED_COST;
@@ -126,7 +130,7 @@ impl Lrus {
 	}
 
 	/// Adjust cache usage based on manually removed entry.
-	fn adjust_cache_removed_entry(&mut self, entry: &Entry) {
+	fn adjust_cache_removed_entry<R: Resource>(&mut self, entry: &Entry<R>) {
 		self.global.lru.remove(entry.global_index);
 		self.global.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
 		// The entry *must* be dirty as otherwise it either:
@@ -155,14 +159,14 @@ struct Lru {
 
 /// Cache algorithm.
 #[derive(Debug)]
-pub(crate) struct Cache<D: Dev> {
+pub(crate) struct Cache<D: Dev, R: Resource> {
 	/// The non-volatile backing store.
-	store: Store<D>,
+	store: Store<D, R>,
 	/// The cached data.
-	data: RefCell<CacheData>,
+	data: RefCell<CacheData<R>>,
 }
 
-impl<D: Dev> Cache<D> {
+impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Initialize a cache layer.
 	///
 	/// # Panics
@@ -170,7 +174,7 @@ impl<D: Dev> Cache<D> {
 	/// If `global_cache_max` is smaller than `dirty_cache_max`.
 	///
 	/// If `dirty_cache_max` is smaller than the maximum record size.
-	pub fn new(store: Store<D>, global_cache_max: usize, dirty_cache_max: usize) -> Self {
+	pub fn new(store: Store<D, R>, global_cache_max: usize, dirty_cache_max: usize) -> Self {
 		assert!(
 			global_cache_max >= dirty_cache_max,
 			"global cache size is smaller than write cache"
@@ -279,7 +283,7 @@ impl<D: Dev> Cache<D> {
 	}
 
 	/// Create an object.
-	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
+	pub async fn create(&self) -> Result<Tree<D, R>, Error<D>> {
 		trace!("create");
 		let id = self.create_many::<1>().await?;
 		Tree::new(self, id).await
@@ -303,7 +307,7 @@ impl<D: Dev> Cache<D> {
 	}
 
 	/// Get an object.
-	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
+	pub async fn get(&self, id: u64) -> Result<Tree<D, R>, Error<D>> {
 		trace!("get {}", id);
 		Tree::new(self, id).await
 	}
@@ -311,7 +315,7 @@ impl<D: Dev> Cache<D> {
 	/// Remove an entry from the cache.
 	///
 	/// This does *not* flush the entry if it is dirty!
-	fn remove_entry(&self, key: Key) -> Option<Entry> {
+	fn remove_entry(&self, key: Key) -> Option<Entry<R>> {
 		let data = { &mut *self.data.borrow_mut() };
 		let entry = key.remove_entry(self.max_record_size(), &mut data.data)?;
 		data.lrus.adjust_cache_removed_entry(&entry);
@@ -397,7 +401,8 @@ impl<D: Dev> Cache<D> {
 				let offt = usize::try_from(offset % (1u64 << self.max_record_size())).unwrap();
 				let len = data.len().max(offt + mem::size_of::<Record>());
 				data.resize(len, 0);
-				data[offt..offt + mem::size_of::<Record>()].copy_from_slice(root.as_ref());
+				data.get_mut()[offt..offt + mem::size_of::<Record>()]
+					.copy_from_slice(root.as_ref());
 			})
 			.await?;
 
@@ -444,7 +449,7 @@ impl<D: Dev> Cache<D> {
 		key: Key,
 		record: &Record,
 		max_depth: u8,
-	) -> Result<EntryRef<'a, D>, Error<D>> {
+	) -> Result<EntryRef<'a, D, R>, Error<D>> {
 		trace!("fetch_entry {:?} <- {:?}", key, record.lba);
 
 		// Manual sanity check in case entry is already present and Store::read is not called.
@@ -463,7 +468,7 @@ impl<D: Dev> Cache<D> {
 		// 4. Try to get the entry.
 		// 5. Repeat from 2.
 
-		let insert = move |mut data: RefMut<'a, CacheData>, d| {
+		let insert = move |mut data: RefMut<'a, CacheData<R>>, d: Result<R::Buf, _>| {
 			// Wake other tasks waiting for this entry.
 			data.fetching
 				.remove(&key)
@@ -486,7 +491,7 @@ impl<D: Dev> Cache<D> {
 			let levels = RefMut::map(tree, |t| &mut t.data[usize::from(key.depth())]);
 
 			let entry = RefMut::map(levels, |l| {
-				let entry =
+				let entry: Entry<R> =
 					Entry { data: d, global_index: lrus.global.lru.insert(key), write_index: None };
 				lrus.global.cache_size += entry.data.len() + CACHE_ENTRY_FIXED_COST;
 				l.entries
@@ -570,7 +575,7 @@ impl<D: Dev> Cache<D> {
 	/// # Panics
 	///
 	/// If another borrow is alive.
-	fn get_object_entry_mut(&self, id: u64, max_depth: u8) -> RefMut<TreeData> {
+	fn get_object_entry_mut(&self, id: u64, max_depth: u8) -> RefMut<TreeData<R>> {
 		RefMut::map(self.data.borrow_mut(), |data| {
 			data.data
 				.entry(id)
@@ -646,7 +651,7 @@ impl<D: Dev> Cache<D> {
 			// TODO avoid expensive clone.
 			let d = entry.data.clone();
 			drop(entry);
-			let rec = self.store.write(&d).await?;
+			let rec = self.store.write(d.get()).await?;
 			drop(d);
 
 			Tree::new(self, key.id())
@@ -692,7 +697,7 @@ impl<D: Dev> Cache<D> {
 			if entry.write_index.is_some() {
 				// Store record.
 				// TODO try to do concurrent writes.
-				let rec = self.store.write(&entry.data).await?;
+				let rec = self.store.write(entry.data.get()).await?;
 
 				Tree::new(self, key.id())
 					.await?
@@ -715,7 +720,7 @@ impl<D: Dev> Cache<D> {
 
 		if entry.write_index.is_some() {
 			// Store record.
-			let rec = self.store.write(&entry.data).await?;
+			let rec = self.store.write(entry.data.get()).await?;
 			Tree::new(self, key.id())
 				.await?
 				.update_record(key.depth(), key.offset(), rec)
@@ -728,7 +733,7 @@ impl<D: Dev> Cache<D> {
 	/// Unmount the cache.
 	///
 	/// The cache is flushed before returning the underlying [`Store`].
-	pub async fn unmount(self) -> Result<Store<D>, Error<D>> {
+	pub async fn unmount(self) -> Result<Store<D, R>, Error<D>> {
 		trace!("unmount");
 		self.finish_transaction().await?;
 		Ok(self.store)
@@ -768,6 +773,10 @@ impl<D: Dev> Cache<D> {
 	/// Amount of entries in a parent record as a power of two.
 	fn entries_per_parent_p2(&self) -> u8 {
 		self.max_record_size().to_raw() - RECORD_SIZE_P2
+	}
+
+	fn resource(&self) -> &R {
+		self.store.resource()
 	}
 }
 

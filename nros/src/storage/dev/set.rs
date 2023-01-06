@@ -1,6 +1,6 @@
 use {
 	super::{Allocator, Buf, Dev},
-	crate::{header::Header, BlockSize, Compression, Error, MaxRecordSize, Record},
+	crate::{header::Header, BlockSize, Compression, Error, MaxRecordSize, Record, Resource},
 	core::{cell::Cell, future, mem},
 	futures_util::stream::{FuturesUnordered, StreamExt, TryStreamExt},
 };
@@ -18,7 +18,7 @@ struct Node<D> {
 
 /// Wrapper around a set of devices.
 #[derive(Debug)]
-pub struct DevSet<D: Dev> {
+pub struct DevSet<D: Dev, R: Resource> {
 	/// The devices and their respective block counts.
 	///
 	/// It is an array of mirrors, which in turns represents a chain of devices.
@@ -36,9 +36,12 @@ pub struct DevSet<D: Dev> {
 
 	pub allocation_log: Cell<Record>,
 	pub object_list: Cell<Record>,
+
+	/// Resources for allocation & parallel processing.
+	pub resource: R,
 }
 
-impl<D: Dev> DevSet<D> {
+impl<D: Dev, R: Resource> DevSet<D, R> {
 	/// Create a new device set.
 	///
 	/// # Note
@@ -53,6 +56,7 @@ impl<D: Dev> DevSet<D> {
 	///
 	/// If any device has no blocks.
 	pub async fn new<M, C>(
+		resource: R,
 		mirrors: M,
 		block_size: BlockSize,
 		max_record_size: MaxRecordSize,
@@ -119,13 +123,14 @@ impl<D: Dev> DevSet<D> {
 			uid: *b" TODO TODO TODO ",
 			allocation_log: Default::default(),
 			object_list: Default::default(),
+			resource,
 		})
 	}
 
 	/// Load an existing device set.
 	///
 	/// `read_only` prevents fixing any headers that may be broken.
-	pub async fn load(devices: Vec<D>, read_only: bool) -> Result<Self, Error<D>> {
+	pub async fn load(resource: R, devices: Vec<D>, read_only: bool) -> Result<Self, Error<D>> {
 		// We're looking to retrieve two types of data from the devices:
 		//
 		// 1. Global info that is shared among all devices.
@@ -248,6 +253,8 @@ impl<D: Dev> DevSet<D> {
 
 			object_list: header.object_list.into(),
 			allocation_log: header.allocation_log.into(),
+
+			resource,
 		};
 
 		// If any headers are broken, fix them now.

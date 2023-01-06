@@ -8,7 +8,7 @@ use {
 #[derive(Debug)]
 pub struct Test {
 	/// Object store to operate on.
-	store: Nros<MemDev>,
+	store: Nros<MemDev, StdResource>,
 	/// Ops to execute
 	ops: Box<[Op]>,
 	/// Valid (created) objects.
@@ -144,7 +144,9 @@ impl Test {
 					Op::Remount => {
 						self.store.resize_cache(4096, 0).await.unwrap();
 						let devs = self.store.unmount().await.unwrap();
-						self.store = Nros::load(devs, 4096, 4096, true).await.unwrap();
+						self.store = Nros::load(StdResource::new(), devs, 4096, 4096, true)
+							.await
+							.unwrap();
 					}
 					Op::Move { from_idx, to_idx } => {
 						let from_i = from_idx as usize % self.ids.len();

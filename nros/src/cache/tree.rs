@@ -1,6 +1,6 @@
 use {
 	super::{Cache, EntryRef, Key, OBJECT_LIST_ID, RECORD_SIZE_P2},
-	crate::{util::get_record, Dev, Error, MaxRecordSize, Record},
+	crate::{resource::Buf, util::get_record, Dev, Error, MaxRecordSize, Record, Resource},
 	core::{cell::RefMut, future, mem, ops::RangeInclusive, task::Poll},
 };
 
@@ -8,18 +8,17 @@ use {
 ///
 /// As long as a `Tree` object for a specific ID is alive its [`TreeData`] entry will not be
 /// evicted.
-// FIXME guarantee TreeData will not be evicted (with locks?).
 #[derive(Clone, Debug)]
-pub struct Tree<'a, D: Dev> {
+pub struct Tree<'a, D: Dev, R: Resource> {
 	/// Underlying cache.
-	cache: &'a Cache<D>,
+	cache: &'a Cache<D, R>,
 	/// ID of the object.
 	id: u64,
 }
 
-impl<'a, D: Dev> Tree<'a, D> {
+impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// Access a tree.
-	pub(super) async fn new(cache: &'a Cache<D>, id: u64) -> Result<Tree<'a, D>, Error<D>> {
+	pub(super) async fn new(cache: &'a Cache<D, R>, id: u64) -> Result<Tree<'a, D, R>, Error<D>> {
 		// Alas, async recursion is hard
 		if id == OBJECT_LIST_ID {
 			Self::new_object_list(cache).await
@@ -33,13 +32,18 @@ impl<'a, D: Dev> Tree<'a, D> {
 	/// # Panics
 	///
 	/// If `id == OBJECT_LIST_ID`.
-	pub(super) async fn new_object(cache: &'a Cache<D>, id: u64) -> Result<Tree<'a, D>, Error<D>> {
+	pub(super) async fn new_object(
+		cache: &'a Cache<D, R>,
+		id: u64,
+	) -> Result<Tree<'a, D, R>, Error<D>> {
 		assert!(id != OBJECT_LIST_ID);
 		Ok(Self { cache, id })
 	}
 
 	/// Access the object list.
-	pub(super) async fn new_object_list(cache: &'a Cache<D>) -> Result<Tree<'a, D>, Error<D>> {
+	pub(super) async fn new_object_list(
+		cache: &'a Cache<D, R>,
+	) -> Result<Tree<'a, D, R>, Error<D>> {
 		let id = OBJECT_LIST_ID;
 		Ok(Self { cache, id })
 	}
@@ -84,7 +88,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				.modify(|b| {
 					let min_len = last_offset.max(b.len());
 					b.resize(min_len, 0);
-					b[first_offset..last_offset].copy_from_slice(data);
+					b.get_mut()[first_offset..last_offset].copy_from_slice(data);
 				})
 				.await?;
 		} else {
@@ -125,7 +129,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 					.modify(|b| {
 						// If the record was already fetched, it'll have ignored the &Record::default().
 						// Hence we need to clear it manually.
-						b.clear();
+						b.resize(0, 0);
 						b.extend_from_slice(d);
 					})
 					.await?;
@@ -140,7 +144,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 					.modify(|b| {
 						let min_len = b.len().max(data.len());
 						b.resize(min_len, 0);
-						b[..last_offset].copy_from_slice(data);
+						b.get_mut()[..last_offset].copy_from_slice(data);
 					})
 					.await?;
 			}
@@ -192,7 +196,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			.modify(|data| {
 				if left_offset == right_offset && right_trim < data.len() {
 					// We have to trim a single record left & right.
-					data[left_trim..=right_trim].fill(0);
+					data.get_mut()[left_trim..=right_trim].fill(0);
 				} else {
 					// We have to trim the leftmost record only on the left.
 					data.resize(left_trim, 0);
@@ -214,7 +218,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				.contains_key(&offt);
 				// Check if either the entry is empty or there are dirty records to inspect.
 				let entry = self.get(depth, offt).await?;
-				if !entry.data.is_empty() || dirty {
+				if entry.data.len() > 0 || dirty {
 					break;
 				}
 				depth += 1;
@@ -243,7 +247,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 							(offset >> shift_child) % (1 << self.cache.entries_per_parent_p2()),
 						)
 						.unwrap();
-						get_record(&entry.data, i).unwrap_or_default()
+						get_record(entry.data.get(), i).unwrap_or_default()
 					};
 
 					if record.length == 0 && !dirty {
@@ -264,7 +268,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				let i = usize::try_from(i).unwrap();
 				let entry = self.cache.get_entry(key).expect("no entry");
 
-				let record = get_record(&entry.data, i).unwrap_or_default();
+				let record = get_record(entry.data.get(), i).unwrap_or_default();
 				let k = Key::new(self.id, 0, (offset & !mask) + u64::try_from(i).unwrap());
 
 				drop(entry);
@@ -325,7 +329,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// We need to slice one record twice
 			let b = self.get(0, *range.start()).await?;
 
-			let b = b.data.get(first_offset..).unwrap_or(&[]);
+			let b = b.data.get().get(first_offset..).unwrap_or(&[]);
 			copy(buf, &b[..buf.len().min(b.len())]);
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
@@ -340,7 +344,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				let b;
 				(b, buf) = buf.split_at_mut((1usize << self.max_record_size()) - first_offset);
 				let d = self.get(0, first_key).await?;
-				copy(b, d.data.get(first_offset..).unwrap_or(&[]));
+				copy(b, d.data.get().get(first_offset..).unwrap_or(&[]));
 			}
 
 			// Copy middle records |xxxxxxxx|
@@ -348,7 +352,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				let b;
 				(b, buf) = buf.split_at_mut(1usize << self.max_record_size());
 				let d = self.get(0, key).await?;
-				copy(b, &d.data);
+				copy(b, d.data.get());
 			}
 
 			// Copy end record |xxxx----|
@@ -357,7 +361,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 				debug_assert_eq!(buf.len(), last_offset);
 				let d = self.get(0, last_key).await?;
 				let max_len = d.data.len().min(buf.len());
-				copy(buf, &d.data[..max_len]);
+				copy(buf, &d.data.get()[..max_len]);
 			}
 		}
 
@@ -420,7 +424,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			entry
 				.modify(|data| {
 					// Destroy old record
-					let old_record = get_record(data, index).unwrap_or_default();
+					let old_record = get_record(data.get(), index).unwrap_or_default();
 					trace!(
 						"--> replace parent ({}, {}) -> ({}, {})",
 						record.lba,
@@ -436,7 +440,8 @@ impl<'a, D: Dev> Tree<'a, D> {
 
 					// Store new record
 					data.resize(min_len, 0);
-					data[index..index + mem::size_of::<Record>()].copy_from_slice(record.as_ref());
+					data.get_mut()[index..index + mem::size_of::<Record>()]
+						.copy_from_slice(record.as_ref());
 				})
 				.await
 		}
@@ -504,7 +509,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			for d in (new_depth..cur_depth).rev() {
 				let key = Key::new(self.id, d, 0);
 				let entry = self.cache.fetch_entry(key, &root, cur_depth).await?;
-				let rec = get_record(&entry.data, 0).unwrap_or_default();
+				let rec = get_record(entry.data.get(), 0).unwrap_or_default();
 				drop(entry);
 				self.cache.destroy_entry(key, &root);
 				root = rec;
@@ -613,9 +618,11 @@ impl<'a, D: Dev> Tree<'a, D> {
 			// 3. Insert parent right above current root record if depth changes.
 			//    Do this without await!
 			let key = Key::new(self.id, cur_depth, 0);
-			let data = (*Record { total_length: 0.into(), references: 0.into(), ..cur_root }
-				.as_ref())
-			.into();
+			let mut data = self.cache.resource().alloc();
+			data.resize(core::mem::size_of::<Record>(), 0);
+			data.get_mut().copy_from_slice(
+				Record { total_length: 0.into(), references: 0.into(), ..cur_root }.as_ref(),
+			);
 			let entry = lrus.create_entry(key, data);
 			obj.add_entry(self.max_record_size(), key.depth(), key.offset(), entry);
 			drop((obj, lrus));
@@ -668,7 +675,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 	/// Note that `offset` must already include appropriate shifting.
 	// FIXME concurrent resizes will almost certainly screw something internally.
 	// Maybe add a per object lock to the cache or something?
-	async fn get(&self, target_depth: u8, offset: u64) -> Result<EntryRef<'a, D>, Error<D>> {
+	async fn get(&self, target_depth: u8, offset: u64) -> Result<EntryRef<'a, D, R>, Error<D>> {
 		trace!(
 			"get id {}, depth {}, offset {}",
 			self.id,
@@ -745,7 +752,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
 				.try_into()
 				.unwrap();
-			record = get_record(&entry.data, index).unwrap_or_default();
+			record = get_record(entry.data.get(), index).unwrap_or_default();
 		} else {
 			// Start from the root.
 			debug_assert_eq!(cur_depth, obj_depth, "root should be at obj_depth");
@@ -780,7 +787,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
 				.try_into()
 				.unwrap();
-			record = get_record(&entry.data, index).unwrap_or_default();
+			record = get_record(entry.data.get(), index).unwrap_or_default();
 		};
 
 		Ok(entry)
@@ -795,7 +802,7 @@ impl<'a, D: Dev> Tree<'a, D> {
 	/// There is more than one active lock on the other object,
 	/// i.e. there are multiple [`Tree`] instances referring to the same object.
 	/// Hence the object cannot safely be destroyed.
-	pub async fn replace_with(&self, other: Tree<'a, D>) -> Result<(), Error<D>> {
+	pub async fn replace_with(&self, other: Tree<'a, D, R>) -> Result<(), Error<D>> {
 		// FIXME check locks
 		self.cache.move_object(other.id, self.id).await
 	}

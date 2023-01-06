@@ -100,7 +100,7 @@ struct NrfsData {
 #[derive(Debug)]
 pub struct Nrfs<D: Dev> {
 	/// Object storage.
-	storage: nros::Nros<D>,
+	storage: nros::Nros<D, nros::StdResource>,
 	/// Data of objects with live references.
 	data: RefCell<NrfsData>,
 	/// Whether this filesystem is mounted as read-only.
@@ -122,6 +122,7 @@ impl<D: Dev> Nrfs<D> {
 		C: IntoIterator<Item = D>,
 	{
 		let storage = nros::Nros::new(
+			nros::StdResource::new(),
 			mirrors,
 			block_size,
 			max_record_size,
@@ -144,8 +145,14 @@ impl<D: Dev> Nrfs<D> {
 		read_only: bool,
 	) -> Result<Self, Error<D>> {
 		Ok(Self {
-			storage: nros::Nros::load(devices, global_cache_size, dirty_cache_size, !read_only)
-				.await?,
+			storage: nros::Nros::load(
+				nros::StdResource::new(),
+				devices,
+				global_cache_size,
+				dirty_cache_size,
+				!read_only,
+			)
+			.await?,
 			data: Default::default(),
 			read_only,
 		})
@@ -492,7 +499,7 @@ pub struct Statistics {
 ///
 /// Fails if not all data could be written.
 async fn write_all<'a, D: Dev>(
-	obj: &nros::Tree<'a, D>,
+	obj: &nros::Tree<'a, D, nros::StdResource>,
 	offset: u64,
 	data: &[u8],
 ) -> Result<(), Error<D>> {
@@ -506,7 +513,7 @@ async fn write_all<'a, D: Dev>(
 ///
 /// Fails if the buffer could not be filled.
 async fn read_exact<'a, D: Dev>(
-	obj: &nros::Tree<'a, D>,
+	obj: &nros::Tree<'a, D, nros::StdResource>,
 	offset: u64,
 	buf: &mut [u8],
 ) -> Result<(), Error<D>> {

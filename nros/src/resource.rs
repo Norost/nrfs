@@ -8,9 +8,7 @@ use core::future::Future;
 /// * Threads for parallel processing.
 pub trait Resource {
 	/// Type representing a region of memory.
-	type Buf<'a>: Buf
-	where
-		Self: 'a;
+	type Buf: Buf;
 
 	/// Type representing a running task.
 	type Task<'a>: Future<Output = ()>
@@ -18,16 +16,39 @@ pub trait Resource {
 		Self: 'a;
 
 	/// Create an empty memory buffer.
-	fn alloc(&self) -> Self::Buf<'_>;
+	fn alloc(&self) -> Self::Buf;
 
 	/// Run the given closure.
 	fn run(&self, f: Box<dyn FnOnce() + Send + 'static>) -> Self::Task<'_>;
 }
 
 /// Type representing a region of memory.
-pub trait Buf {
+pub trait Buf: Clone {
+	/// Get an immutable reference to the underlying data.
+	fn get(&self) -> &[u8];
+
 	/// Get a mutable reference to the underlying data.
 	fn get_mut(&mut self) -> &mut [u8];
+
+	/// The length of the buffer.
+	fn len(&self) -> usize {
+		self.get().len()
+	}
+
+	/// Resize the buffer.
+	fn resize(&mut self, new_len: usize, fill: u8);
+
+	/// Shrink the capacity of the buffer.
+	fn shrink(&mut self);
+
+	/// Get the capacity of the buffer.
+	fn capacity(&self) -> usize;
+
+	fn extend_from_slice(&mut self, slice: &[u8]) {
+		let len = self.len();
+		self.resize(len + slice.len(), 0);
+		self.get_mut()[len..].copy_from_slice(slice);
+	}
 }
 
 #[cfg(not(no_std))]
@@ -51,15 +72,13 @@ mod std {
 	}
 
 	impl Resource for StdResource {
-		type Buf<'a> = Vec<u8>
-		where
-			Self: 'a;
+		type Buf = Vec<u8>;
 
 		type Task<'a> = RunTask
 		where
 			Self: 'a;
 
-		fn alloc(&self) -> Self::Buf<'_> {
+		fn alloc(&self) -> Self::Buf {
 			Vec::new()
 		}
 
@@ -74,8 +93,24 @@ mod std {
 	}
 
 	impl Buf for Vec<u8> {
+		fn get(&self) -> &[u8] {
+			self
+		}
+
 		fn get_mut(&mut self) -> &mut [u8] {
 			self
+		}
+
+		fn resize(&mut self, new_len: usize, fill: u8) {
+			Vec::resize(self, new_len, fill)
+		}
+
+		fn shrink(&mut self) {
+			Vec::shrink_to_fit(self)
+		}
+
+		fn capacity(&self) -> usize {
+			Vec::capacity(self)
 		}
 	}
 

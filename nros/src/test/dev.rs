@@ -2,7 +2,7 @@ use {
 	super::{run, Set256},
 	crate::{
 		storage::dev::{Allocator, Buf, Dev, DevSet, MemDev},
-		BlockSize, Compression, MaxRecordSize,
+		BlockSize, Compression, MaxRecordSize, Resource, StdResource,
 	},
 };
 
@@ -38,6 +38,7 @@ fn devset_1_create() {
 	run(async {
 		let dev = MemDev::new(16, BlockSize::B512);
 		let _ = DevSet::new(
+			StdResource::new(),
 			[[dev]],
 			BlockSize::B512,
 			MaxRecordSize::B512,
@@ -54,6 +55,7 @@ fn devset_1_read_write() {
 	run(async {
 		let dev = MemDev::new(16, BlockSize::B512);
 		let set = DevSet::new(
+			StdResource::new(),
 			[[dev]],
 			BlockSize::B512,
 			MaxRecordSize::B512,

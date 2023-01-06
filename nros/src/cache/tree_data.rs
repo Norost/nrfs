@@ -1,6 +1,6 @@
 use {
 	super::{Cache, CacheData, Dev, Entry, Error, MaxRecordSize, OBJECT_LIST_ID, RECORD_SIZE_P2},
-	crate::Record,
+	crate::{resource::Buf, Record, Resource},
 	core::{
 		cell::RefCell,
 		fmt,
@@ -14,12 +14,12 @@ use {
 
 /// A single cached record tree.
 #[derive(Debug)]
-pub struct TreeData {
+pub struct TreeData<R: Resource> {
 	/// Cached records.
 	///
 	/// The index in the array is correlated with depth.
 	/// The key is correlated with offset.
-	pub(super) data: Box<[Level]>,
+	pub(super) data: Box<[Level<R>]>,
 	/// Amount of active operations on this tree.
 	///
 	/// - If `0`, no operations are occuring right now.
@@ -33,7 +33,7 @@ pub struct TreeData {
 	wakers: Vec<Waker>,
 }
 
-impl TreeData {
+impl<R: Resource> TreeData<R> {
 	/// Add a new entry.
 	///
 	/// # Panics
@@ -44,7 +44,7 @@ impl TreeData {
 		max_record_size: MaxRecordSize,
 		depth: u8,
 		offset: u64,
-		entry: Entry,
+		entry: Entry<R>,
 	) {
 		// Insert entry
 		let _r = self.data[usize::from(depth)].entries.insert(offset, entry);
@@ -59,13 +59,27 @@ impl TreeData {
 	}
 }
 
-#[derive(Debug, Default)]
-pub struct Level {
-	pub(super) entries: FxHashMap<u64, Entry>,
+pub struct Level<R: Resource> {
+	pub(super) entries: FxHashMap<u64, Entry<R>>,
 	pub(super) dirty_counters: FxHashMap<u64, usize>,
 }
 
-impl TreeData {
+impl<R: Resource> Default for Level<R> {
+	fn default() -> Self {
+		Self { entries: Default::default(), dirty_counters: Default::default() }
+	}
+}
+
+impl<R: Resource> fmt::Debug for Level<R> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(Level))
+			.field("entries", &self.entries)
+			.field("dirty_counters", &self.dirty_counters)
+			.finish()
+	}
+}
+
+impl<R: Resource> TreeData<R> {
 	pub fn new(depth: u8) -> Self {
 		Self {
 			data: (0..depth).map(|_| Default::default()).collect(),
@@ -89,14 +103,14 @@ impl TreeData {
 	}
 }
 
-impl<D: Dev> Cache<D> {
+impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Acquire a lock on a tree for a read or write operation.
 	///
 	/// Returns the `root` of the tree as of locking.
 	pub(super) async fn lock_readwrite(
 		&self,
 		id: u64,
-	) -> Result<(ReadWriteGuard<'_>, Record), Error<D>> {
+	) -> Result<(ReadWriteGuard<'_, R>, Record), Error<D>> {
 		trace!("lock_readwrite {}", id);
 		// Acquire lock.
 		let lock = future::poll_fn(move |cx| {
@@ -124,7 +138,7 @@ impl<D: Dev> Cache<D> {
 	pub(super) async fn lock_root_replace(
 		&self,
 		id: u64,
-	) -> Result<(RootReplaceGuard<'_>, Record), Error<D>> {
+	) -> Result<(RootReplaceGuard<'_, R>, Record), Error<D>> {
 		trace!("lock_root_replace {}", id);
 		let lock = future::poll_fn(move |cx| {
 			// Use 0 as depth until we can safely read the root.
@@ -155,12 +169,12 @@ fn box_fut<'a, Fut: Future + 'a>(fut: Fut) -> Pin<Box<dyn Future<Output = Fut::O
 }
 
 /// Read and/or write guard on a tree.
-pub struct ReadWriteGuard<'a> {
-	data: &'a RefCell<CacheData>,
+pub struct ReadWriteGuard<'a, R: Resource> {
+	data: &'a RefCell<CacheData<R>>,
 	id: u64,
 }
 
-impl Drop for ReadWriteGuard<'_> {
+impl<R: Resource> Drop for ReadWriteGuard<'_, R> {
 	fn drop(&mut self) {
 		trace!("ReadWriteGuard::drop {}", self.id);
 		let mut data = self.data.borrow_mut();
@@ -174,12 +188,12 @@ impl Drop for ReadWriteGuard<'_> {
 }
 
 /// Resize guard on a tree.
-pub struct RootReplaceGuard<'a> {
-	data: &'a RefCell<CacheData>,
+pub struct RootReplaceGuard<'a, R: Resource> {
+	data: &'a RefCell<CacheData<R>>,
 	id: u64,
 }
 
-impl Drop for RootReplaceGuard<'_> {
+impl<R: Resource> Drop for RootReplaceGuard<'_, R> {
 	fn drop(&mut self) {
 		trace!("RootReplaceGuard::drop {}", self.id);
 		let mut data = self.data.borrow_mut();
@@ -196,12 +210,12 @@ impl Drop for RootReplaceGuard<'_> {
 /// Formatter for [`TreeData`].
 ///
 /// The output is more compact than that of `derive(Debug)`, especially for large amounts of data.
-pub struct FmtTreeData<'a> {
-	pub data: &'a TreeData,
+pub struct FmtTreeData<'a, R: Resource> {
+	pub data: &'a TreeData<R>,
 	pub id: u64,
 }
 
-impl fmt::Debug for FmtTreeData<'_> {
+impl<R: Resource + fmt::Debug> fmt::Debug for FmtTreeData<'_, R> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		struct FmtRecordList<'a>(&'a [u8]);
 
@@ -224,9 +238,9 @@ impl fmt::Debug for FmtTreeData<'_> {
 			}
 		}
 
-		struct FmtRecord<'a>(&'a Entry);
+		struct FmtRecord<'a, R: Resource>(&'a Entry<R>);
 
-		impl fmt::Debug for FmtRecord<'_> {
+		impl<R: Resource> fmt::Debug for FmtRecord<'_, R> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				#[derive(Debug)]
 				#[allow(dead_code)]
@@ -236,7 +250,7 @@ impl fmt::Debug for FmtTreeData<'_> {
 					write_index: Option<super::lru::Idx>,
 				}
 				T {
-					data: FmtRecordList(&self.0.data),
+					data: FmtRecordList(self.0.data.get()),
 					global_index: self.0.global_index,
 					write_index: self.0.write_index,
 				}
@@ -244,9 +258,9 @@ impl fmt::Debug for FmtTreeData<'_> {
 			}
 		}
 
-		struct FmtRecordMap<'a>(&'a FxHashMap<u64, Entry>);
+		struct FmtRecordMap<'a, R: Resource>(&'a FxHashMap<u64, Entry<R>>);
 
-		impl fmt::Debug for FmtRecordMap<'_> {
+		impl<R: Resource> fmt::Debug for FmtRecordMap<'_, R> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				let mut f = f.debug_map();
 				for (k, v) in self.0.iter() {
@@ -256,9 +270,9 @@ impl fmt::Debug for FmtTreeData<'_> {
 			}
 		}
 
-		struct FmtRecordLevel<'a>(&'a Level);
+		struct FmtRecordLevel<'a, R: Resource>(&'a Level<R>);
 
-		impl fmt::Debug for FmtRecordLevel<'_> {
+		impl<R: Resource> fmt::Debug for FmtRecordLevel<'_, R> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				f.debug_struct(stringify!(Level))
 					.field("entries", &FmtRecordMap(&self.0.entries))
@@ -267,9 +281,9 @@ impl fmt::Debug for FmtTreeData<'_> {
 			}
 		}
 
-		struct FmtData<'a>(&'a FmtTreeData<'a>);
+		struct FmtData<'a, R: Resource>(&'a FmtTreeData<'a, R>);
 
-		impl fmt::Debug for FmtData<'_> {
+		impl<R: Resource> fmt::Debug for FmtData<'_, R> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				let mut f = f.debug_map();
 				let mut depths = self.0.data.data.iter().enumerate();

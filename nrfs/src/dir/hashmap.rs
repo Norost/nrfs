@@ -20,7 +20,7 @@ pub(super) struct HashMap<'a, D: Dev> {
 	///
 	/// The ID of this tree may be different from `Self::dir_id` if this hashmap is a new map
 	/// created in a resize.
-	pub(super) map: Tree<'a, D>,
+	pub(super) map: Tree<'a, D, nros::StdResource>,
 	/// Size of this hashmap
 	size: DirSize,
 	/// The [`Hasher`] used to index this hashmap.
@@ -29,7 +29,12 @@ pub(super) struct HashMap<'a, D: Dev> {
 
 impl<'a, D: Dev> HashMap<'a, D> {
 	/// Create a [`HashMap`] helper structure.
-	pub fn new(dir: &Dir<'a, D>, data: &DirData, map: Tree<'a, D>, size: DirSize) -> Self {
+	pub fn new(
+		dir: &Dir<'a, D>,
+		data: &DirData,
+		map: Tree<'a, D, nros::StdResource>,
+		size: DirSize,
+	) -> Self {
 		Self { fs: dir.fs, dir_id: dir.id, map, size, hasher: data.hasher }
 	}
 

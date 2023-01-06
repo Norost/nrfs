@@ -7,6 +7,7 @@ fn create_save_2() {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let s = Nros::new(
+			StdResource::new(),
 			[[dev_a, dev_b]],
 			BlockSize::K1,
 			MaxRecordSize::K16,
@@ -30,6 +31,7 @@ fn equal_2() {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let s = Nros::new(
+			StdResource::new(),
 			[[dev_a, dev_b]],
 			BlockSize::K1,
 			MaxRecordSize::K16,
@@ -46,7 +48,9 @@ fn equal_2() {
 		drop(obj);
 		let devs = s.unmount().await.unwrap();
 
-		let s = Nros::load(devs, 1 << 14, 1 << 14, true).await.unwrap();
+		let s = Nros::load(StdResource::new(), devs, 1 << 14, 1 << 14, true)
+			.await
+			.unwrap();
 		let obj = s.get(0).await.unwrap();
 		let buf = &mut [0; 1 << 15];
 		obj.read(0, buf).await.unwrap();

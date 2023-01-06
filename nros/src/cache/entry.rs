@@ -1,23 +1,23 @@
 use {
 	super::{lru, Cache, Key, Lrus, CACHE_ENTRY_FIXED_COST},
-	crate::{util::trim_zeros_end, Dev, Error},
+	crate::{resource::Buf, util::trim_zeros_end, Dev, Error, Resource},
 	core::{cell::RefMut, fmt, ops::Deref},
 };
 
 /// A single cache entry.
-pub struct Entry {
+pub struct Entry<R: Resource> {
 	/// The data itself.
-	pub data: Vec<u8>,
+	pub data: R::Buf,
 	/// Global LRU index.
 	pub global_index: lru::Idx,
 	/// Dirty LRU index, if the data is actually dirty.
 	pub write_index: Option<lru::Idx>,
 }
 
-impl fmt::Debug for Entry {
+impl<R: Resource> fmt::Debug for Entry<R> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Entry))
-			.field("data", &format_args!("{:?}", &self.data))
+			.field("data", &format_args!("{:?}", &self.data.get()))
 			.field("global_index", &self.global_index)
 			.field("write_index", &self.write_index)
 			.finish()
@@ -25,19 +25,19 @@ impl fmt::Debug for Entry {
 }
 
 /// Reference to an entry.
-pub struct EntryRef<'a, D: Dev> {
-	cache: &'a Cache<D>,
+pub struct EntryRef<'a, D: Dev, R: Resource> {
+	cache: &'a Cache<D, R>,
 	key: Key,
 	lrus: RefMut<'a, Lrus>,
-	entry: RefMut<'a, Entry>,
+	entry: RefMut<'a, Entry<R>>,
 }
 
-impl<'a, D: Dev> EntryRef<'a, D> {
+impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 	/// Construct a new [`EntryRef`] for the given entry.
 	pub(super) fn new(
-		cache: &'a Cache<D>,
+		cache: &'a Cache<D, R>,
 		key: Key,
-		entry: RefMut<'a, Entry>,
+		entry: RefMut<'a, Entry<R>>,
 		lrus: RefMut<'a, Lrus>,
 	) -> Self {
 		Self { cache, key, entry, lrus }
@@ -48,7 +48,7 @@ impl<'a, D: Dev> EntryRef<'a, D> {
 	/// This may trigger a flush when the closure returns.
 	///
 	/// This consumes the entry to ensure no reference is held across an await point.
-	pub async fn modify(self, f: impl FnOnce(&mut Vec<u8>)) -> Result<(), Error<D>> {
+	pub async fn modify(self, f: impl FnOnce(&mut R::Buf)) -> Result<(), Error<D>> {
 		let Self { cache, key, mut lrus, mut entry } = self;
 		let original_len = entry.data.len();
 
@@ -86,17 +86,17 @@ impl<'a, D: Dev> EntryRef<'a, D> {
 	}
 }
 
-impl<'a, D: Dev> Deref for EntryRef<'a, D> {
-	type Target = Entry;
+impl<'a, D: Dev, R: Resource> Deref for EntryRef<'a, D, R> {
+	type Target = Entry<R>;
 
 	fn deref(&self) -> &Self::Target {
 		&self.entry
 	}
 }
 
-impl<D: Dev> Cache<D> {
+impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Try to get an entry directly.
-	pub(super) fn get_entry(&self, key: Key) -> Option<EntryRef<'_, D>> {
+	pub(super) fn get_entry(&self, key: Key) -> Option<EntryRef<'_, D, R>> {
 		let data = self.data.borrow_mut();
 
 		let (trees, lrus) = RefMut::map_split(data, |d| (&mut d.data, &mut d.lrus));

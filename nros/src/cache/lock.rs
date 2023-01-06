@@ -1,5 +1,5 @@
 use {
-	super::{Cache, CacheData, Dev},
+	super::{Cache, CacheData, Dev, Resource},
 	core::{
 		cell::RefCell,
 		future,
@@ -17,9 +17,9 @@ pub struct ResizeLock {
 	wakers: Vec<Waker>,
 }
 
-impl<D: Dev> Cache<D> {
+impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Lock an object for resizing.
-	pub(super) async fn lock_resizing(&self, id: u64, new_len: u64) -> ResizeGuard<'_> {
+	pub(super) async fn lock_resizing(&self, id: u64, new_len: u64) -> ResizeGuard<'_, R> {
 		trace!("lock_resizing");
 		future::poll_fn(move |cx| {
 			let mut data = self.data.borrow_mut();
@@ -41,12 +41,12 @@ impl<D: Dev> Cache<D> {
 }
 
 /// A guard that blocks other resizes on trees while it is live.
-pub struct ResizeGuard<'a> {
-	data: &'a RefCell<CacheData>,
+pub struct ResizeGuard<'a, R: Resource> {
+	data: &'a RefCell<CacheData<R>>,
 	id: u64,
 }
 
-impl Drop for ResizeGuard<'_> {
+impl<R: Resource> Drop for ResizeGuard<'_, R> {
 	fn drop(&mut self) {
 		trace!("ResizeGuard::drop");
 

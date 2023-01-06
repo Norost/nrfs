@@ -1,5 +1,5 @@
 use {
-	super::{Entry, MaxRecordSize, TreeData, OBJECT_LIST_ID},
+	super::{Entry, MaxRecordSize, Resource, TreeData, OBJECT_LIST_ID},
 	crate::cache::RECORD_SIZE_P2,
 	core::fmt,
 	rustc_hash::FxHashMap,
@@ -45,10 +45,10 @@ impl Key {
 	/// # Panics
 	///
 	/// If `depth` is out of range.
-	pub fn get_entry_mut<'a>(
+	pub fn get_entry_mut<'a, R: Resource>(
 		&self,
-		data: &'a mut FxHashMap<u64, TreeData>,
-	) -> Option<&'a mut Entry> {
+		data: &'a mut FxHashMap<u64, TreeData<R>>,
+	) -> Option<&'a mut Entry<R>> {
 		data.get_mut(&self.id())
 			.map(|tree| &mut tree.data[usize::from(self.depth())])
 			.and_then(|level| level.entries.get_mut(&self.offset()))
@@ -59,11 +59,11 @@ impl Key {
 	/// # Panics
 	///
 	/// If `depth` is out of range.
-	pub fn remove_entry<'a>(
+	pub fn remove_entry<'a, R: Resource>(
 		&self,
 		max_record_size: MaxRecordSize,
-		data: &'a mut FxHashMap<u64, TreeData>,
-	) -> Option<Entry> {
+		data: &'a mut FxHashMap<u64, TreeData<R>>,
+	) -> Option<Entry<R>> {
 		let tree = data.get_mut(&self.id())?;
 		let level = &mut tree.data[usize::from(self.depth())];
 		let entry = level.entries.remove(&self.offset())?;

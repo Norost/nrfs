@@ -20,9 +20,10 @@ async fn new_cap(
 	blocks: usize,
 	read_cache_size: usize,
 	write_cache_size: usize,
-) -> Nros<MemDev> {
+) -> Nros<MemDev, StdResource> {
 	let s = MemDev::new(blocks, BlockSize::K1);
 	Nros::new(
+		StdResource::new(),
 		[[s]],
 		BlockSize::K1,
 		max_record_size,
@@ -34,7 +35,7 @@ async fn new_cap(
 	.unwrap()
 }
 
-async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev> {
+async fn new(max_record_size: MaxRecordSize) -> Nros<MemDev, StdResource> {
 	new_cap(max_record_size, 32, 4096, 4096).await
 }
 

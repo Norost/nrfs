@@ -4,9 +4,10 @@ use {
 	futures_util::{stream::FuturesUnordered, StreamExt, TryStreamExt},
 };
 
-async fn new(delay: usize) -> Nros<SlowDev> {
+async fn new(delay: usize) -> Nros<SlowDev, StdResource> {
 	let s = SlowDev { dev: MemDev::new(1 << 16, BlockSize::K1), alloc: SlowAllocator { delay } };
 	Nros::new(
+		StdResource::new(),
 		[[s]],
 		BlockSize::K1,
 		MaxRecordSize::K1,

@@ -128,6 +128,8 @@ impl Buf for MemBuf {
 
 	fn shrink(&mut self, len: usize) {
 		assert!(len <= self.0.len(), "new len is larger than old len");
-		Rc::get_mut(&mut self.0).expect("buffer was cloned").resize(len, 0);
+		Rc::get_mut(&mut self.0)
+			.expect("buffer was cloned")
+			.resize(len, 0);
 	}
 }

@@ -122,29 +122,33 @@ mod trace {
 mod cache;
 mod header;
 mod record;
-mod resource;
+pub mod resource;
 mod storage;
 #[cfg(any(test, fuzzing))]
 pub mod test;
 mod util;
 
+#[cfg(not(no_std))]
+pub use resource::StdResource;
 pub use {
 	cache::{Statistics, Tree},
 	record::{Compression, MaxRecordSize},
+	resource::Resource,
 	storage::{dev, Dev, Store},
 };
 
 use {cache::Cache, core::fmt, record::Record, storage::DevSet};
 
 #[derive(Debug)]
-pub struct Nros<D: Dev> {
+pub struct Nros<D: Dev, R: Resource> {
 	/// Backing store with cache and allocator.
-	store: Cache<D>,
+	store: Cache<D, R>,
 }
 
-impl<D: Dev> Nros<D> {
+impl<D: Dev, R: Resource> Nros<D, R> {
 	/// Create a new object store.
 	pub async fn new<M, C>(
+		resource: R,
 		mirrors: M,
 		block_size: BlockSize,
 		max_record_size: MaxRecordSize,
@@ -156,24 +160,25 @@ impl<D: Dev> Nros<D> {
 		M: IntoIterator<Item = C>,
 		C: IntoIterator<Item = D>,
 	{
-		let devs = DevSet::new(mirrors, block_size, max_record_size, compression).await?;
+		let devs = DevSet::new(resource, mirrors, block_size, max_record_size, compression).await?;
 		Self::load_inner(devs, read_cache_size, write_cache_size, true).await
 	}
 
 	/// Load an existing object store.
 	pub async fn load(
+		resource: R,
 		devices: Vec<D>,
 		read_cache_size: usize,
 		write_cache_size: usize,
 		allow_repair: bool,
 	) -> Result<Self, Error<D>> {
-		let devs = DevSet::load(devices, allow_repair).await?;
+		let devs = DevSet::load(resource, devices, allow_repair).await?;
 		Self::load_inner(devs, read_cache_size, write_cache_size, allow_repair).await
 	}
 
 	/// Load an object store.
 	pub async fn load_inner(
-		devices: DevSet<D>,
+		devices: DevSet<D, R>,
 		read_cache_size: usize,
 		write_cache_size: usize,
 		allow_repair: bool,
@@ -184,7 +189,7 @@ impl<D: Dev> Nros<D> {
 	}
 
 	/// Create an object.
-	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
+	pub async fn create(&self) -> Result<Tree<D, R>, Error<D>> {
 		self.store.create().await
 	}
 
@@ -202,7 +207,7 @@ impl<D: Dev> Nros<D> {
 	}
 
 	/// Return an owned reference to an object.
-	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
+	pub async fn get(&self, id: u64) -> Result<Tree<D, R>, Error<D>> {
 		assert!(
 			id != u64::MAX,
 			"ID u64::MAX is reserved for the object list"
