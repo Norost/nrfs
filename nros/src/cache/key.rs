@@ -3,6 +3,7 @@ use {
 	crate::cache::RECORD_SIZE_P2,
 	core::fmt,
 	rustc_hash::FxHashMap,
+	std::collections::hash_map,
 };
 
 /// Key for indexing in the cache.
@@ -56,6 +57,8 @@ impl Key {
 
 	/// Use this `Key` to remove an entry in a cache.
 	///
+	/// The second value indicates the entry is dirty.
+	///
 	/// # Panics
 	///
 	/// If `depth` is out of range.
@@ -63,29 +66,48 @@ impl Key {
 		&self,
 		max_record_size: MaxRecordSize,
 		data: &'a mut FxHashMap<u64, TreeData<R>>,
-	) -> Option<Entry<R>> {
+	) -> Option<(Entry<R>, bool)> {
 		let tree = data.get_mut(&self.id())?;
-		let level = &mut tree.data[usize::from(self.depth())];
+		let [level, levels @ ..] = &mut tree.data[usize::from(self.depth())..]
+			else { panic!("depth out of range") };
 		let entry = level.entries.remove(&self.offset())?;
+
 		// If the tree has no cached records left, remove it.
-		if level.entries.is_empty() && tree.is_empty() {
-			data.remove(&self.id());
-		} else if entry.write_index.is_some() {
+		let is_dirty = if let Some(dirty_count) = level
+			.dirty_counters
+			.get_mut(&self.offset())
+			.filter(|c| **c & isize::MIN != 0)
+		{
 			// Update dirty counters if the entry was dirty.
-			let mut offt = self.offset();
-			for level in
-				data.get_mut(&self.id()).expect("no tree").data[self.depth().into()..].iter_mut()
-			{
-				let std::collections::hash_map::Entry::Occupied(mut c) = level.dirty_counters.entry(offt)
+			*dirty_count -= 1;
+			*dirty_count &= isize::MAX;
+			if *dirty_count == 0 {
+				level.dirty_counters.remove(&self.offset());
+			}
+
+			let mut offt = self.offset() >> max_record_size.to_raw() - RECORD_SIZE_P2;
+			for lvl in levels {
+				let hash_map::Entry::Occupied(mut c) = lvl.dirty_counters.entry(offt)
 					else { panic!("no dirty counter") };
 				*c.get_mut() -= 1;
+				debug_assert_ne!(*c.get(), isize::MIN, "dirty without references");
 				if *c.get() == 0 {
 					c.remove();
 				}
 				offt >>= max_record_size.to_raw() - RECORD_SIZE_P2;
 			}
+
+			true
+		} else {
+			false
+		};
+
+		// Remove tree if empty
+		if level.entries.is_empty() && tree.is_empty() {
+			data.remove(&self.id());
 		}
-		Some(entry)
+
+		Some((entry, is_dirty))
 	}
 }
 

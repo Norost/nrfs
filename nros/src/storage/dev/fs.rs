@@ -1,11 +1,11 @@
 use {
 	super::{Allocator, Buf, Dev},
 	crate::BlockSize,
+	alloc::sync::Arc,
 	core::{cell::RefCell, fmt, future},
 	std::{
 		fs::File,
 		io::{Read, Seek, SeekFrom, Write},
-		rc::Rc,
 	},
 };
 
@@ -74,12 +74,12 @@ impl Dev for FileDev {
 			self.file
 				.borrow_mut()
 				.read_exact(&mut buf)
-				.map(|()| FileBuf(Rc::new(buf)))
+				.map(|()| FileBuf(buf.into()))
 				.map_err(FileDevError::Io)
 		}))
 	}
 
-	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_> {
+	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf) -> Self::WriteTask<'_> {
 		future::ready(self.seek(lba, buf.0.len()).and_then(|()| {
 			self.file
 				.borrow_mut()
@@ -112,12 +112,10 @@ pub struct FileAllocator;
 
 impl Allocator for FileAllocator {
 	type Error = FileDevError;
-	type AllocTask<'a> = future::Ready<Result<Self::Buf<'a>, Self::Error>>
+	type AllocTask<'a> = future::Ready<Result<Self::Buf, Self::Error>>
 	where
 		Self: 'a;
-	type Buf<'a> = FileBuf
-	where
-		Self: 'a;
+	type Buf = FileBuf;
 
 	fn alloc(&self, size: usize) -> Self::AllocTask<'_> {
 		future::ready(Ok(FileBuf(vec![0; size].into())))
@@ -125,7 +123,7 @@ impl Allocator for FileAllocator {
 }
 
 #[derive(Clone)]
-pub struct FileBuf(Rc<Vec<u8>>);
+pub struct FileBuf(Arc<Vec<u8>>);
 
 impl Buf for FileBuf {
 	type Error = FileDevError;
@@ -135,12 +133,12 @@ impl Buf for FileBuf {
 	}
 
 	fn get_mut(&mut self) -> &mut [u8] {
-		Rc::get_mut(&mut self.0).expect("buffer was cloned")
+		Arc::get_mut(&mut self.0).expect("buffer was cloned")
 	}
 
 	fn shrink(&mut self, len: usize) {
 		assert!(len <= self.0.len(), "new len is larger than old len");
-		Rc::get_mut(&mut self.0)
+		Arc::get_mut(&mut self.0)
 			.expect("buffer was cloned")
 			.resize(len, 0);
 	}

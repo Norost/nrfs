@@ -1,4 +1,4 @@
-use crate::{Resource, resource::Buf};
+use crate::{resource::Buf, Resource};
 
 pub fn max_output_size(len: usize) -> usize {
 	lz4_flex::block::get_maximum_output_size(len)

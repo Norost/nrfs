@@ -1,5 +1,8 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
+#![deny(rust_2018_idioms)]
+#![feature(async_closure)]
+#![feature(never_type)]
 #![feature(get_many_mut)]
 #![feature(cell_update)]
 #![feature(hash_drain_filter)]
@@ -119,6 +122,7 @@ mod trace {
 	}
 }
 
+mod background;
 mod cache;
 mod header;
 mod record;
@@ -137,7 +141,15 @@ pub use {
 	storage::{dev, Dev, Store},
 };
 
-use {cache::Cache, core::fmt, record::Record, storage::DevSet};
+use {
+	cache::Cache,
+	core::{fmt, future::Future, pin::Pin},
+	record::Record,
+	storage::DevSet,
+};
+
+pub type Background<'a, D> =
+	background::Background<Pin<Box<dyn Future<Output = Result<(), Error<D>>> + 'a>>>;
 
 #[derive(Debug)]
 pub struct Nros<D: Dev, R: Resource> {
@@ -154,14 +166,13 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 		max_record_size: MaxRecordSize,
 		compression: Compression,
 		read_cache_size: usize,
-		write_cache_size: usize,
 	) -> Result<Self, Error<D>>
 	where
 		M: IntoIterator<Item = C>,
 		C: IntoIterator<Item = D>,
 	{
 		let devs = DevSet::new(resource, mirrors, block_size, max_record_size, compression).await?;
-		Self::load_inner(devs, read_cache_size, write_cache_size, true).await
+		Self::load_inner(devs, read_cache_size, true).await
 	}
 
 	/// Load an existing object store.
@@ -169,37 +180,44 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 		resource: R,
 		devices: Vec<D>,
 		read_cache_size: usize,
-		write_cache_size: usize,
 		allow_repair: bool,
 	) -> Result<Self, Error<D>> {
 		let devs = DevSet::load(resource, devices, allow_repair).await?;
-		Self::load_inner(devs, read_cache_size, write_cache_size, allow_repair).await
+		Self::load_inner(devs, read_cache_size, allow_repair).await
 	}
 
 	/// Load an object store.
 	pub async fn load_inner(
 		devices: DevSet<D, R>,
 		read_cache_size: usize,
-		write_cache_size: usize,
 		allow_repair: bool,
 	) -> Result<Self, Error<D>> {
 		let store = Store::new(devices, allow_repair).await?;
-		let store = Cache::new(store, read_cache_size, write_cache_size);
+		let store = Cache::new(store, read_cache_size);
 		Ok(Self { store })
 	}
 
 	/// Create an object.
-	pub async fn create(&self) -> Result<Tree<D, R>, Error<D>> {
-		self.store.create().await
+	pub async fn create<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
+		self.store.create(bg).await
 	}
 
 	/// Create multiple adjacent objects, from ID up to ID + N - 1.
-	pub async fn create_many<const N: usize>(&self) -> Result<u64, Error<D>> {
-		self.store.create_many::<N>().await
+	pub async fn create_many<'a, 'b, const N: usize>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+	) -> Result<u64, Error<D>> {
+		self.store.create_many::<N>(bg).await
 	}
 
-	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
-		self.store.finish_transaction().await
+	pub async fn finish_transaction<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+	) -> Result<(), Error<D>> {
+		self.store.finish_transaction(bg).await
 	}
 
 	pub fn block_size(&self) -> BlockSize {
@@ -207,12 +225,16 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 	}
 
 	/// Return an owned reference to an object.
-	pub async fn get(&self, id: u64) -> Result<Tree<D, R>, Error<D>> {
+	pub async fn get<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		id: u64,
+	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
 		assert!(
 			id != u64::MAX,
 			"ID u64::MAX is reserved for the object list"
 		);
-		self.store.get(id).await
+		self.store.get(bg, id).await
 	}
 
 	/// Readjust cache size.
@@ -222,8 +244,12 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 	/// # Panics
 	///
 	/// If `global_max < write_max`.
-	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
-		self.store.resize_cache(global_max, write_max).await
+	pub async fn resize_cache<'a>(
+		&'a self,
+		bg: &Background<'a, D>,
+		global_max: usize,
+	) -> Result<(), Error<D>> {
+		self.store.resize_cache(bg, global_max).await
 	}
 
 	/// Get statistics for current session.
@@ -310,4 +336,10 @@ n2e! {
 	29 M512
 	30 G1
 	31 G2
+}
+
+impl<D: Dev> From<!> for Error<D> {
+	fn from(x: !) -> Self {
+		x
+	}
 }

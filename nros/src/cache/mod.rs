@@ -9,9 +9,10 @@ pub use tree::Tree;
 
 use {
 	crate::{
-		resource::Buf, storage, util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record,
-		Resource, Store,
+		resource::Buf, storage, util::trim_zeros_end, Background, BlockSize, Dev, Error,
+		MaxRecordSize, Record, Resource, Store,
 	},
+	alloc::rc::Rc,
 	core::{
 		cell::{RefCell, RefMut},
 		fmt,
@@ -21,6 +22,7 @@ use {
 		task::{Poll, Waker},
 	},
 	entry::{Entry, EntryRef},
+	futures_util::{stream::FuturesUnordered, Stream, StreamExt, TryStreamExt},
 	key::Key,
 	lock::ResizeLock,
 	rangemap::RangeSet,
@@ -51,13 +53,13 @@ pub(crate) struct CacheData<R: Resource> {
 	/// LRUs to manage cache size.
 	lrus: Lrus,
 	/// Record entries that are currently being fetched.
-	fetching: FxHashMap<Key, Vec<Waker>>,
+	fetching: FxHashMap<Key, Fetching>,
 	/// Record entries that are currently being flushed.
 	///
 	/// Such entries cannot be read from or written to until the flush finishes.
 	///
 	/// If any wakers have been registered during the flush the entry will not be evicted.
-	flushing: FxHashMap<Key, Vec<Waker>>,
+	flushing: FxHashMap<Key, Flushing>,
 	/// Trees that are being resized.
 	resizing: FxHashMap<u64, ResizeLock>,
 	/// Dangling roots,
@@ -111,11 +113,6 @@ impl<R: Resource + fmt::Debug> fmt::Debug for CacheData<R> {
 struct Lrus {
 	/// LRU list for global evictions.
 	global: Lru,
-	/// LRU list for flushing dirty records.
-	///
-	/// This is not used for eviction but ensures an excessive amount of writes does not hold up
-	/// reads.
-	dirty: Lru,
 }
 
 impl Lrus {
@@ -124,25 +121,13 @@ impl Lrus {
 		trim_zeros_end(&mut data);
 		let global_index = self.global.lru.insert(key);
 		self.global.cache_size += data.len() + CACHE_ENTRY_FIXED_COST;
-		let dirty_index = self.dirty.lru.insert(key);
-		self.dirty.cache_size += data.len() + CACHE_ENTRY_FIXED_COST;
-		Entry { data, global_index, write_index: Some(dirty_index) }
+		Entry { data, global_index }
 	}
 
 	/// Adjust cache usage based on manually removed entry.
 	fn adjust_cache_removed_entry<R: Resource>(&mut self, entry: &Entry<R>) {
 		self.global.lru.remove(entry.global_index);
 		self.global.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
-		// The entry *must* be dirty as otherwise it either:
-		// - wouldn't exist
-		// - have a parent node, in which case it was already destroyed in a previous
-		//   iteration.
-		// ... except if d == cur_depth. Meh
-		if let Some(idx) = entry.write_index {
-			//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
-			self.dirty.lru.remove(idx);
-			self.dirty.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
-		}
 	}
 }
 
@@ -155,6 +140,28 @@ struct Lru {
 	cache_max: usize,
 	/// The amount of cached bytes.
 	cache_size: usize,
+}
+
+/// Entry fetch state.
+#[derive(Debug)]
+struct Fetching {
+	/// Amount of tasks waiting for this entry.
+	refcount: usize,
+	/// Wakers for tasks waiting on the task that is currently fetching the entry.
+	wakers: Vec<Waker>,
+	/// The record that must be used if another attempt at fetching is made.
+	record: Record,
+	/// Whether a task is currently fetching this entry.
+	in_progress: bool,
+}
+
+/// Entry flush state.
+#[derive(Debug)]
+struct Flushing {
+	/// The entry is currently being flushed and should not be fetched.
+	wakers: Vec<Waker>,
+	/// Whether the record has been destroyed while flushing it.
+	destroyed: bool,
 }
 
 /// Cache algorithm.
@@ -174,14 +181,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// If `global_cache_max` is smaller than `dirty_cache_max`.
 	///
 	/// If `dirty_cache_max` is smaller than the maximum record size.
-	pub fn new(store: Store<D, R>, global_cache_max: usize, dirty_cache_max: usize) -> Self {
+	pub fn new(store: Store<D, R>, global_cache_max: usize) -> Self {
 		assert!(
-			global_cache_max >= dirty_cache_max,
-			"global cache size is smaller than write cache"
-		);
-		assert!(
-			dirty_cache_max >= 1 << store.max_record_size().to_raw(),
-			"write cache size is smaller than the maximum record size"
+			global_cache_max >= 1 << store.max_record_size().to_raw(),
+			"cache size is smaller than the maximum record size"
 		);
 
 		// TODO iterate over object list to find free slots.
@@ -205,11 +208,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					global: Lru {
 						lru: Default::default(),
 						cache_max: global_cache_max,
-						cache_size: 0,
-					},
-					dirty: Lru {
-						lru: Default::default(),
-						cache_max: dirty_cache_max,
 						cache_size: 0,
 					},
 				},
@@ -236,7 +234,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	}
 
 	/// Get an existing root,
-	async fn get_object_root(&self, id: u64) -> Result<Record, Error<D>> {
+	async fn get_object_root<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		id: u64,
+	) -> Result<Record, Error<D>> {
+		trace!("get_object_root {}", id);
 		if id == OBJECT_LIST_ID {
 			return Ok(self.store.object_list());
 		}
@@ -244,7 +247,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			return Ok(*root);
 		}
 		let offset = id * (mem::size_of::<Record>() as u64);
-		let list = Tree::new_object_list(self).await?;
+		let list = Tree::new_object_list(self, bg).await?;
 		let mut root = Record::default();
 		let l = list.read(offset, root.as_mut()).await?;
 		debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully read");
@@ -253,7 +256,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 	/// Update an existing root,
 	/// i.e. without resizing the object list.
-	async fn set_object_root(&self, id: u64, root: &Record) -> Result<(), Error<D>> {
+	async fn set_object_root<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		id: u64,
+		root: &Record,
+	) -> Result<(), Error<D>> {
 		if id == OBJECT_LIST_ID {
 			self.store.set_object_list(*root);
 			return Ok(());
@@ -263,17 +271,22 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			return Ok(());
 		}
 		let offset = id * (mem::size_of::<Record>() as u64);
-		let list = Tree::new_object_list(self).await?;
+		let list = Tree::new_object_list(self, bg).await?;
 		let l = list.write(offset, root.as_ref()).await?;
 		debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully written");
 		Ok(())
 	}
 
-	async fn write_object_table(&self, id: u64, data: &[u8]) -> Result<usize, Error<D>> {
+	async fn write_object_table<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		id: u64,
+		data: &[u8],
+	) -> Result<usize, Error<D>> {
 		let offset = id * (mem::size_of::<Record>() as u64);
 		let min_len = offset + u64::try_from(data.len()).unwrap();
 
-		let list = Tree::new_object_list(self).await?;
+		let list = Tree::new_object_list(self, bg).await?;
 
 		if min_len > list.len().await? {
 			list.resize(min_len).await?;
@@ -283,14 +296,20 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	}
 
 	/// Create an object.
-	pub async fn create(&self) -> Result<Tree<D, R>, Error<D>> {
+	pub async fn create<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
 		trace!("create");
-		let id = self.create_many::<1>().await?;
-		Tree::new(self, id).await
+		let id = self.create_many::<1>(bg).await?;
+		Tree::new(self, bg, id).await
 	}
 
 	/// Create many adjacent objects.
-	pub async fn create_many<const N: usize>(&self) -> Result<u64, Error<D>> {
+	pub async fn create_many<'a, 'b, const N: usize>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+	) -> Result<u64, Error<D>> {
 		trace!("create_many {}", N);
 		// Allocate
 		let id = self.alloc_ids(N.try_into().unwrap());
@@ -300,32 +319,41 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		for c in &mut b {
 			c.copy_from_slice(Record { references: 1.into(), ..Default::default() }.as_ref());
 		}
-		self.write_object_table(id, b.flatten()).await?;
+		self.write_object_table(bg, id, b.flatten()).await?;
 
 		// Tadha!
 		Ok(id)
 	}
 
 	/// Get an object.
-	pub async fn get(&self, id: u64) -> Result<Tree<D, R>, Error<D>> {
+	pub async fn get<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		id: u64,
+	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
 		trace!("get {}", id);
-		Tree::new(self, id).await
+		Tree::new(self, bg, id).await
 	}
 
 	/// Remove an entry from the cache.
 	///
-	/// This does *not* flush the entry if it is dirty!
-	fn remove_entry(&self, key: Key) -> Option<Entry<R>> {
+	/// The second value indicates whether the entry is dirty.
+	fn remove_entry(&self, key: Key) -> Option<(Entry<R>, bool)> {
 		let data = { &mut *self.data.borrow_mut() };
-		let entry = key.remove_entry(self.max_record_size(), &mut data.data)?;
+		let (entry, is_dirty) = key.remove_entry(self.max_record_size(), &mut data.data)?;
 		data.lrus.adjust_cache_removed_entry(&entry);
-		Some(entry)
+		Some((entry, is_dirty))
 	}
 
 	/// Move an object to a specific ID.
 	///
 	/// The old object is destroyed.
-	pub async fn move_object(&self, from: u64, to: u64) -> Result<(), Error<D>> {
+	pub async fn move_object<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		from: u64,
+		to: u64,
+	) -> Result<(), Error<D>> {
 		trace!("move_object {} -> {}", from, to);
 
 		if from == to {
@@ -333,22 +361,22 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		}
 
 		// Free allocations in target object.
-		self.get(to).await?.resize(0).await?;
+		self.get(bg, to).await?.resize(0).await?;
 
 		// Move root out of from object.
-		let rec = self.get_object_root(from).await?;
+		let rec = self.get_object_root(bg, from).await?;
 		self.data.borrow_mut().dangling_roots.insert(from, rec);
 		// Clear original root
 		// We can't use set_object_root as it checks dangling_roots
 		let offt = mem::size_of::<Record>() as u64 * from;
-		Tree::new_object_list(self)
+		Tree::new_object_list(self, bg)
 			.await?
 			.write_zeros(offt, mem::size_of::<Record>() as _)
 			.await?;
 
 		// Fetch entry with to object root now to ensure we can store the entry later with
 		// no flushes.
-		let _ = self.get_object_root(to).await?;
+		let _ = self.get_object_root(bg, to).await?;
 
 		// Move object data & fix LRU entries.
 		let mut data = self.data.borrow_mut();
@@ -362,15 +390,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						.get_mut(entry.global_index)
 						.expect("invalid global LRU index");
 					*key = Key::new(to, key.depth(), key.offset());
-					if let Some(idx) = entry.write_index {
-						let key = data
-							.lrus
-							.dirty
-							.lru
-							.get_mut(idx)
-							.expect("invalid write LRU index");
-						*key = Key::new(to, key.depth(), key.offset());
-					}
 				}
 			}
 			data.data.insert(to, obj);
@@ -397,7 +416,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		});
 
 		EntryRef::new(self, key, entry, lrus)
-			.modify(|data| {
+			.modify(bg, |data| {
 				let offt = usize::try_from(offset % (1u64 << self.max_record_size())).unwrap();
 				let len = data.len().max(offt + mem::size_of::<Record>());
 				data.resize(len, 0);
@@ -410,24 +429,17 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	}
 
 	/// Finish the current transaction, committing any changes to the underlying devices.
-	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
+	pub async fn finish_transaction<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+	) -> Result<(), Error<D>> {
 		// First flush cache
-		let data = self.data.borrow();
-		let global_max = data.lrus.global.cache_max;
-		let dirty_max = data.lrus.dirty.cache_max;
-		drop(data);
-		self.resize_cache(global_max, 0).await?;
-		debug_assert_eq!(
-			self.statistics().dirty_usage,
-			0,
-			"not all data has been flushed"
-		);
+		self.flush_all(bg).await?;
 
 		// Flush store-specific data.
 		self.store.finish_transaction().await?;
 
-		// Restore cache params
-		self.resize_cache(global_max, dirty_max).await
+		Ok(())
 	}
 
 	/// The block size used by the underlying [`Store`].
@@ -456,31 +468,58 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		#[cfg(debug_assertions)]
 		self.store.assert_alloc(record);
 
-		// We take 4 steps:
+		// Steps:
 		//
 		// 1. First check if the entry is already present.
 		//    If so, just return it.
-		// 2. Check if the entry is being flushed.
+		// 2. Insert state in CacheData::fetching
+		// 3. Try to get the entry.
+		// 4. Check if the entry is being flushed.
 		//    If so, wait until the flush finishes.
-		// 3. Check if the entry is already being fetched.
+		// 5. Check if the entry is already being fetched.
 		//    If so, wait for the fetch to finish.
 		//    If not, fetch and return when ready.
-		// 4. Try to get the entry.
-		// 5. Repeat from 2.
+		// 6. Repeat from 3.
+
+		// 1. First check if the entry is already present.
+		if let Some(entry) = self.get_entry(key) {
+			return Ok(entry);
+		}
+
+		// 2. Insert state in CacheData::fetching
+		let mut data = self.data.borrow_mut();
+		match data.fetching.entry(key) {
+			hash_map::Entry::Occupied(e) => e.into_mut().refcount += 1,
+			hash_map::Entry::Vacant(e) => {
+				e.insert(Fetching {
+					wakers: vec![],
+					refcount: 1,
+					record: *record,
+					in_progress: false,
+				});
+			}
+		}
+		drop(data);
 
 		let insert = move |mut data: RefMut<'a, CacheData<R>>, d: Result<R::Buf, _>| {
-			// Wake other tasks waiting for this entry.
-			data.fetching
-				.remove(&key)
-				.expect("no wakers list")
-				.into_iter()
-				.for_each(|w| w.wake());
-
 			// Check if an error occurred.
 			let d = match d {
 				Ok(d) => d,
 				Err(e) => return Poll::Ready(Err(e)),
 			};
+
+			// Remove reference to state
+			let hash_map::Entry::Occupied(mut state) = data.fetching.entry(key)
+				else { panic!("no fetching entry") };
+			state.get_mut().in_progress = false;
+			state.get_mut().refcount -= 1;
+			if state.get_mut().refcount == 0 {
+				debug_assert!(state.get().wakers.is_empty(), "wakers with no references");
+				state.remove();
+			} else {
+				// Wake other tasks waiting for this entry.
+				state.get_mut().wakers.drain(..).for_each(|w| w.wake());
+			}
 
 			// Insert entry & return it.
 			let (trees, mut lrus) = RefMut::map_split(data, |d| (&mut d.data, &mut d.lrus));
@@ -491,8 +530,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			let levels = RefMut::map(tree, |t| &mut t.data[usize::from(key.depth())]);
 
 			let entry = RefMut::map(levels, |l| {
-				let entry: Entry<R> =
-					Entry { data: d, global_index: lrus.global.lru.insert(key), write_index: None };
+				let entry: Entry<R> = Entry { data: d, global_index: lrus.global.lru.insert(key) };
 				lrus.global.cache_size += entry.data.len() + CACHE_ENTRY_FIXED_COST;
 				l.entries
 					.try_insert(key.offset(), entry)
@@ -500,6 +538,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			});
 			Poll::Ready(Ok(EntryRef::new(self, key, entry, lrus)))
 		};
+
+		let read = |record| async move { self.store.read(&record).await };
 
 		let mut fetching = None;
 
@@ -515,39 +555,49 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				return insert(self.data.borrow_mut(), d);
 			}
 
-			// 1. First check if the entry is already present.
+			// 3. Try to get the entry.
 			if let Some(entry) = self.get_entry(key) {
+				// TODO try to avoid double call to get_entry
+				drop(entry);
+				// Remove reference to state
+				let mut data = self.data.borrow_mut();
+				let hash_map::Entry::Occupied(mut state) = data.fetching.entry(key)
+					else { panic!("no fetching entry") };
+				debug_assert!(
+					state.get().wakers.is_empty(),
+					"there should be no wakers with entry present"
+				);
+				state.get_mut().refcount -= 1;
+				if state.get_mut().refcount == 0 {
+					state.remove();
+				}
+				drop(data);
+				let entry = self.get_entry(key).unwrap();
 				return Poll::Ready(Ok(entry));
 			}
-			let mut data = self.data.borrow_mut();
 
-			// 2. Check if the entry is being flushed.
-			if let Some(wakers) = data.flushing.get_mut(&key) {
-				wakers.push(cx.waker().clone());
+			// 4. Check if the entry is being flushed.
+			let mut data = self.data.borrow_mut();
+			if let Some(state) = data.flushing.get_mut(&key) {
+				state.wakers.push(cx.waker().clone());
 				return Poll::Pending;
 			}
 
-			// 3. Check if the entry is already being fetched.
-			match data.fetching.entry(key) {
-				hash_map::Entry::Vacant(e) => {
-					// Add list for other fetchers to register wakers to.
-					e.insert(Default::default());
-					drop(data);
-
-					// Fetch record
-					let f = fetching.insert(self.store.read(record));
-					// SAFETY: we won't move the future in fetching to anywhere else.
-					let f = unsafe { Pin::new_unchecked(f) };
-					let Poll::Ready(d) = Future::poll(f, cx) else { return Poll::Pending };
-
-					// Insert entry & return.
-					insert(self.data.borrow_mut(), d)
-				}
-				hash_map::Entry::Occupied(e) => {
-					// Wait until the fetcher for this record finishes.
-					e.into_mut().push(cx.waker().clone());
-					Poll::Pending
-				}
+			// 5. Check if the entry is already being fetched.
+			let state = data.fetching.get_mut(&key).expect("no fetching entry");
+			if state.in_progress {
+				state.wakers.push(cx.waker().clone());
+				Poll::Pending
+			} else {
+				state.in_progress = true;
+				// Fetch record
+				let f = fetching.insert(read(state.record));
+				drop(data);
+				// SAFETY: we won't move the future in fetching to anywhere else.
+				let f = unsafe { Pin::new_unchecked(f) };
+				let Poll::Ready(d) = Future::poll(f, cx) else { return Poll::Pending };
+				// Insert entry & return.
+				insert(self.data.borrow_mut(), d)
 			}
 		})
 		.await
@@ -565,8 +615,14 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// If not, don't bother fetching it as that is a waste of time.
 		self.store.destroy(record);
 		let mut data = self.data.borrow_mut();
-		if let Some(entry) = key.remove_entry(self.max_record_size(), &mut data.data) {
+		if let Some((entry, _)) = key.remove_entry(self.max_record_size(), &mut data.data) {
 			data.lrus.adjust_cache_removed_entry(&entry);
+		}
+		// If the record was already being flushed/evicted in the background, mark it as
+		// destroyed.
+		if let Some(state) = data.flushing.get_mut(&key) {
+			dbg!();
+			state.destroyed = true;
 		}
 	}
 
@@ -575,7 +631,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// # Panics
 	///
 	/// If another borrow is alive.
-	fn get_object_entry_mut(&self, id: u64, max_depth: u8) -> RefMut<TreeData<R>> {
+	fn get_object_entry_mut(&self, id: u64, max_depth: u8) -> RefMut<'_, TreeData<R>> {
 		RefMut::map(self.data.borrow_mut(), |data| {
 			data.data
 				.entry(id)
@@ -595,95 +651,44 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// # Panics
 	///
 	/// If `global_max < write_max`.
-	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
-		assert!(
-			global_max >= write_max,
-			"global cache is smaller than write cache"
-		);
+	pub async fn resize_cache<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		global_max: usize,
+	) -> Result<(), Error<D>> {
 		{
 			let mut data = { &mut *self.data.borrow_mut() };
 			data.lrus.global.cache_max = global_max;
-			data.lrus.dirty.cache_max = write_max;
 		}
-		self.flush().await
+		self.flush(bg).await
 	}
 
 	/// Flush if total memory use exceeds limits.
-	async fn flush(&self) -> Result<(), Error<D>> {
+	async fn flush<'a, 'b>(&'a self, bg: &'b Background<'a, D>) -> Result<(), Error<D>> {
 		let mut data = self.data.borrow_mut();
 
 		if data.is_flushing {
 			// Don't bother.
 			return Ok(());
 		}
+
 		data.is_flushing = true;
+		drop(data);
 
 		trace!("flush");
+		self.evict_excess(bg).await?;
 
-		while data.lrus.dirty.cache_size > data.lrus.dirty.cache_max {
-			// Remove last written to entry.
-			let &key = data
-				.lrus
-				.dirty
-				.lru
-				.last()
-				.expect("no nodes despite non-zero write cache size");
+		self.data.borrow_mut().is_flushing = false;
+		Ok(())
+	}
 
-			// Prevent record from being modified while flushing.
-			// This also briefly prevents reads but w/e.
-			let _r = data.flushing.insert(key, Default::default());
-			debug_assert!(_r.is_none(), "entry was already marked as being flushed.");
-
-			// Take data out of entry temporarily.
-			let (mut entry, mut lrus) = RefMut::map_split(data, |data| {
-				let entry = key.get_entry_mut(&mut data.data).expect("no entry");
-				(entry, &mut data.lrus)
-			});
-
-			// Remove from write LRU
-			lrus.dirty.lru.remove_last().unwrap();
-			entry.write_index = None;
-			lrus.dirty.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
-			drop(lrus);
-
-			// Store record.
-			// TODO try to do concurrent writes.
-			// TODO avoid expensive clone.
-			let d = entry.data.clone();
-			drop(entry);
-			let rec = self.store.write(d.get()).await?;
-			drop(d);
-
-			Tree::new(self, key.id())
-				.await?
-				.update_record(key.depth(), key.offset(), rec)
-				.await?;
-			data = self.data.borrow_mut();
-
-			// Update dirty counters
-			let mut offt = key.offset();
-			for level in data.data.get_mut(&key.id()).unwrap().data[key.depth().into()..].iter_mut()
-			{
-				let std::collections::hash_map::Entry::Occupied(mut c) = level.dirty_counters.entry(offt) else { panic!() };
-				*c.get_mut() -= 1;
-				if *c.get() == 0 {
-					c.remove();
-				}
-				offt >>= self.entries_per_parent_p2();
-			}
-
-			// Wake tasks that are waiting for this entry.
-			let wakers = data
-				.flushing
-				.remove(&key)
-				.expect("entry not marked as being flushed");
-			for w in wakers {
-				w.wake();
-			}
-		}
+	/// Evict entries if global cache limits are being exceeded.
+	async fn evict_excess<'a, 'b>(&'a self, bg: &'b Background<'a, D>) -> Result<(), Error<D>> {
+		trace!("evict_excess");
+		let mut data = self.data.borrow_mut();
 
 		while data.lrus.global.cache_size > data.lrus.global.cache_max {
-			// Remove last written to entry.
+			// Get last read entry.
 			let &key = data
 				.lrus
 				.global
@@ -691,42 +696,225 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				.last()
 				.expect("no nodes despite non-zero write cache size");
 
+			// Push to background tasks queue to process in parallel
 			drop(data);
-			let entry = self.remove_entry(key).expect("entry not present");
-
-			if entry.write_index.is_some() {
-				// Store record.
-				// TODO try to do concurrent writes.
-				let rec = self.store.write(entry.data.get()).await?;
-
-				Tree::new(self, key.id())
-					.await?
-					.update_record(key.depth(), key.offset(), rec)
-					.await?;
+			if let Some(task) = self.evict_entry(key) {
+				bg.run_background(Box::pin(task));
 			}
 			data = self.data.borrow_mut();
 		}
 
-		data.is_flushing = false;
 		Ok(())
 	}
 
 	/// Evict an entry from the cache.
 	///
 	/// Does nothing if the entry wasn't present.
-	async fn evict_entry(&self, key: Key) -> Result<(), Error<D>> {
+	fn evict_entry(&self, key: Key) -> Option<impl Future<Output = Result<(), Error<D>>> + '_> {
 		trace!("evict_entry {:?}", key);
-		let Some(entry) = self.remove_entry(key) else { return Ok(()) };
+		let (entry, is_dirty) = self.remove_entry(key)?;
 
-		if entry.write_index.is_some() {
-			// Store record.
-			let rec = self.store.write(entry.data.get()).await?;
-			Tree::new(self, key.id())
-				.await?
-				.update_record(key.depth(), key.offset(), rec)
-				.await?;
+		// Temporarily block fetches.
+		// Blocking fetches is not ideal but it's easy.
+		// Given that the entry was at the end of the queue it is unlikely it will be
+		// needed soon anyways.
+		if is_dirty {
+			let _r = self
+				.data
+				.borrow_mut()
+				.flushing
+				.insert(key, Flushing { wakers: vec![], destroyed: false });
+			debug_assert!(_r.is_none(), "entry was already being flushed");
 		}
 
+		is_dirty.then(|| async move {
+			trace!("evict_entry::is_dirty {:?}", key);
+			// Store record.
+			let record = self.store.write(entry.data).await?;
+
+			// Check if the corresponding record changed in the meantime.
+			//
+			// This may happen due to destroy(), which is a non-async function.
+			//
+			// If so, destroy the newly created entry and return immediately.
+			let mut data = self.data.borrow_mut();
+			let hash_map::Entry::Occupied(state) = data.flushing.entry(key)
+				else { panic!("entry not marked as being flushed") };
+			if dbg!(state.get().destroyed) {
+				self.store.destroy(&record);
+				state.remove().wakers.drain(..).for_each(|w| w.wake());
+				// Set record if any records are attempting to fetch this entry.
+				if let Some(state) = data.fetching.get_mut(&key) {
+					todo!();
+					// TODO Waking just one task for fetching should be sufficient.
+					state.wakers.drain(..).for_each(|w| w.wake());
+				}
+				return Ok(());
+			}
+			drop(data);
+
+			let bg = Default::default(); // TODO get rid of this sillyness
+			let updated = Tree::new(self, &bg, key.id())
+				.await?
+				.update_record(key.depth(), key.offset(), record)
+				.await?;
+			// Unmark as being flushed.
+			let mut data = self.data.borrow_mut();
+			// Wake waiting fetchers.
+			data.flushing
+				.remove(&key)
+				.expect("entry not marked as being flushed")
+				.wakers
+				.drain(..)
+				.for_each(|w| w.wake());
+			// Set record if any records are attempting to fetch this entry.
+			if let Some(state) = data.fetching.get_mut(&key) {
+				state.record = record;
+				// TODO Waking just one task for fetching should be sufficient.
+				state.wakers.drain(..).for_each(|w| w.wake());
+			}
+			drop(data);
+			// Make sure we only drop the "background" runner at the end to avoid
+			// getting stuck when something tries to fetch the entry that is
+			// being evicted.
+			//
+			// Specifically, we must ensure the Flushing state is removed before
+			// we attempt to run the background tasks to completion.
+			bg.drop().await
+		})
+	}
+
+	/// Flush an entry from the cache.
+	///
+	/// This does not evict the entry.
+	///
+	/// Does nothing if the entry wasn't present or dirty.
+	async fn flush_entry<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		key: Key,
+	) -> Result<(), Error<D>> {
+		trace!("flush_entry {:?}", key);
+		let mut data = self.data.borrow_mut();
+		let Some(tree) = data.data.get_mut(&key.id()) else { return Ok(()) };
+		let [level, levels @ ..] = &mut tree.data[usize::from(key.depth())..] else {
+			panic!("depth out of range")
+		};
+
+		// FIXME clear dirty status
+		let Some(counter) = level.dirty_counters.get_mut(&key.offset()) else { return Ok(()) };
+		*counter -= 1;
+		*counter &= isize::MAX;
+		if *counter == 0 {
+			level.dirty_counters.remove(&key.offset());
+		}
+
+		// Propagate up
+		let mut offt = key.offset() >> self.entries_per_parent_p2();
+		for lvl in levels {
+			let hash_map::Entry::Occupied(mut e) = lvl.dirty_counters.entry(offt)
+				else { panic!("missing dirty counter in ancestor") };
+			*e.get_mut() -= 1;
+			debug_assert_ne!(*e.get(), isize::MIN, "dirty without references");
+			if *e.get() == 0 {
+				e.remove();
+			}
+			offt >>= self.entries_per_parent_p2();
+		}
+
+		let entry = level
+			.entries
+			.get_mut(&key.offset())
+			.expect("dirty entry not present");
+
+		// FIXME Temporarily block other fetches & flushes, in case the entry gets evicted during await.
+
+		// Store record.
+		let entry_data = entry.data.clone();
+		drop(data);
+		let rec = self.store.write(entry_data).await?;
+		Tree::new(self, bg, key.id())
+			.await?
+			.update_record(key.depth(), key.offset(), rec)
+			.await?;
+
+		Ok(())
+	}
+
+	/// Flush all entries.
+	async fn flush_all<'a, 'b>(&'a self, bg: &'b Background<'a, D>) -> Result<(), Error<D>> {
+		trace!("flush_all");
+		// Go through all trees and flush from bottom to top.
+		//
+		// Start from the bottom of all trees since those are trivial to all flush in parallel.
+
+		// Wait for all "background" tasks to finish, which may include active flushes.
+		bg.try_run_all().await?;
+
+		let mut data = self.data.borrow_mut();
+		let mut queue = FuturesUnordered::new();
+
+		// Flush all objects except the object list,
+		// since the latter will get a lot of updates to the leaves.
+		let ids = data
+			.data
+			.keys()
+			.copied()
+			.filter(|&id| id != OBJECT_LIST_ID)
+			.collect::<Vec<_>>();
+		for depth in 0..16 {
+			for &id in ids.iter() {
+				let Some(tree) = data.data.get_mut(&id) else { continue };
+				let Some(level) = tree.data.get_mut(usize::from(depth)) else { continue };
+				let offsets = level.dirty_counters.keys().copied().collect::<Vec<_>>();
+				drop(data);
+
+				// Flush in parallel.
+				for offt in offsets {
+					let key = Key::new(id, depth, offt);
+					queue.push(self.flush_entry(bg, key));
+				}
+				while queue.try_next().await?.is_some() {}
+
+				// Wait for background tasks in case higher records got flushed.
+				bg.try_run_all().await?;
+
+				data = self.data.borrow_mut();
+			}
+		}
+
+		// Now flush the object list.
+		for depth in 0..16 {
+			let Some(tree) = data.data.get_mut(&OBJECT_LIST_ID) else { continue };
+			let Some(level) = tree.data.get_mut(usize::from(depth)) else { continue };
+			let offsets = level.dirty_counters.keys().copied().collect::<Vec<_>>();
+			drop(data);
+
+			// Flush in parallel.
+			for offt in offsets {
+				let key = Key::new(OBJECT_LIST_ID, depth, offt);
+				queue.push(self.flush_entry(bg, key));
+			}
+			while queue.try_next().await?.is_some() {}
+
+			// Wait for background tasks in case higher records got flushed.
+			bg.try_run_all().await?;
+
+			data = self.data.borrow_mut();
+		}
+
+		// Tadha!
+		// Do a sanity check just in case.
+		if cfg!(debug_assertions) {
+			for tree in data.data.values() {
+				for level in tree.data.iter() {
+					debug_assert!(
+						level.dirty_counters.is_empty(),
+						"flush_all didn't flush all"
+					);
+				}
+			}
+		}
 		Ok(())
 	}
 
@@ -735,7 +923,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// The cache is flushed before returning the underlying [`Store`].
 	pub async fn unmount(self) -> Result<Store<D, R>, Error<D>> {
 		trace!("unmount");
-		self.finish_transaction().await?;
+		let bg = Default::default();
+		self.finish_transaction(&bg).await?;
+		bg.drop().await?;
 		Ok(self.store)
 	}
 
@@ -745,11 +935,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();
-		Statistics {
-			storage: self.store.statistics(),
-			global_usage: data.lrus.global.cache_size,
-			dirty_usage: data.lrus.dirty.cache_size,
-		}
+		Statistics { storage: self.store.statistics(), global_usage: data.lrus.global.cache_size }
 	}
 
 	/// Check if cache size matches real usage
@@ -789,6 +975,4 @@ pub struct Statistics {
 	pub storage: storage::Statistics,
 	/// Total amount of memory used by record data, including dirty data.
 	pub global_usage: usize,
-	/// Total amount of memory used by dirty record data.
-	pub dirty_usage: usize,
 }

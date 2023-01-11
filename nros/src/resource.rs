@@ -8,22 +8,26 @@ use core::future::Future;
 /// * Threads for parallel processing.
 pub trait Resource {
 	/// Type representing a region of memory.
-	type Buf: Buf;
+	type Buf: Buf + 'static;
 
 	/// Type representing a running task.
-	type Task<'a>: Future<Output = ()>
+	type Task<'a, R>: Future<Output = R>
 	where
-		Self: 'a;
+		Self: 'a,
+		R: 'static;
 
 	/// Create an empty memory buffer.
 	fn alloc(&self) -> Self::Buf;
 
 	/// Run the given closure.
-	fn run(&self, f: Box<dyn FnOnce() + Send + 'static>) -> Self::Task<'_>;
+	fn run<F, R>(&self, f: F) -> Self::Task<'_, R>
+	where
+		F: (FnOnce() -> R) + Send + 'static,
+		R: Send + 'static;
 }
 
 /// Type representing a region of memory.
-pub trait Buf: Clone {
+pub trait Buf: Clone + Send {
 	/// Get an immutable reference to the underlying data.
 	fn get(&self) -> &[u8];
 
@@ -74,21 +78,33 @@ mod std {
 	impl Resource for StdResource {
 		type Buf = Vec<u8>;
 
-		type Task<'a> = RunTask
+		type Task<'a, R> = RunTask<R>
 		where
-			Self: 'a;
+			Self: 'a,
+			R: 'static;
 
 		fn alloc(&self) -> Self::Buf {
 			Vec::new()
 		}
 
-		fn run(&self, f: Box<dyn FnOnce() + Send + 'static>) -> Self::Task<'_> {
-			let (send, recv) = futures_channel::oneshot::channel::<()>();
-			rayon::spawn(move || {
-				f();
-				send.send(()).unwrap()
-			});
-			RunTask { recv }
+		fn run<F, R>(&self, f: F) -> Self::Task<'_, R>
+		where
+			F: (FnOnce() -> R) + Send + 'static,
+			R: Send + 'static,
+		{
+			#[cfg(feature = "parallel")]
+			{
+				let (send, recv) = futures_channel::oneshot::channel::<R>();
+				rayon::spawn(move || {
+					send.send(f())
+						.unwrap_or_else(|_| panic!("channel sent no data"));
+				});
+				RunTask { recv }
+			}
+			#[cfg(not(feature = "parallel"))]
+			{
+				RunTask { result: core::future::ready(f()) }
+			}
 		}
 	}
 
@@ -115,15 +131,25 @@ mod std {
 	}
 
 	/// Computationally expensive task running in parallel.
-	pub struct RunTask {
-		recv: futures_channel::oneshot::Receiver<()>,
+	pub struct RunTask<R> {
+		#[cfg(feature = "parallel")]
+		recv: futures_channel::oneshot::Receiver<R>,
+		#[cfg(not(feature = "parallel"))]
+		result: core::future::Ready<R>,
 	}
 
-	impl Future for RunTask {
-		type Output = ();
+	impl<R> Future for RunTask<R> {
+		type Output = R;
 
-		fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-			Pin::new(&mut self.recv).poll(cx).map(|r| r.unwrap())
+		fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+			#[cfg(feature = "parallel")]
+			{
+				Pin::new(&mut self.recv).poll(cx).map(|r| r.unwrap())
+			}
+			#[cfg(not(feature = "parallel"))]
+			{
+				Pin::new(&mut self.result).poll(cx)
+			}
 		}
 	}
 }

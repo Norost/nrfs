@@ -13,7 +13,6 @@ async fn new(delay: usize) -> Nros<SlowDev, StdResource> {
 		MaxRecordSize::K1,
 		Compression::None,
 		4096,
-		4096,
 	)
 	.await
 	.unwrap()
@@ -47,7 +46,7 @@ impl<T: Future> SlowTask<T> {
 impl<T: Future> Future for SlowTask<T> {
 	type Output = T::Output;
 
-	fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		if self.delay == 0 {
 			self.future.as_mut().poll(cx)
 		} else {
@@ -81,7 +80,7 @@ impl Dev for SlowDev {
 	fn write(
 		&self,
 		lba: u64,
-		buf: <<MemDev as Dev>::Allocator as Allocator>::Buf<'_>,
+		buf: <<MemDev as Dev>::Allocator as Allocator>::Buf,
 	) -> Self::WriteTask<'_> {
 		SlowTask::new(self.dev.write(lba, buf), self.alloc.delay)
 	}
@@ -96,7 +95,7 @@ impl Dev for SlowDev {
 }
 
 impl Allocator for SlowAllocator {
-	type Buf<'a> = <MemAllocator as Allocator>::Buf<'a>;
+	type Buf = <MemAllocator as Allocator>::Buf;
 	type Error = <MemAllocator as Allocator>::Error;
 	type AllocTask<'a> = SlowTask<<MemAllocator as Allocator>::AllocTask<'a>>;
 
@@ -108,10 +107,12 @@ impl Allocator for SlowAllocator {
 /// Read from an object concurrently.
 #[test]
 fn read() {
-	run(async {
-		let s = new(5).await;
-
-		let obj = s.create().await.unwrap();
+	// FIXME there is a source of non-determinism somewhere
+	// and it's pissing me off.
+	let s = block_on(new(5));
+	let bg = Background::default();
+	run2(&bg, async {
+		let obj = s.create(&bg).await.unwrap();
 		// Write to at least 8 different leaves to ensure we exceed cache limits
 		obj.resize(1024 * 8).await.unwrap();
 		for i in 0..8 {
@@ -128,17 +129,18 @@ fn read() {
 			})
 			.collect::<FuturesUnordered<_>>()
 			.for_each(|()| future::ready(()))
-			.await
-	})
+			.await;
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 /// Write to an object concurrently.
 #[test]
 fn write() {
-	run(async {
-		let s = new(5).await;
-
-		let obj = s.create().await.unwrap();
+	let s = block_on(new(5));
+	let bg = Background::default();
+	run2(&bg, async {
+		let obj = s.create(&bg).await.unwrap();
 		// Write concurrently.
 		// Write to at least 8 different leaves to ensure we exceed cache limits
 		obj.resize(1024 * 8).await.unwrap();
@@ -154,5 +156,6 @@ fn write() {
 			obj.read(1024 * i + 1023, buf).await.unwrap();
 			assert_eq!(*buf, [1]);
 		}
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }

@@ -3,7 +3,7 @@ pub mod dev;
 
 use {
 	crate::{resource::Buf, BlockSize, Compression, Error, MaxRecordSize, Record, Resource},
-	alloc::vec::Vec,
+	alloc::{sync::Arc, vec::Vec},
 	allocator::Allocator,
 	core::cell::{Cell, RefCell},
 	dev::Set256,
@@ -125,7 +125,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	}
 
 	/// Write a record.
-	pub async fn write(&self, data: &[u8]) -> Result<Record, Error<D>> {
+	pub async fn write(&self, data: R::Buf) -> Result<Record, Error<D>> {
 		// Calculate minimum size of buffer necessary for the compression algorithm
 		// to work.
 		let len = self.compression().max_output_size(data.len());
@@ -137,7 +137,17 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			.devices
 			.alloc(max_blks << self.block_size().to_raw())
 			.await?;
-		let mut rec = Record::pack(data, buf.get_mut(), self.compression(), self.block_size());
+		let compression = self.compression();
+		let block_size = self.block_size();
+		let data_len = data.len();
+		let (mut rec, mut buf) = self
+			.resource()
+			.run(move || {
+				let rec = Record::pack(data.get(), buf.get_mut(), compression, block_size);
+				(rec, buf)
+			})
+			.await;
+		//let mut rec = Record::pack(data.get(), buf.get_mut(), compression, block_size);
 
 		// Strip unused blocks from the buffer
 		let blks = self.calc_block_count(rec.length.into());
@@ -163,7 +173,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		self.packed_bytes_written
 			.update(|x| x + u64::from(u32::from(rec.length)));
 		self.unpacked_bytes_written
-			.update(|x| x + u64::try_from(data.len()).unwrap());
+			.update(|x| x + u64::try_from(data_len).unwrap());
 
 		// Presto!
 		Ok(rec)

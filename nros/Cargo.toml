@@ -5,7 +5,8 @@ edition = "2021"
 
 [features]
 default = ["std"]
-std = ["rayon"]
+std = []
+parallel = ["rayon"]
 # Disallow writing over records allocated & freed in the same transacion.
 #
 # This option is useful for detecting use-after-frees.

@@ -92,7 +92,7 @@ fn main() {
 	let mut fut = pin!(fut);
 	let waker = unsafe { Waker::from_raw(RAW) };
 	let mut cx = Context::from_waker(&waker);
-	while fut.as_mut().poll(&mut cx).is_pending() {}
+	futures_executor::block_on(fut);
 }
 
 async fn make(args: Make) {

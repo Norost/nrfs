@@ -1,7 +1,8 @@
 use {
-	super::{lru, Cache, Key, Lrus, CACHE_ENTRY_FIXED_COST},
-	crate::{resource::Buf, util::trim_zeros_end, Dev, Error, Resource},
+	super::{lru, Cache, Key, Lrus},
+	crate::{resource::Buf, util::trim_zeros_end, Background, Dev, Error, Resource},
 	core::{cell::RefMut, fmt, ops::Deref},
+	std::collections::hash_map,
 };
 
 /// A single cache entry.
@@ -10,8 +11,6 @@ pub struct Entry<R: Resource> {
 	pub data: R::Buf,
 	/// Global LRU index.
 	pub global_index: lru::Idx,
-	/// Dirty LRU index, if the data is actually dirty.
-	pub write_index: Option<lru::Idx>,
 }
 
 impl<R: Resource> fmt::Debug for Entry<R> {
@@ -19,7 +18,6 @@ impl<R: Resource> fmt::Debug for Entry<R> {
 		f.debug_struct(stringify!(Entry))
 			.field("data", &format_args!("{:?}", &self.data.get()))
 			.field("global_index", &self.global_index)
-			.field("write_index", &self.write_index)
 			.finish()
 	}
 }
@@ -48,7 +46,11 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 	/// This may trigger a flush when the closure returns.
 	///
 	/// This consumes the entry to ensure no reference is held across an await point.
-	pub async fn modify(self, f: impl FnOnce(&mut R::Buf)) -> Result<(), Error<D>> {
+	pub async fn modify(
+		self,
+		bg: &Background<'a, D>,
+		f: impl FnOnce(&mut R::Buf),
+	) -> Result<(), Error<D>> {
 		let Self { cache, key, mut lrus, mut entry } = self;
 		let original_len = entry.data.len();
 
@@ -57,32 +59,33 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 		// Trim zeros, which we always want to do.
 		trim_zeros_end(&mut entry.data);
 
-		// Check if we still need to mark the entry as dirty.
-		// Otherwise promote.
+		// Adjust cache use
 		lrus.global.cache_size += entry.data.len();
 		lrus.global.cache_size -= original_len;
-		if let Some(idx) = entry.write_index {
-			lrus.dirty.lru.promote(idx);
-			lrus.dirty.cache_size += entry.data.len();
-			lrus.dirty.cache_size -= original_len;
-			drop((lrus, entry));
-		} else {
-			let idx = lrus.dirty.lru.insert(key);
-			lrus.dirty.cache_size += entry.data.len() + CACHE_ENTRY_FIXED_COST;
-			entry.write_index = Some(idx);
-			drop((lrus, entry));
-			// Update dirty counters
-			let mut data = self.cache.data.borrow_mut();
-			let levels = &mut data.data.get_mut(&key.id()).unwrap().data;
-			let mut offt = key.offset();
-			for level in levels[key.depth().into()..].iter_mut() {
-				*level.dirty_counters.entry(offt).or_insert(0) += 1;
+
+		// Bump entry to front of LRU.
+		lrus.global.lru.promote(entry.global_index);
+
+		// Update dirty counters if not already dirty.
+		drop((lrus, entry));
+		let mut data = self.cache.data.borrow_mut();
+		let [level, levels @ ..] = &mut data.data.get_mut(&key.id()).unwrap().data[usize::from(key.depth())..]
+			else { panic!("depth out of range") };
+		let counter = level.dirty_counters.entry(key.offset()).or_insert(0);
+		if *counter & isize::MIN == 0 {
+			*counter |= isize::MIN;
+			*counter += 1;
+
+			let mut offt = key.offset() >> cache.entries_per_parent_p2();
+			for lvl in levels {
+				*lvl.dirty_counters.entry(offt).or_insert(0) += 1;
 				offt >>= cache.entries_per_parent_p2();
 			}
 		}
+		drop(data);
 
 		// Flush
-		cache.flush().await
+		cache.flush(bg).await
 	}
 }
 

@@ -2,7 +2,7 @@ mod chain;
 mod mirror;
 
 use {
-	super::run,
+	super::block_on,
 	crate::{
 		dev::{Allocator, Buf},
 		*,

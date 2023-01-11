@@ -4,46 +4,61 @@ use super::*;
 /// And also whether loading works.
 #[test]
 fn write_remount_read() {
-	run(async {
-		let s = new(MaxRecordSize::K1).await;
-		let obj = s.create().await.unwrap();
+	let s = new(MaxRecordSize::K1);
+	let bg = Background::default();
+	let id = block_on(async {
+		let obj = s.create(&bg).await.unwrap();
 		obj.resize(1).await.unwrap();
 		obj.write(0, &[1]).await.unwrap();
 
-		let id = obj.id();
-		drop(obj);
-		let devs = s.unmount().await.unwrap();
-		let s = Nros::load(StdResource::new(), devs, 1 << 12, 1 << 12, true)
-			.await
-			.unwrap();
+		obj.id()
+	});
+	block_on(bg.drop()).unwrap();
 
-		let obj = s.get(id).await.unwrap();
+	let s = block_on(async {
+		let devs = s.unmount().await.unwrap();
+		Nros::load(StdResource::new(), devs, 1 << 12, true)
+			.await
+			.unwrap()
+	});
+
+	let bg = Background::default();
+	run2(&bg, async {
+		let obj = s.get(&bg, id).await.unwrap();
 		let mut buf = [0];
 		let l = obj.read(0, &mut buf).await.unwrap();
 		assert_eq!(l, 1);
 		assert_eq!(buf, [1]);
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 /// Check if an object store is correctly saved before unmounting.
 /// And also whether loading works.
 #[test]
 fn write_remount_write_read() {
-	run(async {
-		let s = new(MaxRecordSize::K1).await;
-		let obj = s.create().await.unwrap();
+	let s = new(MaxRecordSize::K1);
+	let bg = Background::default();
+	let id = block_on(async {
+		let obj = s.create(&bg).await.unwrap();
 		obj.resize(1).await.unwrap();
 		obj.write(0, &[1]).await.unwrap();
 
-		let id = obj.id();
-		drop(obj);
-		let devs = s.unmount().await.unwrap();
-		let s = Nros::load(StdResource::new(), devs, 1 << 12, 1 << 12, true)
-			.await
-			.unwrap();
+		obj.id()
+	});
+	block_on(bg.drop()).unwrap();
 
-		let obj_1 = s.get(id).await.unwrap();
-		let obj_2 = s.create().await.unwrap();
+	let s = block_on(async {
+		let devs = s.unmount().await.unwrap();
+		Nros::load(StdResource::new(), devs, 1 << 12, true)
+			.await
+			.unwrap()
+	});
+
+	let bg = Background::default();
+	run2(&bg, async {
+		let obj_1 = s.get(&bg, id).await.unwrap();
+		let obj_2 = s.create(&bg).await.unwrap();
 		obj_2.resize(1).await.unwrap();
 		obj_2.write(0, &[2]).await.unwrap();
 
@@ -56,5 +71,6 @@ fn write_remount_write_read() {
 		let l = obj_2.read(0, &mut buf).await.unwrap();
 		assert_eq!(l, 1);
 		assert_eq!(buf, [2]);
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }

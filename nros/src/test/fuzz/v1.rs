@@ -56,7 +56,6 @@ impl<'a> Arbitrary<'a> for Test {
 		Ok(Self::new(
 			1 << 16,
 			global_cache_size,
-			dirty_cache_size,
 			[Ok(create_op)]
 				.into_iter()
 				.chain(u.arbitrary_iter::<Op>()?)
@@ -81,19 +80,9 @@ impl<'a> Arbitrary<'a> for Test {
 }
 
 impl Test {
-	pub fn new(
-		blocks: usize,
-		global_cache: usize,
-		dirty_cache: usize,
-		ops: impl Into<Box<[Op]>>,
-	) -> Self {
+	pub fn new(blocks: usize, global_cache: usize, ops: impl Into<Box<[Op]>>) -> Self {
 		Self {
-			store: run(new_cap(
-				MaxRecordSize::K1,
-				blocks,
-				global_cache,
-				dirty_cache,
-			)),
+			store: new_cap(MaxRecordSize::K1, blocks, global_cache),
 			ops: ops.into(),
 			ids: Default::default(),
 			contents: Default::default(),
@@ -101,18 +90,23 @@ impl Test {
 	}
 
 	pub fn run(mut self) {
-		run(async {
-			for op in self.ops.into_vec() {
-				match op {
-					Op::Create { size } => {
-						let obj = self.store.create().await.unwrap();
+		for op in self.ops.into_vec() {
+			match op {
+				Op::Create { size } => {
+					let bg = Background::default();
+					run2(&bg, async {
+						let obj = self.store.create(&bg).await.unwrap();
 						obj.resize(size).await.unwrap();
 						self.contents.insert(obj.id(), Default::default());
 						self.ids.push(obj.id());
-					}
-					Op::Write { idx, offset, amount } => {
+					});
+					block_on(bg.drop()).unwrap();
+				}
+				Op::Write { idx, offset, amount } => {
+					let bg = Background::default();
+					run2(&bg, async {
 						let id = self.ids[idx as usize % self.ids.len()];
-						let obj = self.store.get(id).await.unwrap();
+						let obj = self.store.get(&bg, id).await.unwrap();
 						let len = obj.len().await.unwrap();
 						if len > 0 {
 							let offt = offset % len;
@@ -124,10 +118,14 @@ impl Test {
 									.insert(offt..offt + u64::try_from(l).unwrap());
 							}
 						}
-					}
-					Op::Read { idx, offset, amount } => {
+					});
+					block_on(bg.drop()).unwrap();
+				}
+				Op::Read { idx, offset, amount } => {
+					let bg = Background::default();
+					run2(&bg, async {
 						let id = self.ids[idx as usize % self.ids.len()];
-						let obj = self.store.get(id).await.unwrap();
+						let obj = self.store.get(&bg, id).await.unwrap();
 						let len = obj.len().await.unwrap();
 						if len > 0 {
 							let offt = offset % len;
@@ -140,15 +138,20 @@ impl Test {
 								}
 							}
 						}
-					}
-					Op::Remount => {
-						self.store.resize_cache(4096, 0).await.unwrap();
+					});
+					block_on(bg.drop()).unwrap();
+				}
+				Op::Remount => {
+					self.store = block_on(async {
 						let devs = self.store.unmount().await.unwrap();
-						self.store = Nros::load(StdResource::new(), devs, 4096, 4096, true)
+						Nros::load(StdResource::new(), devs, 4096, true)
 							.await
-							.unwrap();
-					}
-					Op::Move { from_idx, to_idx } => {
+							.unwrap()
+					})
+				}
+				Op::Move { from_idx, to_idx } => {
+					let bg = Background::default();
+					run2(&bg, async {
 						let from_i = from_idx as usize % self.ids.len();
 						let to_i = to_idx as usize % self.ids.len();
 						let from_id = self.ids[from_i];
@@ -157,27 +160,32 @@ impl Test {
 							self.ids.swap_remove(from_i);
 						}
 						self.store
-							.get(to_id)
+							.get(&bg, to_id)
 							.await
 							.unwrap()
-							.replace_with(self.store.get(from_id).await.unwrap())
+							.replace_with(self.store.get(&bg, from_id).await.unwrap())
 							.await
 							.unwrap();
 
 						let c = self.contents.remove(&from_id).unwrap();
 						self.contents.insert(to_id, c);
-					}
-					Op::Resize { idx, size } => {
+					});
+					block_on(bg.drop()).unwrap();
+				}
+				Op::Resize { idx, size } => {
+					let bg = Background::default();
+					run2(&bg, async {
 						let id = self.ids[idx as usize % self.ids.len()];
-						let obj = self.store.get(id).await.unwrap();
+						let obj = self.store.get(&bg, id).await.unwrap();
 						obj.resize(size).await.unwrap();
 						if size < u64::MAX {
 							self.contents.get_mut(&id).unwrap().remove(size..u64::MAX);
 						}
-					}
+					});
+					block_on(bg.drop()).unwrap();
 				}
 			}
-		})
+		}
 	}
 }
 
@@ -185,20 +193,13 @@ use Op::*;
 
 #[test]
 fn unset_allocator_lba() {
-	Test::new(
-		512,
-		4096,
-		4096,
-		[Create { size: 18446744073709486123 }, Remount],
-	)
-	.run()
+	Test::new(512, 4096, [Create { size: 18446744073709486123 }, Remount]).run()
 }
 
 #[test]
 fn allocator_save_space_leak() {
 	Test::new(
 		512,
-		4096,
 		4096,
 		[
 			Create { size: 18446744073709546299 },
@@ -226,7 +227,6 @@ fn large_object_shift_overflow() {
 	Test::new(
 		512,
 		4096,
-		4096,
 		[
 			Create { size: 18446567461959458655 },
 			Write { idx: 4294967295, offset: 6917529024946200575, amount: 24415 },
@@ -239,7 +239,6 @@ fn large_object_shift_overflow() {
 fn tree_write_full_to_id_0() {
 	Test::new(
 		512,
-		4096,
 		4096,
 		[
 			Create { size: 18446587943058402107 },
@@ -255,7 +254,6 @@ fn tree_write_full_to_id_0() {
 fn tree_read_offset_len_check_overflow() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 18446744073709551595 },
@@ -274,7 +272,6 @@ fn cache_object_id_double_free_replace_with_self() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 0 },
 			Move { from_idx: 0, to_idx: 0 },
@@ -289,7 +286,6 @@ fn tree_shrink_unimplemented() {
 	// Ditto
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 6872316419617283935 },
@@ -306,7 +302,6 @@ fn cache_move_object_stale_lru() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 18446721160059038699 },
 			Create { size: 18442240474082180864 },
@@ -321,7 +316,6 @@ fn cache_move_object_stale_lru() {
 fn cache_get_large_shift_offset() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 6872316419617283935 },
@@ -339,7 +333,6 @@ fn tree_shrink_divmod_record_size() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 40002 },
 			Resize { idx: 0, size: 40001 },
@@ -353,7 +346,6 @@ fn tree_shrink_divmod_record_size() {
 fn tree_grow_add_record_write_cache_size() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 217080124979886539 },
@@ -370,7 +362,6 @@ fn tree_get_target_depth_above_dev_depth() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 281474976655851 },
 			Write { idx: 4293603329, offset: 18446743984320625663, amount: 65535 },
@@ -386,7 +377,6 @@ fn tree_grow_flush_concurrent() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 217080124979923771 },
 			Write { idx: 960051513, offset: 4123390705508810553, amount: 65535 },
@@ -400,7 +390,6 @@ fn tree_grow_flush_concurrent() {
 fn grow_root_double_ref() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 1 << 60 },
@@ -417,7 +406,6 @@ fn tree_shrink_destroy_depth_off_by_one() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 6223798073269682271 },
 			Write { idx: 0, offset: 5999147927136639863, amount: 65286 },
@@ -433,10 +421,9 @@ fn tree_shrink_destroy_depth_off_by_one() {
 /// Now it is still complex but at least it works now,
 /// at least until I run the fuzzer again.
 #[test]
-fn tree_rewrite_shrink_from_scratch() {
+fn tree_write_shrink_from_scratch_0() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 6223798073269682271 },
@@ -453,7 +440,6 @@ fn tree_shrink_shift_overflow() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 17870283318554001399 },
 			Resize { idx: 0, size: 17868031521458223095 },
@@ -466,7 +452,6 @@ fn tree_shrink_shift_overflow() {
 fn write_resize_double_free() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 18446744073692785643 },
@@ -482,7 +467,6 @@ fn tree_resize_another_use_after_free() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 3544668469065756931 },
 			Write { idx: 0, offset: 3544668469065756977, amount: 38807 },
@@ -496,7 +480,6 @@ fn tree_resize_another_use_after_free() {
 fn tree_write_shrink() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 6148820866244280425 },
@@ -512,7 +495,6 @@ fn tree_write_resize_0_double_free() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 18390793239351867851 },
 			Write { idx: 0, offset: 18373873072982296662, amount: 65279 },
@@ -527,7 +509,6 @@ fn tree_write_resize_1_double_free() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 18390793239351867851 },
 			Write { idx: 0, offset: 18373873072982296662, amount: 65279 },
@@ -541,7 +522,6 @@ fn tree_write_resize_1_double_free() {
 fn tree_write_shrink_shrink_use_after_free() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 18446462598732840961 },
@@ -558,7 +538,6 @@ fn tree_shrink_idk_man() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 18446744073709551614 },
 			Write { idx: 65501, offset: 15987206784517266935, amount: 56797 },
@@ -573,7 +552,6 @@ fn tree_shrink_idk_man() {
 fn tree_reeeeeeeeeeeeee() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 827 },
@@ -591,7 +569,6 @@ fn test_small_resize() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 1003 },
 			Write { idx: 0, offset: 0, amount: 2 },
@@ -607,7 +584,6 @@ fn test_small_resize() {
 fn unflushed_empty_dirty_entries() {
 	Test::new(
 		1 << 16,
-		4096,
 		4096,
 		[
 			Create { size: 1026 },
@@ -626,7 +602,6 @@ fn create_shrink() {
 	Test::new(
 		1 << 16,
 		4096,
-		4096,
 		[
 			Create { size: 1 << 21 },
 			Resize { idx: 0, size: (1 << 20) + 1 },
@@ -641,7 +616,6 @@ fn god_have_mercy_upon_me() {
 	Test::new(
 		1 << 16,
 		1 << 24,
-		4096,
 		[
 			Create { size: 18446494612532378059 },
 			Create { size: 96077500568653133 },
@@ -658,7 +632,6 @@ fn move_object_not_present() {
 	Test::new(
 		1 << 16,
 		1 << 24,
-		4096,
 		[
 			Create { size: 0 },
 			Create { size: 0 },
@@ -672,7 +645,6 @@ fn move_object_not_present() {
 fn grow_shrink_unflushed_dirty() {
 	Test::new(
 		1 << 16,
-		1024,
 		1024,
 		[
 			Create { size: 6356832 },
@@ -688,7 +660,6 @@ fn grow_set_stale_root() {
 	Test::new(
 		1 << 16,
 		1 << 24,
-		1 << 11,
 		[
 			Create { size: u64::MAX },
 			Write { idx: 0, offset: 0x4747474747474747, amount: 0x4747 },
@@ -752,7 +723,6 @@ fn grow_add_record_race() {
 	Test::new(
 		1 << 16,
 		1 << 20,
-		1 << 10,
 		[
 			Create { size: 919 },
 			Write { idx: 0, offset: 917, amount: 1 },
@@ -767,7 +737,6 @@ fn move_object_stale_root() {
 	Test::new(
 		1 << 16,
 		2556,
-		1279,
 		[
 			Create { size: 514373878767853 },
 			Create { size: 2965947086361143593 },
@@ -782,7 +751,6 @@ fn move_object_stale_root() {
 fn resize_in_range_zeroed() {
 	Test::new(
 		1 << 16,
-		1 << 24,
 		1 << 24,
 		[
 			Create { size: 1025 },
@@ -801,7 +769,6 @@ fn write_unmount_write_grow_data_loss() {
 	Test::new(
 		1 << 16,
 		1 << 24,
-		1 << 24,
 		[
 			Create { size: 288230403347578881 },
 			Write { idx: 0, offset: 0, amount: 1 },
@@ -809,6 +776,76 @@ fn write_unmount_write_grow_data_loss() {
 			Write { idx: 0, offset: 261207326956930858, amount: 14144 },
 			Resize { idx: 0, size: 10376293537170274103 },
 			Read { idx: 0, offset: 0, amount: 1 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn stuck_0() {
+	Test::new(
+		1 << 16,
+		1177,
+		[
+			Create { size: 111979766 },
+			Write { idx: 0, offset: 53726419, amount: 21313 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn shrink_unflushed_0() {
+	Test::new(
+		1 << 16,
+		1 << 24,
+		[
+			Create { size: 16 },
+			Resize { idx: 0, size: 1 << 20 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn shrink_unflushed_1() {
+	Test::new(
+		1 << 16,
+		1439,
+		[
+			Create { size: 281470681743393 },
+			Write { idx: 0, offset: 7700874272879, amount: u16::MAX },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+/// Entry evictions running in the background can interfere with [`Tree::shrink`].
+#[test]
+fn shrink_background_evict() {
+	Test::new(
+		1 << 16,
+		4096,
+		[
+			Create { size: 6223798073269682271 },
+			Write { idx: 0, offset: 5999147927136639863, amount: 65286 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn shrink_use_after_free() {
+	Test::new(
+		1 << 16,
+		2045,
+		[
+			Create { size: 27075473812832 },
+			Write { idx: 0, offset: 18414831848224980736, amount: 65535 },
+			Resize { idx: 0, size: 0 },
 		],
 	)
 	.run()

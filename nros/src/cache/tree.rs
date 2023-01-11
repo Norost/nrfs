@@ -1,7 +1,10 @@
 use {
 	super::{Cache, EntryRef, Key, OBJECT_LIST_ID, RECORD_SIZE_P2},
-	crate::{resource::Buf, util::get_record, Dev, Error, MaxRecordSize, Record, Resource},
+	crate::{
+		resource::Buf, util::get_record, Background, Dev, Error, MaxRecordSize, Record, Resource,
+	},
 	core::{cell::RefMut, future, mem, ops::RangeInclusive, task::Poll},
+	std::collections::hash_map,
 };
 
 /// Implementation of a record tree.
@@ -9,21 +12,27 @@ use {
 /// As long as a `Tree` object for a specific ID is alive its [`TreeData`] entry will not be
 /// evicted.
 #[derive(Clone, Debug)]
-pub struct Tree<'a, D: Dev, R: Resource> {
+pub struct Tree<'a, 'b, D: Dev, R: Resource> {
 	/// Underlying cache.
 	cache: &'a Cache<D, R>,
+	/// Background task runner.
+	background: &'b Background<'a, D>,
 	/// ID of the object.
 	id: u64,
 }
 
-impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
+impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// Access a tree.
-	pub(super) async fn new(cache: &'a Cache<D, R>, id: u64) -> Result<Tree<'a, D, R>, Error<D>> {
+	pub(super) async fn new(
+		cache: &'a Cache<D, R>,
+		bg: &'b Background<'a, D>,
+		id: u64,
+	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
 		// Alas, async recursion is hard
 		if id == OBJECT_LIST_ID {
-			Self::new_object_list(cache).await
+			Self::new_object_list(cache, bg).await
 		} else {
-			Self::new_object(cache, id).await
+			Self::new_object(cache, bg, id).await
 		}
 	}
 
@@ -34,18 +43,20 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// If `id == OBJECT_LIST_ID`.
 	pub(super) async fn new_object(
 		cache: &'a Cache<D, R>,
+		background: &'b Background<'a, D>,
 		id: u64,
-	) -> Result<Tree<'a, D, R>, Error<D>> {
+	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
 		assert!(id != OBJECT_LIST_ID);
-		Ok(Self { cache, id })
+		Ok(Self { cache, background, id })
 	}
 
 	/// Access the object list.
 	pub(super) async fn new_object_list(
 		cache: &'a Cache<D, R>,
-	) -> Result<Tree<'a, D, R>, Error<D>> {
+		background: &'b Background<'a, D>,
+	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
 		let id = OBJECT_LIST_ID;
-		Ok(Self { cache, id })
+		Ok(Self { cache, background, id })
 	}
 
 	/// Write data to a range.
@@ -60,7 +71,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			data.len()
 		);
 
-		let (_lock, root) = self.cache.lock_readwrite(self.id).await?;
+		let (_lock, root) = self.cache.lock_readwrite(self.background, self.id).await?;
 		let len = u64::from(root.total_length);
 		let max_depth = depth(self.max_record_size(), len);
 
@@ -85,7 +96,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			// We need to slice one record twice
 			let entry = self.get(0, *range.start()).await?;
 			entry
-				.modify(|b| {
+				.modify(self.background, |b| {
 					let min_len = last_offset.max(b.len());
 					b.resize(min_len, 0);
 					b.get_mut()[first_offset..last_offset].copy_from_slice(data);
@@ -106,7 +117,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 
 				let entry = self.get(0, first_key).await?;
 				entry
-					.modify(|b| {
+					.modify(self.background, |b| {
 						b.resize(first_offset, 0);
 						b.extend_from_slice(d);
 					})
@@ -126,7 +137,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 					.await?;
 
 				entry
-					.modify(|b| {
+					.modify(self.background, |b| {
 						// If the record was already fetched, it'll have ignored the &Record::default().
 						// Hence we need to clear it manually.
 						b.resize(0, 0);
@@ -141,7 +152,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 				debug_assert_eq!(data.len(), last_offset);
 				let entry = self.get(0, last_key).await?;
 				entry
-					.modify(|b| {
+					.modify(self.background, |b| {
 						let min_len = b.len().max(data.len());
 						b.resize(min_len, 0);
 						b.get_mut()[..last_offset].copy_from_slice(data);
@@ -170,7 +181,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			return Ok(0);
 		}
 
-		let (_lock, root) = self.cache.lock_readwrite(self.id).await?;
+		let (_lock, root) = self.cache.lock_readwrite(self.background, self.id).await?;
 
 		// Don't even bother if offset exceeds length.
 		let root_len = u64::from(root.total_length);
@@ -193,7 +204,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			usize::try_from((offset + len - 1) % (1u64 << self.max_record_size())).unwrap();
 		self.get(0, left_offset)
 			.await?
-			.modify(|data| {
+			.modify(self.background, |data| {
 				if left_offset == right_offset && right_trim < data.len() {
 					// We have to trim a single record left & right.
 					data.get_mut()[left_trim..=right_trim].fill(0);
@@ -278,7 +289,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			// FIXME we're clearing way too much if offset + len < new_len
 			let entry = self.cache.get_entry(key).expect("no entry");
 			entry
-				.modify(|data| {
+				.modify(self.background, |data| {
 					let start = usize::try_from(offset % entries_per_rec).unwrap();
 					data.resize(start * mem::size_of::<Record>(), 0);
 				})
@@ -296,7 +307,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	pub async fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
 		trace!("read id {}, offset {}, len {}", self.id, offset, buf.len());
 
-		let (_lock, root) = self.cache.lock_readwrite(self.id).await?;
+		let (_lock, root) = self.cache.lock_readwrite(self.background, self.id).await?;
 		let len = u64::from(root.total_length);
 
 		// Ensure all data fits in buffer.
@@ -390,6 +401,13 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		let cur_depth = depth(self.max_record_size(), len);
 		let parent_depth = record_depth + 1;
 		assert!(parent_depth <= cur_depth);
+
+		if cur_root.length == 0 && record.length == 0 {
+			// Both the record and root are zero, so don't dirtying the parent.
+			trace!("--> skip record & root zero");
+			return Ok(());
+		}
+
 		if cur_depth == parent_depth {
 			assert_eq!(offset, 0, "root can only be at offset 0");
 
@@ -412,7 +430,9 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 				self.cache.store.set_object_list(new_root);
 				Ok(())
 			} else {
-				self.cache.set_object_root(self.id, &new_root).await
+				self.cache
+					.set_object_root(self.background, self.id, &new_root)
+					.await
 			}
 		} else {
 			// Update a parent record.
@@ -421,10 +441,15 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			let (offt, index) = divmod_p2(offset, shift);
 
 			let entry = self.get(parent_depth, offt).await?;
+			let old_record = get_record(entry.data.get(), index).unwrap_or_default();
+			if old_record.length == 0 && record.length == 0 {
+				// Both the old and new record are zero, so don't dirtying the parent.
+				trace!("--> skip both zero");
+				return Ok(());
+			}
 			entry
-				.modify(|data| {
+				.modify(self.background, |data| {
 					// Destroy old record
-					let old_record = get_record(data.get(), index).unwrap_or_default();
 					trace!(
 						"--> replace parent ({}, {}) -> ({}, {})",
 						record.lba,
@@ -469,8 +494,8 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		// 1. Zero out all data past new_len
 		// 2. Ensure all out-of-range dirty records are flushed (if depth changed).
 		//    Out-of-range here means records that cannot be referenced by the new root.
-		// 3. Destroy too-high records (if depth changed).
-		// 4. Replace root
+		// 3. Replace root
+		// 4. Destroy too-high records (if depth changed).
 
 		let cur_len = u64::from(cur_root.total_length);
 
@@ -483,8 +508,8 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		self.write_zeros(new_len, u64::MAX).await?;
 
 		// 2. Ensure all out-of-range dirty records are flushed.
-		let new_root = if new_depth < cur_depth {
-			// Destroy out-of-range records.
+		if new_depth < cur_depth {
+			// Evict out-of-range records.
 			let mut max_offset = new_depth
 				.checked_sub(1)
 				.map_or(0, |d| 1 << d * self.cache.entries_per_parent_p2());
@@ -497,15 +522,33 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 					.filter(|&offt| offt >= max_offset)
 					.collect::<Vec<_>>();
 				drop(tree);
+				// TODO parallelize
 				for offt in offsets {
-					self.cache.evict_entry(Key::new(self.id, d, offt)).await?;
+					if let Some(e) = self.cache.evict_entry(Key::new(self.id, d, offt)) {
+						e.await?;
+					}
 				}
 				max_offset >>= self.cache.entries_per_parent_p2();
 			}
 
-			// 3. Destroy too-high records (if depth changed).
-			// Also get new root in meantime.
-			let mut root = self.root().await?.0; // cur_root may be outdated.
+			// 3. Replace root
+			let (lock, cur_root) = self
+				.cache
+				.lock_root_replace(self.background, self.id)
+				.await?;
+			let root = if new_depth == 0 {
+				Default::default()
+			} else {
+				let entry = self.get(new_depth, 0).await?;
+				get_record(entry.data.get(), 0).unwrap_or_default()
+			};
+			self.cache
+				.set_object_root(self.background, self.id, &root)
+				.await?;
+			drop(lock);
+
+			// 4. Destroy too-high records (if depth changed).
+			let mut root = cur_root;
 			for d in (new_depth..cur_depth).rev() {
 				let key = Key::new(self.id, d, 0);
 				let entry = self.cache.fetch_entry(key, &root, cur_depth).await?;
@@ -523,34 +566,29 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 				let mut v = mem::take(&mut obj.data).into_vec();
 				for level in v[usize::from(new_depth)..].iter_mut() {
 					// Remove non-dirty entries from LRU.
+					debug_assert!(
+						level.dirty_counters.values().all(|&c| c & isize::MIN == 0),
+						"not all dirty too-high entries have been flushed"
+					);
 					for (_, entry) in level.entries.drain() {
-						debug_assert!(
-							entry.write_index.is_none(),
-							"not all dirty entries have been flushed"
-						);
 						lrus.adjust_cache_removed_entry(&entry);
 					}
 				}
 				v.resize_with(new_depth.into(), Default::default);
 				obj.data = v.into();
 			}
-
-			if new_depth == 0 {
-				Default::default()
-			} else {
-				root
-			}
 		} else {
-			// We need to refetch the root as it may have changed due to flushes during write_zeros.
-			self.root().await?.0
+			// 3. Replace root
+			let new_root = Record {
+				total_length: new_len.into(),
+				references: cur_root.references,
+				// We need to refetch the root as it may have changed due to flushes during write_zeros.
+				..self.root().await?.0
+			};
+			self.cache
+				.set_object_root(self.background, self.id, &new_root)
+				.await?;
 		};
-		#[cfg(debug_assertions)]
-		self.cache.store.assert_alloc(&new_root);
-
-		// 4. Replace root
-		let new_root =
-			Record { total_length: new_len.into(), references: cur_root.references, ..new_root };
-		self.cache.set_object_root(self.id, &new_root).await?;
 
 		Ok(())
 	}
@@ -599,6 +637,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 				)
 			});
 			let mut v = mem::take(&mut obj.data).into_vec();
+			debug_assert_eq!(v.len(), usize::from(cur_depth));
 			v.resize_with(new_depth.into(), Default::default);
 			obj.data = v.into();
 
@@ -606,11 +645,15 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			if cur_depth > 0 {
 				for i in cur_depth.into()..obj.data.len() {
 					let [low, high] = obj.data.get_many_mut([i - 1, i]).unwrap();
+					debug_assert!(
+						high.dirty_counters.is_empty(),
+						"new level has dirty counters"
+					);
 					for (&offt, &count) in low.dirty_counters.iter() {
 						*high
 							.dirty_counters
 							.entry(offt >> self.cache.entries_per_parent_p2())
-							.or_insert(0) += count;
+							.or_insert(0) += count & isize::MAX;
 					}
 				}
 			}
@@ -642,7 +685,9 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		// NOTE This will not race with flush as:
 		// * there are no await points between Tree::root (in Tree::resize) and now.
 		// * the cache entry is already present since cur_root had to be fetched.
-		self.cache.set_object_root(self.id, &new_root).await?;
+		self.cache
+			.set_object_root(self.background, self.id, &new_root)
+			.await?;
 
 		Ok(())
 	}
@@ -663,7 +708,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		let root = if self.id == OBJECT_LIST_ID {
 			self.cache.object_list()
 		} else {
-			self.cache.get_object_root(self.id).await?
+			self.cache.get_object_root(self.background, self.id).await?
 		};
 		Ok((root, root.total_length.into()))
 	}
@@ -713,28 +758,22 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		// Perhaps lock object IDs somehow?
 
 		// Go up and check if a parent entry is either present or being fetched.
-		let entry = future::poll_fn(|cx| {
+		let entry = 's: {
+			let (mut data, lrus) = RefMut::map_split(self.cache.data.borrow_mut(), |data| {
+				(&mut data.data, &mut data.lrus)
+			});
 			while cur_depth < obj_depth {
-				let key = Key::new(self.id, cur_depth, offset >> depth_offset_shift(cur_depth));
 				// Check if the entry is already present.
-				let (data, lrus) = RefMut::map_split(self.cache.data.borrow_mut(), |data| {
-					(&mut data.data, &mut data.lrus)
-				});
-				if let Ok(entry) = RefMut::filter_map(data, |data| key.get_entry_mut(data)) {
-					return Poll::Ready(Some(EntryRef::new(self.cache, key, entry, lrus)));
+				let key = Key::new(self.id, cur_depth, offset >> depth_offset_shift(cur_depth));
+				match RefMut::filter_map(data, |data| key.get_entry_mut(data)) {
+					Ok(entry) => break 's Some(EntryRef::new(self.cache, key, entry, lrus)),
+					Err(d) => data = d,
 				}
-				drop(lrus);
-				let mut data = self.cache.data.borrow_mut();
-				// Check if another task is already fetching the entry we need.
-				if let Some(wakers) = data.fetching.get_mut(&key) {
-					wakers.push(cx.waker().clone());
-					return Poll::Pending;
-				}
+				// Try the next level
 				cur_depth += 1;
 			}
-			Poll::Ready(None)
-		})
-		.await;
+			None
+		};
 
 		// Get first record to fetch.
 		let mut record;
@@ -802,9 +841,11 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// There is more than one active lock on the other object,
 	/// i.e. there are multiple [`Tree`] instances referring to the same object.
 	/// Hence the object cannot safely be destroyed.
-	pub async fn replace_with(&self, other: Tree<'a, D, R>) -> Result<(), Error<D>> {
+	pub async fn replace_with(&self, other: Tree<'a, 'b, D, R>) -> Result<(), Error<D>> {
 		// FIXME check locks
-		self.cache.move_object(other.id, self.id).await
+		self.cache
+			.move_object(self.background, other.id, self.id)
+			.await
 	}
 
 	/// Increase the reference count of an object.
@@ -818,13 +859,15 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		);
 
 		// Use get_object_root as the object list doesn't use reference counting.
-		let mut root = self.cache.get_object_root(self.id).await?;
+		let mut root = self.cache.get_object_root(self.background, self.id).await?;
 		debug_assert!(root.references != 0, "invalid object");
 		if root.references == u16::MAX {
 			return Ok(false);
 		}
 		root.references += 1;
-		self.cache.set_object_root(self.id, &root).await?;
+		self.cache
+			.set_object_root(self.background, self.id, &root)
+			.await?;
 
 		Ok(true)
 	}
@@ -840,10 +883,12 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		);
 
 		// Use get_object_root as the object list doesn't use reference counting.
-		let mut root = self.cache.get_object_root(self.id).await?;
+		let mut root = self.cache.get_object_root(self.background, self.id).await?;
 		debug_assert!(root.references != 0, "invalid object");
 		root.references -= 1;
-		self.cache.set_object_root(self.id, &root).await?;
+		self.cache
+			.set_object_root(self.background, self.id, &root)
+			.await?;
 
 		if root.references == 0 {
 			// Free space.

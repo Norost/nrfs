@@ -1,6 +1,6 @@
 use {
 	super::{Cache, CacheData, Dev, Entry, Error, MaxRecordSize, OBJECT_LIST_ID, RECORD_SIZE_P2},
-	crate::{resource::Buf, Record, Resource},
+	crate::{resource::Buf, Background, Record, Resource},
 	core::{
 		cell::RefCell,
 		fmt,
@@ -11,6 +11,8 @@ use {
 	},
 	rustc_hash::FxHashMap,
 };
+
+const MAX_DEPTH: u8 = 14;
 
 /// A single cached record tree.
 #[derive(Debug)]
@@ -46,22 +48,30 @@ impl<R: Resource> TreeData<R> {
 		offset: u64,
 		entry: Entry<R>,
 	) {
+		trace!("TreeData::add_entry depth {} offset {}", depth, offset);
 		// Insert entry
 		let _r = self.data[usize::from(depth)].entries.insert(offset, entry);
 		debug_assert!(_r.is_none(), "entry was already present");
 
 		// If dirty, propagate dirty counters
 		let mut offt = offset;
-		for lvl in self.data.iter_mut().skip(depth.into()) {
-			*lvl.dirty_counters.entry(offt).or_insert(0) += 1;
+		let counter = self.data[usize::from(depth)]
+			.dirty_counters
+			.entry(offt)
+			.or_insert(0);
+		debug_assert_eq!(*counter & isize::MIN, 0, "new entry is already dirty");
+		*counter |= isize::MIN;
+		*counter += 1;
+		for lvl in self.data.iter_mut().skip((depth + 1).into()) {
 			offt >>= max_record_size.to_raw() - RECORD_SIZE_P2;
+			*lvl.dirty_counters.entry(offt).or_insert(0) += 1;
 		}
 	}
 }
 
 pub struct Level<R: Resource> {
 	pub(super) entries: FxHashMap<u64, Entry<R>>,
-	pub(super) dirty_counters: FxHashMap<u64, usize>,
+	pub(super) dirty_counters: FxHashMap<u64, isize>,
 }
 
 impl<R: Resource> Default for Level<R> {
@@ -107,10 +117,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Acquire a lock on a tree for a read or write operation.
 	///
 	/// Returns the `root` of the tree as of locking.
-	pub(super) async fn lock_readwrite(
-		&self,
+	pub(super) async fn lock_readwrite<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
 		id: u64,
-	) -> Result<(ReadWriteGuard<'_, R>, Record), Error<D>> {
+	) -> Result<(ReadWriteGuard<'a, R>, Record), Error<D>> {
 		trace!("lock_readwrite {}", id);
 		// Acquire lock.
 		let lock = future::poll_fn(move |cx| {
@@ -127,7 +138,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			Poll::Ready(ReadWriteGuard { data: &self.data, id })
 		})
 		.await;
-		let root = box_fut(self.get_object_root(id));
+		let root = box_fut(self.get_object_root(bg, id));
 		let root = root.await?;
 		self.get_object_entry_mut(id, 0)
 			.fix_depth(self.max_record_size(), &root);
@@ -135,10 +146,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	}
 
 	/// Acquire a lock on a tree for a root_replace operation.
-	pub(super) async fn lock_root_replace(
-		&self,
+	pub(super) async fn lock_root_replace<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
 		id: u64,
-	) -> Result<(RootReplaceGuard<'_, R>, Record), Error<D>> {
+	) -> Result<(RootReplaceGuard<'a, R>, Record), Error<D>> {
 		trace!("lock_root_replace {}", id);
 		let lock = future::poll_fn(move |cx| {
 			// Use 0 as depth until we can safely read the root.
@@ -156,7 +168,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			Poll::Ready(RootReplaceGuard { data: &self.data, id })
 		})
 		.await;
-		let root = box_fut(self.get_object_root(id));
+		let root = box_fut(self.get_object_root(bg, id));
 		let root = root.await?;
 		self.get_object_entry_mut(id, 0)
 			.fix_depth(self.max_record_size(), &root);
@@ -244,17 +256,12 @@ impl<R: Resource + fmt::Debug> fmt::Debug for FmtTreeData<'_, R> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				#[derive(Debug)]
 				#[allow(dead_code)]
-				struct T<'a> {
+				struct Record<'a> {
 					data: FmtRecordList<'a>,
 					global_index: super::lru::Idx,
-					write_index: Option<super::lru::Idx>,
 				}
-				T {
-					data: FmtRecordList(self.0.data.get()),
-					global_index: self.0.global_index,
-					write_index: self.0.write_index,
-				}
-				.fmt(f)
+				Record { data: FmtRecordList(self.0.data.get()), global_index: self.0.global_index }
+					.fmt(f)
 			}
 		}
 
