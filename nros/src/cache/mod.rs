@@ -630,18 +630,20 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		if key.test_flag(Key::FLAG_OBJECT) {
 			// Evict object
 
-			debug_assert_eq!(
-				key.id() & ID_PSEUDO,
-				0,
-				"pseudo object should not be in the LRU"
-			);
+			let mut root = obj.data.root;
+			root._reserved = 0;
 
-			let fut = obj
-				.data
-				.is_dirty()
-				.then(|| {
-					let mut root = obj.data.root;
-					root._reserved = 0;
+			let fut = if key.id() == OBJECT_LIST_ID {
+				self.store.set_object_list(root);
+				None
+			} else {
+				debug_assert_eq!(
+					key.id() & ID_PSEUDO,
+					0,
+					"pseudo object should not be in the LRU"
+				);
+
+				obj.data.is_dirty().then(|| {
 					let offset = key.id() << RECORD_SIZE_P2;
 					async move {
 						let bg = Default::default(); // TODO get rid of this sillyness
@@ -651,14 +653,14 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						bg.drop().await
 					}
 				})
-				.map(box_fut);
+			};
 
 			let RefCount::NoRef { lru_index } = obj.refcount
 				else { unreachable!("not in lru") };
 			data.lru.remove(lru_index, CACHE_OBJECT_FIXED_COST);
 			data.objects.remove(&key.id());
 
-			fut
+			fut.map(box_fut)
 		} else {
 			// Evict entry
 

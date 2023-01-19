@@ -2,7 +2,7 @@ use {
 	super::super::{
 		slot::Present, Lru, MaxRecordSize, Slot, CACHE_OBJECT_FIXED_COST, RECORD_SIZE_P2,
 	},
-	crate::{Record, Resource, resource::Buf},
+	crate::{resource::Buf, Record, Resource},
 	core::fmt,
 	rustc_hash::{FxHashMap, FxHashSet},
 	std::collections::hash_map,
