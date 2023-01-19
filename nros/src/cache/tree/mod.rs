@@ -1,4 +1,5 @@
 pub mod data;
+mod fetch;
 
 use {
 	super::{
@@ -368,7 +369,10 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			record.lba,
 			record.length
 		);
-		let (cur_root, len) = self.root().await?;
+		// The object is guaranteed to exist.
+		// At least, if called by a task that holds an entry, which should be guaranteed.
+		let cur_root = self.cache.get_object(self.id).expect("no object").root;
+		let len = u64::from(cur_root.total_length);
 		let cur_depth = depth(self.max_record_size(), len);
 		let parent_depth = record_depth + 1;
 		assert!(parent_depth <= cur_depth);
@@ -408,7 +412,8 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let shift = self.max_record_size().to_raw() - RECORD_SIZE_P2;
 			let (offt, index) = divmod_p2(offset, shift);
 
-			let entry = self.get(parent_depth, offt).await?;
+			let k = Key::new(0, self.id, parent_depth, offt);
+			let entry = self.cache.tree_fetch_entry(self.background, k).await?;
 			let old_record = get_record(entry.get(), index).unwrap_or_default();
 			if old_record.length == 0 && record.length == 0 {
 				// Both the old and new record are zero, so don't dirty the parent.
@@ -514,9 +519,13 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					if let Some(marker) = cur_level.dirty_markers.remove(&offset) {
 						pseudo_level.dirty_markers.insert(offset, marker);
 					}
-					refcount += 1;
 				}
+				refcount += cur_level.slots.len();
 				offt >>= self.max_record_size().to_raw();
+			}
+			for d in new_depth..cur_depth {
+				let cur_level = &mut cur_obj.data.data[usize::from(d)];
+				refcount += cur_level.slots.len();
 			}
 			// Fix marker count for cur_obj
 			cur_obj.data.data[usize::from(new_depth)]
@@ -528,6 +537,21 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// left to do.
 			mem::swap(&mut cur_obj.data, &mut pseudo_obj);
 			if let Some(count) = NonZeroUsize::new(refcount) {
+				// Fix keys of any busy tasks
+				for lvl in pseudo_obj.data.iter_mut() {
+					for slot in lvl.slots.values() {
+						if let Slot::Busy(busy) = &slot {
+							let mut busy = busy.borrow_mut();
+							busy.key = Key::new(
+								busy.key.flags(),
+								pseudo_id,
+								busy.key.depth(),
+								busy.key.offset(),
+							);
+						}
+					}
+				}
+
 				let refcount = RefCount::Ref { count };
 				let present = Present { data: pseudo_obj, refcount };
 				data.objects.insert(pseudo_id, Slot::Present(present));
@@ -648,134 +672,6 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		self.root().await.map(|(_, len)| len)
 	}
 
-	/// Get a leaf cache entry.
-	///
-	/// It may fetch up to [`MAX_DEPTH`] of parent entries.
-	///
-	/// Note that `offset` must already include appropriate shifting.
-	// FIXME concurrent resizes will almost certainly screw something internally.
-	// Maybe add a per object lock to the cache or something?
-	async fn get(&self, target_depth: u8, offset: u64) -> Result<EntryRef<'a, D, R>, Error<D>> {
-		trace!(
-			"get id {}, depth {}, offset {}",
-			self.id,
-			target_depth,
-			offset
-		);
-		// Steps:
-		//
-		// 2. Find the record or the first ancestor that is present.
-		//    If found, extract the proper record from it.
-		//    If none are present, take the root record.
-		// 1. Check if the entry is present.
-		//    If so, just return it.
-		// 3. Fetch the data associated with the taken record.
-		//    Do this "recursively" until the target is reached.
-
-		let rec_size = self.max_record_size().to_raw();
-
-		let mut cur_depth = target_depth;
-		let depth_offset_shift = |d| (rec_size - RECORD_SIZE_P2) * (d - target_depth);
-
-		let (root, len) = self.root().await?;
-
-		// Find the first parent or leaf entry that is present starting from a leaf
-		// and work back downwards.
-
-		let obj_depth = depth(self.max_record_size(), len);
-
-		debug_assert!(
-			target_depth < obj_depth,
-			"target depth exceeds object depth"
-		);
-
-		// FIXME we need to be careful with resizes while this task is running.
-		// Perhaps lock object IDs somehow?
-
-		// Go up and check if a parent entry is either present or being fetched.
-		let entry = 's: {
-			while cur_depth < obj_depth {
-				// Check if the entry is already present.
-				let key = Key::new(
-					0,
-					self.id,
-					cur_depth,
-					offset >> depth_offset_shift(cur_depth),
-				);
-				if let Some(entry) = self.cache.get_entry(key) {
-					break 's Some(entry);
-				}
-				// Try the next level
-				cur_depth += 1;
-			}
-			None
-		};
-
-		// Get first record to fetch.
-		let mut record;
-		// Check if we found any cached record at all.
-		if let Some(entry) = entry {
-			if cur_depth == target_depth {
-				// The entry we need is already present
-				return Ok(entry);
-			}
-
-			// Start from a parent record.
-			debug_assert!(cur_depth < obj_depth, "parent should be below root");
-			cur_depth -= 1;
-			let offt = offset >> depth_offset_shift(cur_depth);
-			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
-				.try_into()
-				.unwrap();
-			record = get_record(entry.get(), index).unwrap_or_default();
-		} else {
-			// Start from the root.
-			debug_assert_eq!(cur_depth, obj_depth, "root should be at obj_depth");
-			record = root;
-			cur_depth -= 1;
-		}
-
-		// Fetch records until we can lock the one we need.
-		debug_assert!(cur_depth >= target_depth);
-		let entry = loop {
-			if record.length == 0 {
-				// Skip straight to the end since it's all zeroes from here on anyways.
-				let key = Key::new(0, self.id, target_depth, offset);
-				return self
-					.cache
-					.fetch_entry(self.background, key, &Record::default())
-					.await;
-			}
-
-			let key = Key::new(
-				0,
-				self.id,
-				cur_depth,
-				offset >> depth_offset_shift(cur_depth),
-			);
-			let entry = self
-				.cache
-				.fetch_entry(self.background, key, &record)
-				.await?;
-
-			// Check if we got the record we need.
-			if cur_depth == target_depth {
-				break entry;
-			}
-
-			cur_depth -= 1;
-
-			// Fetch the next record.
-			let offt = offset >> depth_offset_shift(cur_depth);
-			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
-				.try_into()
-				.unwrap();
-			record = get_record(entry.get(), index).unwrap_or_default();
-		};
-
-		Ok(entry)
-	}
-
 	/// Replace the data of this object with the data of another object.
 	///
 	/// The other object is destroyed.
@@ -830,6 +726,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			drop(obj);
 			// Free space.
 			self.resize(0).await?;
+			self.cache.data.borrow_mut().dealloc_id(self.id);
 		}
 
 		Ok(())

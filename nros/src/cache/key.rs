@@ -1,10 +1,4 @@
-use {
-	super::{MaxRecordSize, Resource, TreeData, OBJECT_LIST_ID},
-	crate::cache::RECORD_SIZE_P2,
-	core::fmt,
-	rustc_hash::FxHashMap,
-	std::collections::hash_map,
-};
+use core::fmt;
 
 /// Key for indexing in the cache.
 ///
@@ -25,8 +19,6 @@ use {
 pub struct Key(u64, u64);
 
 impl Key {
-	/// The key refers to a pseudo object.
-	pub const FLAG_PSEUDO: u8 = 1 << 4;
 	/// The key refers to the object itself.
 	pub const FLAG_OBJECT: u8 = 1 << 3;
 
@@ -36,7 +28,7 @@ impl Key {
 	pub fn new(flags: u8, id: u64, depth: u8, offset: u64) -> Self {
 		assert!(flags & !0xf == 0, "flags out of range");
 		assert!(depth <= 16, "depth out of range");
-		assert!(id <= 1 << 59, "ID out of range");
+		assert!(id < 1 << 60, "ID out of range");
 		assert!(offset < 1 << 59, "offset out of range");
 		Self(id << 4 | u64::from(flags), offset << 4 | u64::from(depth))
 	}

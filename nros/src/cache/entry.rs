@@ -8,7 +8,7 @@ use {
 /// Reference to an entry.
 pub struct EntryRef<'a, D: Dev, R: Resource> {
 	cache: &'a Cache<D, R>,
-	key: Key,
+	pub(super) key: Key,
 	lru: RefMut<'a, Lru>,
 	entry: RefMut<'a, slot::Present<R::Buf>>,
 }

@@ -1,7 +1,8 @@
 use {
-	super::lru,
+	super::{lru, Key},
 	crate::Resource,
-	core::{num::NonZeroUsize, task::Waker},
+	alloc::rc::Rc,
+	core::{cell::RefCell, num::NonZeroUsize, task::Waker},
 };
 
 /// A single slot with cached data.
@@ -10,7 +11,7 @@ pub(super) enum Slot<T> {
 	/// The entry is present.
 	Present(Present<T>),
 	/// The entry is being fetched or flushed.
-	Busy(Busy),
+	Busy(Rc<RefCell<Busy>>),
 }
 
 #[derive(Debug)]
@@ -21,12 +22,26 @@ pub(super) struct Present<T> {
 	pub refcount: RefCount,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct Busy {
 	/// Wakers for tasks waiting for this slot.
 	pub wakers: Vec<Waker>,
 	/// The amount of tasks referencing this data.
 	pub refcount: Option<NonZeroUsize>,
+	/// The key the task uses to locate this slot.
+	///
+	/// This must be updated if the slot is moved.
+	pub key: Key,
+}
+
+impl Busy {
+	pub fn new(key: Key) -> Rc<RefCell<Self>> {
+		Rc::new(RefCell::new(Self { wakers: vec![], refcount: None, key }))
+	}
+
+	pub fn with_refcount(key: Key, refcount: Option<NonZeroUsize>) -> Rc<RefCell<Self>> {
+		Rc::new(RefCell::new(Self { wakers: vec![], refcount, key }))
+	}
 }
 
 /// Reference counter to prevent slots from transitioning to

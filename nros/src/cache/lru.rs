@@ -73,17 +73,6 @@ impl<V> LruList<V> {
 		val
 	}
 
-	/// Remove the last node from the list.
-	pub fn remove_last(&mut self) -> Option<V> {
-		(!self.nodes.is_empty()).then(|| {
-			let idx = self.pop_last();
-			let val = self.nodes.remove(idx).unwrap().value;
-			#[cfg(test)]
-			self.assert_valid();
-			val
-		})
-	}
-
 	/// Get the last node from the list.
 	pub fn last(&self) -> Option<&V> {
 		(!self.nodes.is_empty()).then(|| &self.nodes.get(self.tail).unwrap().value)
@@ -115,17 +104,6 @@ impl<V> LruList<V> {
 			self.nodes[index].next = IDX_NONE;
 		}
 		self.head = index;
-	}
-
-	/// Remove the last value from the list.
-	///
-	/// # Panics
-	///
-	/// If there are no nodes.
-	fn pop_last(&mut self) -> Idx {
-		let tail = self.tail;
-		self.remove_list(tail);
-		tail
 	}
 
 	/// Remove a node from the list without removing it from the arena.

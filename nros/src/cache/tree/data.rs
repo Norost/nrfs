@@ -2,13 +2,11 @@ use {
 	super::super::{
 		slot::Present, Lru, MaxRecordSize, Slot, CACHE_OBJECT_FIXED_COST, RECORD_SIZE_P2,
 	},
-	crate::{Record, Resource},
+	crate::{Record, Resource, resource::Buf},
 	core::fmt,
 	rustc_hash::{FxHashMap, FxHashSet},
 	std::collections::hash_map,
 };
-
-const MAX_DEPTH: u8 = 14;
 
 /// A single cached record tree.
 #[derive(Debug)]
@@ -45,11 +43,26 @@ impl<R: Resource> Default for Level<R> {
 
 impl<R: Resource> fmt::Debug for Level<R> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		struct FmtSlot<'a, R: Resource>(&'a Slot<R::Buf>);
+
+		impl<R: Resource> fmt::Debug for FmtSlot<'_, R> {
+			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				match self.0 {
+					Slot::Present(present) => format_args!("{:x?}", present.data.get()).fmt(f),
+					Slot::Busy(busy) => busy.fmt(f),
+				}
+			}
+		}
+
 		struct FmtSlots<'a, R: Resource>(&'a FxHashMap<u64, Slot<R::Buf>>);
 
 		impl<R: Resource> fmt::Debug for FmtSlots<'_, R> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-				f.debug_struct(stringify!(Slot)).finish_non_exhaustive()
+				let mut f = f.debug_map();
+				for (k, v) in self.0.iter() {
+					f.entry(k, &FmtSlot::<R>(v));
+				}
+				f.finish()
 			}
 		}
 
