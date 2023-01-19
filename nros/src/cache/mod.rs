@@ -669,10 +669,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			// Evict entry
 
 			// Check if the entry is dirty.
-			let entry = if obj
-				.data
-				.unmark_dirty(key.depth(), key.offset(), self.max_record_size())
-			{
+			let entry = if obj.data.is_marked_dirty(key.depth(), key.offset()) {
 				let level = &mut obj.data.data[usize::from(key.depth())];
 
 				let slot = level.slots.get_mut(&key.offset()).expect("no entry");
@@ -755,6 +752,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 							CACHE_OBJECT_FIXED_COST,
 						);
 					}
+
+					// Remove dirty marker
+					let _r =
+						obj.data
+							.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
+					debug_assert!(_r, "not marked");
 
 					drop(data_ref);
 					// Make sure we only drop the "background" runner at the end to avoid

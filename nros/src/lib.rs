@@ -1,6 +1,7 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
 #![deny(rust_2018_idioms)]
+#![feature(is_some_and)]
 #![feature(async_closure)]
 #![feature(never_type)]
 #![feature(get_many_mut)]

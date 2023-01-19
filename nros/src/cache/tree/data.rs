@@ -49,7 +49,7 @@ impl<R: Resource> fmt::Debug for Level<R> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 				match self.0 {
 					Slot::Present(present) => format_args!("{:x?}", present.data.get()).fmt(f),
-					Slot::Busy(busy) => busy.fmt(f),
+					Slot::Busy(busy) => busy.borrow_mut().fmt(f),
 				}
 			}
 		}
@@ -162,6 +162,12 @@ impl<R: Resource> TreeData<R> {
 		}
 
 		true
+	}
+
+	/// Check if an entry is dirty.
+	pub fn is_marked_dirty(&self, depth: u8, offset: u64) -> bool {
+		let level = &self.data[usize::from(depth)];
+		level.dirty_markers.get(&offset).is_some_and(|m| m.is_dirty)
 	}
 }
 

@@ -241,33 +241,19 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					}
 				}
 			}
-			// Destroy leaf records & replace with zeros
-			let key = Key::new(0, self.id, 1, offset >> self.cache.entries_per_parent_p2());
+
+			// Replace leaf records with zeros
+			// FIXME we're clearing way too much if offset + len < new_len
 			let entries_per_rec = 1 << self.cache.entries_per_parent_p2();
-			let mask = entries_per_rec - 1;
 			for i in offset % entries_per_rec..entries_per_rec {
-				let i = usize::try_from(i).unwrap();
-				let entry = self.get(key.depth(), key.offset()).await?;
-
-				let record = get_record(entry.get(), i).unwrap_or_default();
-				let k = Key::new(0, self.id, 0, (offset & !mask) + u64::try_from(i).unwrap());
-
-				drop(entry);
-
+				let k = Key::new(0, self.id, 0, offset);
 				let entry = self
 					.cache
 					.fetch_entry(self.background, k, &Record::default())
 					.await?;
 				entry.modify(self.background, |data| data.resize(0, 0));
+				offset += 1;
 			}
-
-			// FIXME we're clearing way too much if offset + len < new_len
-			let entry = self.cache.get_entry(key).expect("no entry");
-			entry.modify(self.background, |data| {
-				let start = usize::try_from(offset % entries_per_rec).unwrap();
-				data.resize(start * mem::size_of::<Record>(), 0);
-			});
-			offset = (offset + mask + 1) & !mask;
 		}
 
 		Ok(len)
@@ -376,12 +362,6 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		let cur_depth = depth(self.max_record_size(), len);
 		let parent_depth = record_depth + 1;
 		assert!(parent_depth <= cur_depth);
-
-		if cur_root.length == 0 && record.length == 0 {
-			// Both the record and root are zero, so don't dirtying the parent.
-			trace!("--> skip record & root zero");
-			return Ok(());
-		}
 
 		if cur_depth == parent_depth {
 			assert_eq!(offset, 0, "root can only be at offset 0");
@@ -528,9 +508,11 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				refcount += cur_level.slots.len();
 			}
 			// Fix marker count for cur_obj
-			cur_obj.data.data[usize::from(new_depth)]
-				.dirty_markers
-				.remove(&0);
+			if new_depth > 0 {
+				cur_obj.data.data[usize::from(new_depth)]
+					.dirty_markers
+					.remove(&0);
+			}
 
 			// Swap & insert pseudo-object.
 			// If the pseudo-object has no entries, it's already zeroed and there is nothing
@@ -561,6 +543,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					.write_zeros(0, u64::MAX)
 					.await?;
 			}
+		} else {
+			// Just change the length.
+			let mut data = self.cache.data.borrow_mut();
+			let Some(Slot::Present(cur_obj)) = data.objects.get_mut(&self.id)
+				else { unreachable!("no object") };
+			cur_obj.data.root.total_length = new_len.into();
 		}
 
 		// Zero out data written past the end.
@@ -643,6 +631,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			d.get_mut().copy_from_slice(
 				Record { total_length: 0.into(), references: 0.into(), ..cur_root }.as_ref(),
 			);
+			crate::util::trim_zeros_end(&mut d);
 			let lru_index = data.lru.add(key, CACHE_ENTRY_FIXED_COST + d.len());
 			let entry = Slot::Present(Present { data: d, refcount: RefCount::NoRef { lru_index } });
 			obj.add_entry(&mut data.lru, key.depth(), key.offset(), entry);
