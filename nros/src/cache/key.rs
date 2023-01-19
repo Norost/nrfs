@@ -20,23 +20,37 @@ use {
 ///
 /// Ergo, we need 59 + 4 + 59 = 122 bits at most.
 /// The 4 depth bits are put in the high bits of the offset.
-/// The 5 free bits in the ID are used for "pseudo-IDs", i.e. IDs for objects that aren't stored
-/// on disk.
+/// The 4 free bits in the ID are used for flags.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(u64, u64);
 
 impl Key {
+	/// The key refers to a pseudo object.
+	pub const FLAG_PSEUDO: u8 = 1 << 4;
+	/// The key refers to the object itself.
+	pub const FLAG_OBJECT: u8 = 1 << 3;
+
 	/// # Panics
 	///
 	/// If `offset` (< 2**59) or `depth` (< 14) are out of range.
-	pub fn new(id: u64, depth: u8, offset: u64) -> Self {
+	pub fn new(flags: u8, id: u64, depth: u8, offset: u64) -> Self {
+		assert!(flags & !0xf == 0, "flags out of range");
+		assert!(depth <= 16, "depth out of range");
+		assert!(id <= 1 << 59, "ID out of range");
 		assert!(offset < 1 << 59, "offset out of range");
-		assert!(depth <= 14, "depth out of range");
-		Self(id, offset << 4 | u64::from(depth))
+		Self(id << 4 | u64::from(flags), offset << 4 | u64::from(depth))
 	}
 
 	pub fn id(&self) -> u64 {
-		self.0
+		self.0 >> 4
+	}
+
+	pub fn flags(&self) -> u8 {
+		(self.0 & 0xf) as _
+	}
+
+	pub fn test_flag(&self, flag: u8) -> bool {
+		self.flags() & flag != 0
 	}
 
 	pub fn depth(&self) -> u8 {
@@ -51,6 +65,7 @@ impl Key {
 impl fmt::Debug for Key {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Key))
+			.field("flags", &self.flags())
 			.field("id", &self.id())
 			.field("depth", &self.depth())
 			.field("offset", &self.offset())

@@ -118,6 +118,23 @@ impl Lru {
 		}
 	}
 
+	/// Increase reference count.
+	///
+	/// Removes entry if it was 0.
+	///
+	/// # Panics
+	///
+	/// If the reference count overflows.
+	fn increase_refcount(&mut self, refcount: &mut RefCount, len: usize) {
+		match refcount {
+			RefCount::Ref { count } => *count = count.checked_add(1).unwrap(),
+			RefCount::NoRef { lru_index } => {
+				self.remove(*lru_index, len);
+				*refcount = RefCount::Ref { count: NonZeroUsize::new(1).unwrap() };
+			}
+		}
+	}
+
 	/// Promote a node.
 	fn promote(&mut self, refcount: &RefCount) {
 		if let RefCount::NoRef { lru_index } = *refcount {
@@ -279,7 +296,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					let Slot::Present(Present { refcount: RefCount::NoRef { lru_index }, .. }) = slot
 						else { continue };
 					let key = data.lru.lru.get_mut(*lru_index).expect("not in lru");
-					*key = Key::new(to, key.depth(), key.offset());
+					*key = Key::new(0, to, key.depth(), key.offset());
 				}
 			}
 
@@ -358,7 +375,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		&'a self,
 		bg: &'b Background<'a, D>,
 		id: u64,
-	) -> Result<RefMut<'a, Present<TreeData<R>>>, Error<D>> {
+	) -> Result<(RefMut<'a, Present<TreeData<R>>>, RefMut<'a, Lru>), Error<D>> {
 		trace!("fetch_object {:?}", id);
 		// Steps:
 		// 1. Check the state of the object.
@@ -370,9 +387,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let mut is_referenced = false;
 		let obj = future::poll_fn(|cx| {
 			let mut must_fetch = true;
-			let ret = RefMut::filter_map(self.data.borrow_mut(), |data| {
+			let (objects, mut lru) =
+				RefMut::map_split(self.data.borrow_mut(), |d| (&mut d.objects, &mut d.lru));
+			let ret = RefMut::filter_map(objects, |objects| {
 				// 1. Check the state of the object.
-				match data.objects.entry(id) {
+				match objects.entry(id) {
 					// 1c. If not present, fetch the root.
 					hash_map::Entry::Vacant(slot) => {
 						// We need to fetch it ourselves.
@@ -384,9 +403,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						// 1a. If present, just return.
 						Slot::Present(obj) => {
 							if is_referenced {
-								data.lru.decrease_refcount(
+								lru.decrease_refcount(
 									&mut obj.refcount,
-									Key::new(id | LRU_OBJ_REF, 0, 0),
+									Key::new(Key::FLAG_OBJECT, id, 0, 0),
 									CACHE_OBJECT_FIXED_COST,
 								);
 							}
@@ -405,7 +424,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				}
 			});
 			match ret {
-				Ok(obj) => Poll::Ready(Some(obj)),
+				Ok(obj) => Poll::Ready(Some((obj, lru))),
 				Err(_) if must_fetch => Poll::Ready(None),
 				Err(_) => Poll::Pending,
 			}
@@ -430,14 +449,14 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		}
 
 		// Insert the entry.
-		let obj = RefMut::map(self.data.borrow_mut(), |data| {
+		let obj = RefMut::map_split(self.data.borrow_mut(), |data| {
 			let slot = data.objects.get_mut(&id).expect("no object");
 			let Slot::Busy(busy) = slot else { unreachable!("not busy") };
 			busy.wakers.drain(..).for_each(|w| w.wake());
 			let refcount = RefCount::busy_to_present(
 				busy.refcount,
 				&mut data.lru,
-				Key::new(id | LRU_OBJ_REF, 0, 0),
+				Key::new(Key::FLAG_OBJECT, id, 0, 0),
 				CACHE_OBJECT_FIXED_COST,
 			);
 			*slot = Slot::Present(Present {
@@ -445,7 +464,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				refcount,
 			});
 			let Slot::Present(obj) = slot else { unreachable!() };
-			obj
+			(obj, &mut data.lru)
 		});
 
 		// Presto
@@ -475,14 +494,14 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		self.store.assert_alloc(record);
 
 		// 1. Fetch the corresponding object first.
-		let mut obj = self.fetch_object(bg, key.id()).await?;
+		let (mut obj, mut lru) = self.fetch_object(bg, key.id()).await?;
 
 		// 2. Check the state of the entry.
 		if obj.data.data[usize::from(key.depth())]
 			.slots
 			.contains_key(&key.offset())
 		{
-			drop(obj);
+			drop((obj, lru));
 			let mut is_referenced = false;
 			let entry = future::poll_fn(|cx| {
 				let (objects, mut lru) =
@@ -525,24 +544,13 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// 2c. If not present, fetch the entry.
 
 		// Insert a new entry and increase refcount to object.
-		obj.data.data[usize::from(key.depth())]
-			.slots
-			.insert(key.offset(), Slot::Busy(Busy::default()));
-		match &mut obj.refcount {
-			RefCount::Ref { count } => {
-				*count = count.checked_add(1).unwrap();
-				drop(obj);
-			}
-			RefCount::NoRef { lru_index } => {
-				let index = *lru_index;
-				obj.refcount = RefCount::Ref { count: NonZeroUsize::new(1).unwrap() };
-				drop(obj);
-				self.data
-					.borrow_mut()
-					.lru
-					.remove(index, CACHE_OBJECT_FIXED_COST);
-			}
-		}
+		obj.add_entry(
+			&mut lru,
+			key.depth(),
+			key.offset(),
+			Slot::Busy(Busy::default()),
+		);
+		drop((obj, lru));
 
 		// Fetch it
 		let entry = self.store.read(record).await?;
@@ -605,7 +613,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			// Push to background tasks queue to process in parallel
 			drop(data);
 			if let Some(task) = self.evict_entry(key) {
-				bg.run_background(Box::pin(task));
+				bg.run_background(task);
 			}
 			data = self.data.borrow_mut();
 		}
@@ -614,78 +622,123 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Evict an entry from the cache.
 	///
 	/// Does nothing if the entry wasn't present.
-	fn evict_entry(&self, key: Key) -> Option<impl Future<Output = Result<(), Error<D>>> + '_> {
+	fn evict_entry(
+		&self,
+		key: Key,
+	) -> Option<Pin<Box<dyn Future<Output = Result<(), Error<D>>> + '_>>> {
 		trace!("evict_entry {:?}", key);
 
 		// Get object
 		let data = &mut *self.data.borrow_mut();
-		let Slot::Present(obj) = data.objects.get_mut(&key.id())? else { return None };
+		let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id())
+			else { unreachable!("no object") };
 
-		// Check if the entry is dirty.
-		let entry = if obj
-			.data
-			.unmark_dirty(key.depth(), key.offset(), self.max_record_size())
-		{
-			let level = &mut obj.data.data[usize::from(key.depth())];
+		if key.test_flag(Key::FLAG_OBJECT) {
+			// Evict object
 
-			let slot = level.slots.get_mut(&key.offset()).expect("no entry");
-			let Slot::Present(Present { data: entry, refcount: RefCount::NoRef { lru_index } }) = slot
-				else { unreachable!("no entry, or entry not in LRU") };
-			let entry = mem::replace(entry, self.resource().alloc());
+			debug_assert!(
+				!key.test_flag(Key::FLAG_PSEUDO),
+				"pseudo object should not be in the LRU"
+			);
 
-			data.lru
-				.remove(*lru_index, entry.len() + CACHE_ENTRY_FIXED_COST);
+			let fut = obj
+				.data
+				.is_dirty()
+				.then(|| {
+					let mut root = obj.data.root;
+					root._reserved = 0;
+					let offset = key.id() << RECORD_SIZE_P2;
+					async move {
+						let bg = Default::default(); // TODO get rid of this sillyness
+						Tree::new(self, &bg, OBJECT_LIST_ID)
+							.write(offset, root.as_ref())
+							.await?;
+						bg.drop().await
+					}
+				})
+				.map(box_fut);
 
-			*slot = Slot::Busy(Busy { wakers: vec![], refcount: None });
+			let RefCount::NoRef { lru_index } = obj.refcount
+				else { unreachable!("not in lru") };
+			data.lru.remove(lru_index, CACHE_OBJECT_FIXED_COST);
+			data.objects.remove(&key.id());
 
-			Some(entry)
+			fut
 		} else {
-			// Just remove the entry.
-			let level = &mut obj.data.data[usize::from(key.depth())];
-			level.slots.remove(&key.offset());
-			None
-		};
+			// Evict entry
 
-		entry.map(|entry| async move {
-			trace!("evict_entry::is_dirty {:?}", key);
-			// Store record.
-			let (record, entry) = self.store.write(entry).await?;
+			// Check if the entry is dirty.
+			let entry = if obj
+				.data
+				.unmark_dirty(key.depth(), key.offset(), self.max_record_size())
+			{
+				let level = &mut obj.data.data[usize::from(key.depth())];
 
-			let bg = Default::default(); // TODO get rid of this sillyness
-			let updated = Tree::new(self, &bg, key.id())
-				.update_record(key.depth(), key.offset(), record)
-				.await?;
+				let slot = level.slots.get_mut(&key.offset()).expect("no entry");
+				let Slot::Present(Present { data: entry, refcount: RefCount::NoRef { lru_index } }) = slot
+					else { unreachable!("no entry, or entry not in LRU") };
+				let entry = mem::replace(entry, self.resource().alloc());
 
-			// Unmark as being flushed.
-			let mut data = self.data.borrow_mut();
-			let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id())
-				else { unreachable!("no object") };
-			let level = &mut obj.data.data[usize::from(key.depth())];
-			let hash_map::Entry::Occupied(mut slot) = level.slots.entry(key.offset())
-				else { unreachable!("no entry") };
-			let Slot::Busy(Busy { wakers, refcount }) = slot.get_mut()
-				else { unreachable!("no entry or entry is not flushing") };
-			// Wake a waiting fetcher, if any.
-			// We have to insert the entry again since the fetcher *will* have an outdated record.
-			if let Some(count) = mem::take(refcount) {
-				debug_assert!(!wakers.is_empty(), "refcount is non-zero without wakers");
-				wakers.drain(..).for_each(|w| w.wake());
-				*slot.get_mut() =
-					Slot::Present(Present { data: entry, refcount: RefCount::Ref { count } });
+				data.lru
+					.remove(*lru_index, entry.len() + CACHE_ENTRY_FIXED_COST);
+
+				*slot = Slot::Busy(Busy { wakers: vec![], refcount: None });
+
+				Some(entry)
 			} else {
-				debug_assert!(wakers.is_empty(), "refcount is zero with wakers");
-				slot.remove();
-			}
+				// Just remove the entry.
+				let level = &mut obj.data.data[usize::from(key.depth())];
+				let _r = level.slots.remove(&key.offset());
+				debug_assert!(_r.is_some(), "no entry");
+				None
+			};
 
-			drop(data);
-			// Make sure we only drop the "background" runner at the end to avoid
-			// getting stuck when something tries to fetch the entry that is
-			// being evicted.
-			//
-			// Specifically, we must ensure the Flushing state is removed before
-			// we attempt to run the background tasks to completion.
-			bg.drop().await
-		})
+			let entry = entry.map(|entry| {
+				async move {
+					trace!("evict_entry::is_dirty {:?}", key);
+					// Store record.
+					let (record, entry) = self.store.write(entry).await?;
+
+					let bg = Default::default(); // TODO get rid of this sillyness
+					let updated = Tree::new(self, &bg, key.id())
+						.update_record(key.depth(), key.offset(), record)
+						.await?;
+
+					// Unmark as being flushed.
+					let mut data = self.data.borrow_mut();
+					let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id())
+					else { unreachable!("no object") };
+					let level = &mut obj.data.data[usize::from(key.depth())];
+					let hash_map::Entry::Occupied(mut slot) = level.slots.entry(key.offset())
+					else { unreachable!("no entry") };
+					let Slot::Busy(Busy { wakers, refcount }) = slot.get_mut()
+					else { unreachable!("no entry or entry is not flushing") };
+					// Wake a waiting fetcher, if any.
+					// We have to insert the entry again since the fetcher *will* have an outdated record.
+					if let Some(count) = mem::take(refcount) {
+						debug_assert!(!wakers.is_empty(), "refcount is non-zero without wakers");
+						wakers.drain(..).for_each(|w| w.wake());
+						*slot.get_mut() = Slot::Present(Present {
+							data: entry,
+							refcount: RefCount::Ref { count },
+						});
+					} else {
+						debug_assert!(wakers.is_empty(), "refcount is zero with wakers");
+						slot.remove();
+					}
+
+					drop(data);
+					// Make sure we only drop the "background" runner at the end to avoid
+					// getting stuck when something tries to fetch the entry that is
+					// being evicted.
+					//
+					// Specifically, we must ensure the Flushing state is removed before
+					// we attempt to run the background tasks to completion.
+					bg.drop().await
+				}
+			});
+			entry.map(box_fut)
+		}
 	}
 
 	/// Flush an entry from the cache.
@@ -773,7 +826,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 				// Flush in parallel.
 				for offt in offsets {
-					let key = Key::new(id, depth, offt);
+					let key = Key::new(0, id, depth, offt);
 					queue.push(self.flush_entry(bg, key));
 				}
 				while queue.try_next().await?.is_some() {}
@@ -819,7 +872,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 			// Flush in parallel.
 			for offt in offsets {
-				let key = Key::new(OBJECT_LIST_ID, depth, offt);
+				let key = Key::new(0, OBJECT_LIST_ID, depth, offt);
 				queue.push(self.flush_entry(bg, key));
 			}
 			while queue.try_next().await?.is_some() {}

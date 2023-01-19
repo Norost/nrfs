@@ -6,7 +6,7 @@ use {
 
 /// A single slot with cached data.
 #[derive(Debug)]
-pub enum Slot<T> {
+pub(super) enum Slot<T> {
 	/// The entry is present.
 	Present(Present<T>),
 	/// The entry is being fetched or flushed.
@@ -14,7 +14,7 @@ pub enum Slot<T> {
 }
 
 #[derive(Debug)]
-pub struct Present<T> {
+pub(super) struct Present<T> {
 	/// The cached data.
 	pub data: T,
 	/// The amount of tasks referencing this data.
@@ -22,7 +22,7 @@ pub struct Present<T> {
 }
 
 #[derive(Debug, Default)]
-pub struct Busy {
+pub(super) struct Busy {
 	/// Wakers for tasks waiting for this slot.
 	pub wakers: Vec<Waker>,
 	/// The amount of tasks referencing this data.
@@ -32,7 +32,7 @@ pub struct Busy {
 /// Reference counter to prevent slots from transitioning to
 /// empty or flushing state before all tasks have finished with it.
 #[derive(Debug)]
-pub enum RefCount {
+pub(super) enum RefCount {
 	/// There are tasks remaining.
 	Ref {
 		/// The amount of tasks waiting.

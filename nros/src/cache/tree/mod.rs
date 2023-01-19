@@ -2,7 +2,8 @@ pub mod data;
 
 use {
 	super::{
-		slot::RefCount, Busy, Cache, EntryRef, Key, Present, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2,
+		slot::RefCount, Busy, Cache, EntryRef, Key, Present, Slot, CACHE_ENTRY_FIXED_COST,
+		OBJECT_LIST_ID, RECORD_SIZE_P2,
 	},
 	crate::{
 		resource::Buf, util::get_record, Background, Dev, Error, MaxRecordSize, Record, Resource,
@@ -100,7 +101,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				(d, data) = data.split_at(1usize << self.max_record_size());
 
 				// "Fetch" directly since we're overwriting the entire record anyways.
-				let key = Key::new(self.id, 0, offset);
+				let key = Key::new(0, self.id, 0, offset);
 				let entry = self
 					.cache
 					.fetch_entry(self.background, key, &Record::default())
@@ -187,7 +188,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			loop {
 				// Check if either the entry is empty or there are dirty records to inspect.
 				let offt = offset >> self.cache.entries_per_parent_p2() * depth;
-				let obj = self.cache.fetch_object(self.background, self.id).await?;
+				let (obj, _) = self.cache.fetch_object(self.background, self.id).await?;
 				let dirty = obj.data.data[usize::from(depth)]
 					.dirty_markers
 					.contains_key(&offt);
@@ -208,14 +209,14 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				let shift_child = self.cache.entries_per_parent_p2() * (depth - 1);
 				let og_offset = offset >> shift_parent;
 				for _ in 0.. {
-					let obj = self.cache.fetch_object(self.background, self.id).await?;
+					let (obj, _) = self.cache.fetch_object(self.background, self.id).await?;
 					let dirty = obj.data.data[usize::from(depth - 1)]
 						.dirty_markers
 						.contains_key(&(offset >> shift_child));
 					drop(obj);
 
 					let record = {
-						let key = Key::new(self.id, depth, offset >> shift_parent);
+						let key = Key::new(0, self.id, depth, offset >> shift_parent);
 						if key.offset() > og_offset {
 							continue 'z;
 						}
@@ -231,7 +232,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 						offset += 1u64 << shift_child;
 					} else {
 						depth -= 1;
-						let key = Key::new(self.id, depth, offset >> shift_child);
+						let key = Key::new(0, self.id, depth, offset >> shift_child);
 						self.cache
 							.fetch_entry(self.background, key, &record)
 							.await?;
@@ -240,7 +241,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				}
 			}
 			// Destroy leaf records & replace with zeros
-			let key = Key::new(self.id, 1, offset >> self.cache.entries_per_parent_p2());
+			let key = Key::new(0, self.id, 1, offset >> self.cache.entries_per_parent_p2());
 			let entries_per_rec = 1 << self.cache.entries_per_parent_p2();
 			let mask = entries_per_rec - 1;
 			for i in offset % entries_per_rec..entries_per_rec {
@@ -248,7 +249,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				let entry = self.cache.get_entry(key).expect("no entry");
 
 				let record = get_record(entry.get(), i).unwrap_or_default();
-				let k = Key::new(self.id, 0, (offset & !mask) + u64::try_from(i).unwrap());
+				let k = Key::new(0, self.id, 0, (offset & !mask) + u64::try_from(i).unwrap());
 
 				drop(entry);
 
@@ -580,49 +581,51 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		let data = &mut *data_ref;
 		let Some(Slot::Present(obj)) = data.objects.get_mut(&self.id)
 			else { unreachable!("no object") };
-		let obj = &mut obj.data;
 
 		// 1. Adjust levels array size to new_depth
-		let mut v = mem::take(&mut obj.data).into_vec();
+		let mut v = mem::take(&mut obj.data.data).into_vec();
 		debug_assert_eq!(v.len(), usize::from(cur_depth));
 		v.resize_with(new_depth.into(), Default::default);
-		obj.data = v.into();
+		obj.data.data = v.into();
 
 		// Check if the depth changed.
 		// If so we need to move the current root.
-		// If cur_root.length == 0, the root is guaranteed to be zero so no need to do anything.
-		if cur_depth < new_depth && cur_root.length > 0 {
+		if cur_depth < new_depth {
 			// 2. Propagate dirty counters up.
 			// This simply involves inserting counters at 0 offsets.
 			// Since we're going to insert a dirty entry, do it unconditionally.
 			// Mark first level as dirty.
-			obj.mark_dirty(cur_depth, 0, self.max_record_size());
-			let marker = obj.data[usize::from(cur_depth)]
-				.dirty_markers
-				.entry(0)
-				.or_default();
+			let dirty_descendant = cur_depth > 0
+				&& obj.data.data[usize::from(cur_depth - 1)]
+					.dirty_markers
+					.contains_key(&0);
+			let [level, levels @ ..] = &mut obj.data.data[usize::from(cur_depth)..]
+				else { unreachable!("out of range") };
+			let marker = level.dirty_markers.entry(0).or_default();
 			marker.is_dirty = true;
-			marker.children.insert(0);
+			if dirty_descendant {
+				marker.children.insert(0);
+			}
 			// Mark other levels as having a dirty child.
-			for lvl in obj.data[(cur_depth + 1).into()..].iter_mut() {
+			for lvl in levels.iter_mut() {
 				lvl.dirty_markers.entry(0).or_default().children.insert(0);
 			}
 
 			// 3. Insert parent right above current root record if depth changes.
 			//    Do this without await!
-			let key = Key::new(self.id, cur_depth, 0);
+			let key = Key::new(0, self.id, cur_depth, 0);
 			let mut d = self.cache.resource().alloc();
 			d.resize(core::mem::size_of::<Record>(), 0);
 			d.get_mut().copy_from_slice(
 				Record { total_length: 0.into(), references: 0.into(), ..cur_root }.as_ref(),
 			);
-			let lru_index = data.lru.add(key, d.len());
-			let slot = Slot::Present(Present { data: d, refcount: RefCount::NoRef { lru_index } });
-			obj.data[usize::from(key.depth())].slots.insert(0, slot);
+			let lru_index = data.lru.add(key, CACHE_ENTRY_FIXED_COST + d.len());
+			let entry = Slot::Present(Present { data: d, refcount: RefCount::NoRef { lru_index } });
+			obj.add_entry(&mut data.lru, key.depth(), key.offset(), entry);
 
 			// 4. Update root record.
 			//    If depth changes, make it a zero record.
-			obj.root = Record {
+			obj.data.root = Record {
 				total_length: new_len.into(),
 				references: cur_root.references,
 				..Default::default()
@@ -633,7 +636,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			self.cache.evict_excess(self.background);
 		} else {
 			// Just adjust length and presto
-			obj.root = Record { total_length: new_len.into(), ..obj.root }
+			obj.data.root = Record { total_length: new_len.into(), ..obj.data.root }
 		}
 
 		Ok(())
@@ -693,7 +696,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		let entry = 's: {
 			while cur_depth < obj_depth {
 				// Check if the entry is already present.
-				let key = Key::new(self.id, cur_depth, offset >> depth_offset_shift(cur_depth));
+				let key = Key::new(
+					0,
+					self.id,
+					cur_depth,
+					offset >> depth_offset_shift(cur_depth),
+				);
 				if let Some(entry) = self.cache.get_entry(key) {
 					break 's Some(entry);
 				}
@@ -732,14 +740,19 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		let entry = loop {
 			if record.length == 0 {
 				// Skip straight to the end since it's all zeroes from here on anyways.
-				let key = Key::new(self.id, target_depth, offset);
+				let key = Key::new(0, self.id, target_depth, offset);
 				return self
 					.cache
 					.fetch_entry(self.background, key, &Record::default())
 					.await;
 			}
 
-			let key = Key::new(self.id, cur_depth, offset >> depth_offset_shift(cur_depth));
+			let key = Key::new(
+				0,
+				self.id,
+				cur_depth,
+				offset >> depth_offset_shift(cur_depth),
+			);
 			let entry = self
 				.cache
 				.fetch_entry(self.background, key, &record)
@@ -789,7 +802,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			"object list isn't reference counted"
 		);
 
-		let mut obj = self.cache.fetch_object(self.background, self.id).await?;
+		let (mut obj, _) = self.cache.fetch_object(self.background, self.id).await?;
 		debug_assert!(obj.data.root.references != 0, "invalid object");
 		if obj.data.root.references == u16::MAX {
 			return Ok(false);
@@ -809,7 +822,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			"object list isn't reference counted"
 		);
 
-		let mut obj = self.cache.fetch_object(self.background, self.id).await?;
+		let (mut obj, _) = self.cache.fetch_object(self.background, self.id).await?;
 		debug_assert!(obj.data.root.references != 0, "invalid object");
 		obj.data.root.references -= 1;
 
@@ -834,7 +847,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 	/// Get the root and length of this tree.
 	async fn root(&self) -> Result<(Record, u64), Error<D>> {
-		let obj = self.cache.fetch_object(self.background, self.id).await?;
+		let (obj, _) = self.cache.fetch_object(self.background, self.id).await?;
 		Ok((obj.data.root, u64::from(obj.data.root.total_length)))
 	}
 }
