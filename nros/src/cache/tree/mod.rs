@@ -247,7 +247,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let mask = entries_per_rec - 1;
 			for i in offset % entries_per_rec..entries_per_rec {
 				let i = usize::try_from(i).unwrap();
-				let entry = self.cache.get_entry(key).expect("no entry");
+				let entry = self.get(key.depth(), key.offset()).await?;
 
 				let record = get_record(entry.get(), i).unwrap_or_default();
 				let k = Key::new(0, self.id, 0, (offset & !mask) + u64::try_from(i).unwrap());

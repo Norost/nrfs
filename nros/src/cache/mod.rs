@@ -507,7 +507,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						// 2a. If present, just return.
 						Slot::Present(entry) => {
 							if is_referenced {
-								lru.decrease_refcount(&mut entry.refcount, key, entry.data.len());
+								lru.decrease_refcount(
+									&mut entry.refcount,
+									key,
+									CACHE_ENTRY_FIXED_COST + entry.data.len(),
+								);
 							}
 							Some(entry)
 						}
