@@ -1,10 +1,9 @@
 use {
 	super::super::{MaxRecordSize, Slot, RECORD_SIZE_P2},
 	crate::{Record, Resource},
-	std::collections::hash_map,
 	core::fmt,
-	rustc_hash::FxHashMap,
-	rustc_hash::FxHashSet,
+	rustc_hash::{FxHashMap, FxHashSet},
+	std::collections::hash_map,
 };
 
 const MAX_DEPTH: u8 = 14;
@@ -65,6 +64,16 @@ impl<R: Resource> TreeData<R> {
 		Self { root, data: (0..depth).map(|_| Default::default()).collect() }
 	}
 
+	/// Mark or unmark the root as dirty.
+	pub fn set_dirty(&mut self, dirty: bool) {
+		self.root._reserved = dirty.into()
+	}
+
+	/// Whether this object is dirty or not.
+	pub fn is_dirty(&self) -> bool {
+		self.root._reserved != 0
+	}
+
 	/// Mark an entry as dirty.
 	pub fn mark_dirty(&mut self, depth: u8, offset: u64, max_record_size: MaxRecordSize) {
 		let [level, levels @ ..] = &mut self.data[usize::from(depth)..]
@@ -78,7 +87,12 @@ impl<R: Resource> TreeData<R> {
 			let mut offt = offset;
 
 			for lvl in levels {
-				let inserted = lvl.dirty_markers.entry(offt >> shift).or_default().children.insert(offt);
+				let inserted = lvl
+					.dirty_markers
+					.entry(offt >> shift)
+					.or_default()
+					.children
+					.insert(offt);
 				if !inserted {
 					// The entry was already present.
 					break;
@@ -99,7 +113,10 @@ impl<R: Resource> TreeData<R> {
 			else { return false };
 
 		if !marker.get().is_dirty {
-			debug_assert!(!marker.get().children.is_empty(), "non-dirty marker without children");
+			debug_assert!(
+				!marker.get().children.is_empty(),
+				"non-dirty marker without children"
+			);
 			return false;
 		}
 

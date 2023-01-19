@@ -8,9 +8,8 @@ pub use tree::Tree;
 
 use {
 	crate::{
-		util::box_fut,
-		resource::Buf, storage, Background, BlockSize, Dev, Error,
-		MaxRecordSize, Record, Resource, Store,
+		resource::Buf, storage, util::box_fut, Background, BlockSize, Dev, Error, MaxRecordSize,
+		Record, Resource, Store,
 	},
 	core::{
 		cell::{RefCell, RefMut},
@@ -435,7 +434,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				Key::new(id | LRU_OBJ_REF, 0, 0),
 				CACHE_OBJECT_FIXED_COST,
 			);
-			*slot = Slot::Present(Present { data: TreeData::new(root, self.max_record_size()), refcount });
+			*slot = Slot::Present(Present {
+				data: TreeData::new(root, self.max_record_size()),
+				refcount,
+			});
 			let Slot::Present(obj) = slot else { unreachable!() };
 			obj
 		});
@@ -490,11 +492,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						// 2a. If present, just return.
 						Slot::Present(entry) => {
 							if is_referenced {
-								lru.decrease_refcount(
-									&mut entry.refcount,
-									key,
-									entry.data.len(),
-								);
+								lru.decrease_refcount(&mut entry.refcount, key, entry.data.len());
 							}
 							Some(entry)
 						}
@@ -618,7 +616,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let Slot::Present(obj) = data.objects.get_mut(&key.id())? else { return None };
 
 		// Check if the entry is dirty.
-		let entry = if obj.data.unmark_dirty(key.depth(), key.offset(), self.max_record_size()) {
+		let entry = if obj
+			.data
+			.unmark_dirty(key.depth(), key.offset(), self.max_record_size())
+		{
 			let level = &mut obj.data.data[usize::from(key.depth())];
 
 			let slot = level.slots.get_mut(&key.offset()).expect("no entry");
@@ -696,7 +697,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let data = &mut *data_ref;
 		// Clear dirty status
 		let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id()) else { return Ok(()) };
-		obj.data.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
+		obj.data
+			.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
 
 		// Take entry.
 		let level = &mut obj.data.data[usize::from(key.depth())];
@@ -777,6 +779,30 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			}
 		}
 
+		// Write object roots.
+		// Sort the objects to take better advantage of caching.
+		let mut ids = data
+			.objects
+			.iter()
+			.filter(|&(&id, obj)| {
+				let Slot::Present(obj) = obj else { unreachable!() };
+				id != OBJECT_LIST_ID && obj.data.is_dirty()
+			})
+			.map(|(id, _)| *id)
+			.collect::<Vec<_>>();
+		ids.sort_unstable();
+		for id in ids {
+			let Some(Slot::Present(obj)) = data.objects.get(&id) else { continue };
+			let mut root = obj.data.root;
+			root._reserved = 0;
+			drop(data);
+			let offset = id << RECORD_SIZE_P2;
+			Tree::new(self, bg, OBJECT_LIST_ID)
+				.write(offset, root.as_ref())
+				.await?;
+			data = self.data.borrow_mut();
+		}
+
 		// Now flush the object list.
 		for depth in 0..16 {
 			let Some(tree) = data.objects.get_mut(&OBJECT_LIST_ID) else { continue };
@@ -798,16 +824,20 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			data = self.data.borrow_mut();
 		}
 
+		// Write object list root.
+		if let Some(Slot::Present(obj)) = data.objects.get(&OBJECT_LIST_ID) {
+			let mut root = obj.data.root;
+			root._reserved = 0;
+			self.store.set_object_list(root);
+		}
+
 		// Tadha!
 		// Do a sanity check just in case.
 		if cfg!(debug_assertions) {
 			for tree in data.objects.values() {
 				let Slot::Present(tree) = tree else { unreachable!() };
 				for level in tree.data.data.iter() {
-					debug_assert!(
-						level.dirty_markers.is_empty(),
-						"flush_all didn't flush all"
-					);
+					debug_assert!(level.dirty_markers.is_empty(), "flush_all didn't flush all");
 				}
 			}
 		}

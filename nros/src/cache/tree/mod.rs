@@ -1,12 +1,13 @@
 pub mod data;
 
 use {
-	core::num::NonZeroUsize,
-	super::{Present, Busy, slot::RefCount, Cache, EntryRef, Key, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2},
+	super::{
+		slot::RefCount, Busy, Cache, EntryRef, Key, Present, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2,
+	},
 	crate::{
 		resource::Buf, util::get_record, Background, Dev, Error, MaxRecordSize, Record, Resource,
 	},
-	core::{cell::RefMut, future::Future, mem, ops::RangeInclusive, pin::Pin},
+	core::{cell::RefMut, future::Future, mem, num::NonZeroUsize, ops::RangeInclusive, pin::Pin},
 };
 
 /// Implementation of a record tree.
@@ -399,6 +400,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// during flush or evict.
 			let mut obj = self.cache.get_object(self.id).expect("no object");
 			obj.root = new_root;
+			obj.set_dirty(true);
 		} else {
 			// Update a parent record.
 			// Find parent
@@ -476,10 +478,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				// Take new root out
 				let parent = self.get(new_depth, 0).await?;
 				let rec = get_record(parent.get(), 0).unwrap_or_default();
-				parent.modify(self.background, |d| if d.len() > 32 {
-					d.get_mut()[..32].fill(0)
-				} else {
-					d.resize(0, 0)
+				parent.modify(self.background, |d| {
+					if d.len() > 32 {
+						d.get_mut()[..32].fill(0)
+					} else {
+						d.resize(0, 0)
+					}
 				});
 				rec
 			};
@@ -514,7 +518,9 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				offt >>= self.max_record_size().to_raw();
 			}
 			// Fix marker count for cur_obj
-			cur_obj.data.data[usize::from(new_depth)].dirty_markers.remove(&0);
+			cur_obj.data.data[usize::from(new_depth)]
+				.dirty_markers
+				.remove(&0);
 
 			// Swap & insert pseudo-object.
 			// If the pseudo-object has no entries, it's already zeroed and there is nothing
@@ -526,7 +532,9 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				data.objects.insert(pseudo_id, Slot::Present(present));
 				// Zero out pseudo-object.
 				drop(data);
-				Tree::new(self.cache, self.background, pseudo_id).write_zeros(0, u64::MAX).await?;
+				Tree::new(self.cache, self.background, pseudo_id)
+					.write_zeros(0, u64::MAX)
+					.await?;
 			}
 		}
 
@@ -589,7 +597,10 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// Since we're going to insert a dirty entry, do it unconditionally.
 			// Mark first level as dirty.
 			obj.mark_dirty(cur_depth, 0, self.max_record_size());
-			let marker = obj.data[usize::from(cur_depth)].dirty_markers.entry(0).or_default();
+			let marker = obj.data[usize::from(cur_depth)]
+				.dirty_markers
+				.entry(0)
+				.or_default();
 			marker.is_dirty = true;
 			marker.children.insert(0);
 			// Mark other levels as having a dirty child.
@@ -606,10 +617,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				Record { total_length: 0.into(), references: 0.into(), ..cur_root }.as_ref(),
 			);
 			let lru_index = data.lru.add(key, d.len());
-			let slot = Slot::Present(Present {
-				data: d,
-				refcount: RefCount::NoRef { lru_index },
-			});
+			let slot = Slot::Present(Present { data: d, refcount: RefCount::NoRef { lru_index } });
 			obj.data[usize::from(key.depth())].slots.insert(0, slot);
 
 			// 4. Update root record.

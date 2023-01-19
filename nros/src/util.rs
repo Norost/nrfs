@@ -1,8 +1,6 @@
 use {
-	core::pin::Pin,
-	core::future::Future,
 	crate::{resource::Buf, Record},
-	core::mem,
+	core::{future::Future, mem, pin::Pin},
 };
 
 /// Get a record from a slice of raw data.

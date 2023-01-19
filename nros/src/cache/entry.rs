@@ -51,7 +51,8 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 			let mut data = self.cache.data.borrow_mut();
 			let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id())
 				else { panic!("no object") };
-			obj.data.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
+			obj.data
+				.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
 			drop(data);
 
 			// Flush
