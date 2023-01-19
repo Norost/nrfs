@@ -110,6 +110,13 @@ impl Lru {
 	///
 	/// If the reference count is [`RefCount::NoRef`].
 	fn decrease_refcount(&mut self, refcount: &mut RefCount, key: Key, len: usize) {
+		debug_assert!(
+			key.flags() & Key::FLAG_OBJECT == 0
+				|| key.id() == OBJECT_LIST_ID
+				|| key.id() & ID_PSEUDO == 0,
+			"pseudo-object don't belong in the LRU (id: {:#x})",
+			key.id(),
+		);
 		let RefCount::Ref { count } = refcount else { panic!("NoRef") };
 		match NonZeroUsize::new(count.get() - 1) {
 			Some(c) => *count = c,
@@ -641,10 +648,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				self.store.set_object_list(root);
 				None
 			} else {
-				debug_assert_eq!(
-					key.id() & ID_PSEUDO,
-					0,
-					"pseudo object should not be in the LRU"
+				debug_assert!(
+					key.id() & ID_PSEUDO == 0,
+					"pseudo object (id: {:#x}) should not be in the LRU",
+					key.id()
 				);
 
 				obj.data.is_dirty().then(|| {
@@ -729,6 +736,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 					// Wake a waiting fetcher, if any.
 					// We have to insert the entry again since the fetcher *will* have an outdated record.
+					let mut do_remove = false;
 					if let Some(count) = busy.refcount.take() {
 						debug_assert!(
 							!busy.wakers.is_empty(),
@@ -746,11 +754,27 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						slot.remove();
 						// Dereference the corresponding object.
 						let flags = Key::FLAG_OBJECT | key.flags();
-						data.lru.decrease_refcount(
-							&mut obj.refcount,
-							Key::new(flags, key.id(), key.depth(), key.offset()),
-							CACHE_OBJECT_FIXED_COST,
-						);
+						if key.id() == OBJECT_LIST_ID || key.id() & ID_PSEUDO == 0 {
+							// Regular object.
+							data.lru.decrease_refcount(
+								&mut obj.refcount,
+								Key::new(flags, key.id(), key.depth(), key.offset()),
+								CACHE_OBJECT_FIXED_COST,
+							);
+						} else {
+							// Pseudo-object.
+							let RefCount::Ref { count } = &mut obj.refcount else { panic!("dangling pseudo object") };
+							if let Some(c) = NonZeroUsize::new(count.get() - 1) {
+								*count = c;
+							} else {
+								// Forget the object, which should be all zeroes.
+								debug_assert!(
+									obj.data.root.length == 0,
+									"pseudo object leaks entries"
+								);
+								do_remove = true;
+							}
+						}
 					}
 
 					// Remove dirty marker
@@ -758,6 +782,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						obj.data
 							.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
 					debug_assert!(_r, "not marked");
+
+					if do_remove {
+						data.objects.remove(&key.id());
+					}
 
 					drop(data_ref);
 					// Make sure we only drop the "background" runner at the end to avoid
