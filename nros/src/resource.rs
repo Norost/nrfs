@@ -27,7 +27,7 @@ pub trait Resource {
 }
 
 /// Type representing a region of memory.
-pub trait Buf: Clone + Send {
+pub trait Buf: Send {
 	/// Get an immutable reference to the underlying data.
 	fn get(&self) -> &[u8];
 

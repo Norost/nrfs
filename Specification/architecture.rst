@@ -135,6 +135,51 @@ or trimmed.
 The current root is immediately moved to the new root.
 While this root record may include redundant data and be redundantly flushed
 this will automatically be resolved and should not be an issue in practice.
+To aid this process `Pseudo-objects`_ are used.
+
+
+Cache object & entry states
+---------------------------
+
+In the cache, each object & entry can be in any of four states:
+
+::
+
+       +-------------+         +-------------+
+       |             |         |             |
+  -->--+ Not present +---->----+  Fetching   |
+       |             |         |   (Busy)    |
+       +------+------+         +------+------+
+              |                       |
+              ^                       v
+              |                       |
+       +------+------+         +------+------+
+       |             +----<----+             |
+       |  Flushing   |         |   Present   |
+       |   (Busy)    +---->----+             |
+       +-------------+         +-------------+
+
+Every entry is in the "not present" state by default.
+
+Entries that are being flushed are inaccessible for reading or writing.
+This simplifies the flushing logic & should have little to no impact on
+performance as an entry is flushed when it is either:
+
+* Being evicted, in which case it likely will not be accessed soon anyways.
+* Being flushed without eviction, which may happen during transaction commit
+  during which no other operations may take place.
+
+The root of objects are also cached alongside the entries for each object and
+are subject to the same mechanism.
+
+To simplify things, Flushing and Fetching are combined into a single "Busy"
+state.
+
+
+Pseudo-objects
+--------------
+
+
 
 
 Resilvering

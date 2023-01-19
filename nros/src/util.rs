@@ -1,4 +1,6 @@
 use {
+	core::pin::Pin,
+	core::future::Future,
 	crate::{resource::Buf, Record},
 	core::mem,
 };
@@ -34,4 +36,9 @@ pub fn trim_zeros_end(vec: &mut impl Buf) {
 	if vec.capacity() / 2 <= vec.len() {
 		vec.shrink()
 	}
+}
+
+/// Box a future and erase its type.
+pub fn box_fut<'a, T: Future + 'a>(fut: T) -> Pin<Box<dyn Future<Output = T::Output> + 'a>> {
+	Box::pin(fut)
 }

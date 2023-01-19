@@ -2,7 +2,6 @@ mod compression;
 
 use {
 	crate::{resource::Buf, BlockSize, Resource},
-	alloc::vec::Vec,
 	core::fmt,
 	endian::{u16le, u32le, u64le},
 	xxhash_rust::xxh3::xxh3_64,

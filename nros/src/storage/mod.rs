@@ -3,7 +3,6 @@ pub mod dev;
 
 use {
 	crate::{resource::Buf, BlockSize, Compression, Error, MaxRecordSize, Record, Resource},
-	alloc::{sync::Arc, vec::Vec},
 	allocator::Allocator,
 	core::cell::{Cell, RefCell},
 	dev::Set256,
@@ -125,7 +124,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	}
 
 	/// Write a record.
-	pub async fn write(&self, data: R::Buf) -> Result<Record, Error<D>> {
+	pub async fn write(&self, data: R::Buf) -> Result<(Record, R::Buf), Error<D>> {
 		// Calculate minimum size of buffer necessary for the compression algorithm
 		// to work.
 		let len = self.compression().max_output_size(data.len());
@@ -140,21 +139,22 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		let compression = self.compression();
 		let block_size = self.block_size();
 		let data_len = data.len();
-		let (mut rec, mut buf) = self
+
+		if data_len == 0 {
+			// Return empty record.
+			return Ok((Record::default(), data));
+		}
+
+		let (mut rec, mut buf, data) = self
 			.resource()
 			.run(move || {
 				let rec = Record::pack(data.get(), buf.get_mut(), compression, block_size);
-				(rec, buf)
+				(rec, buf, data)
 			})
 			.await;
-		//let mut rec = Record::pack(data.get(), buf.get_mut(), compression, block_size);
 
 		// Strip unused blocks from the buffer
 		let blks = self.calc_block_count(rec.length.into());
-		if blks == 0 {
-			// Return empty record.
-			return Ok(Record::default());
-		}
 		buf.shrink(blks << self.block_size().to_raw());
 
 		// Allocate storage space.
@@ -176,7 +176,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			.update(|x| x + u64::try_from(data_len).unwrap());
 
 		// Presto!
-		Ok(rec)
+		Ok((rec, data))
 	}
 
 	/// Destroy a record.

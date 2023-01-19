@@ -2,7 +2,7 @@ use {
 	super::{block_on, Set256},
 	crate::{
 		storage::dev::{Allocator, Buf, Dev, DevSet, MemDev},
-		BlockSize, Compression, MaxRecordSize, Resource, StdResource,
+		BlockSize, Compression, MaxRecordSize, StdResource,
 	},
 };
 
