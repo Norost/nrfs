@@ -224,9 +224,15 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		// Write
 		let tree = Tree::new(self, bg, OBJECT_LIST_ID);
-		let len = tree.len().await?;
-		let len = len.max((id + N as u64) << RECORD_SIZE_P2);
-		tree.resize(len).await?;
+		let len = self
+			.data
+			.borrow_mut()
+			.used_objects_ids
+			.iter()
+			.last()
+			.map_or(0, |r| r.end);
+		let len = len.max(id + N as u64);
+		tree.resize(len << RECORD_SIZE_P2).await?;
 		tree.write(offset, b.flatten()).await?;
 
 		// Tadha!
@@ -870,20 +876,25 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	pub fn verify_cache_usage(&self) {
 		let data = self.data.borrow();
 		let real_usage = data.objects.values().fold(0, |x, s| {
-			x + CACHE_OBJECT_FIXED_COST
-				+ if let Slot::Present(slot) = s {
-					slot.data
-						.data
-						.iter()
-						.flat_map(|m| m.slots.values())
-						.flat_map(|s| match s {
-							Slot::Present(slot) => Some(&slot.data),
-							_ => None,
-						})
-						.fold(0, |x, v| x + v.len() + CACHE_ENTRY_FIXED_COST)
-				} else {
-					0
+			x + if let Slot::Present(slot) = s {
+				let mut y = 0;
+				if matches!(slot.refcount, RefCount::NoRef { .. }) {
+					y += CACHE_OBJECT_FIXED_COST;
 				}
+				y += slot
+					.data
+					.data
+					.iter()
+					.flat_map(|m| m.slots.values())
+					.flat_map(|s| match s {
+						Slot::Present(slot) => Some(&slot.data),
+						_ => None,
+					})
+					.fold(0, |x, v| x + v.len() + CACHE_ENTRY_FIXED_COST);
+				y
+			} else {
+				0
+			}
 		});
 		assert_eq!(real_usage, data.lru.cache_size, "cache size mismatch");
 	}
