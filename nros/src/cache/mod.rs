@@ -686,8 +686,17 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			} else {
 				// Just remove the entry.
 				let level = &mut obj.data.data[usize::from(key.depth())];
-				let _r = level.slots.remove(&key.offset());
-				debug_assert!(_r.is_some(), "no entry");
+				let Some(Slot::Present(Present { data: entry, refcount: RefCount::NoRef { lru_index } })) = level.slots.remove(&key.offset())
+					else { unreachable!("no entry") };
+				data.lru
+					.remove(lru_index, entry.len() + CACHE_ENTRY_FIXED_COST);
+				// Dereference the corresponding object.
+				let flags = Key::FLAG_OBJECT | key.flags();
+				data.lru.decrease_refcount(
+					&mut obj.refcount,
+					Key::new(flags, key.id(), key.depth(), key.offset()),
+					CACHE_OBJECT_FIXED_COST,
+				);
 				None
 			};
 
