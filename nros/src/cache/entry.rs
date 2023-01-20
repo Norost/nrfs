@@ -1,8 +1,10 @@
 use {
-	super::{lru, slot, Cache, Key, Lru, Slot},
+	super::{lru, slot, Cache, Key, Lru, Slot, CACHE_ENTRY_FIXED_COST},
+	core::task::Poll,
 	crate::{resource::Buf, util::trim_zeros_end, Background, Dev, Error, Resource},
-	core::{cell::RefMut, fmt, ops::Deref},
+	core::{future, cell::RefMut, fmt, ops::Deref},
 	std::collections::hash_map,
+	core::num::NonZeroUsize,
 };
 
 /// Reference to an entry.
@@ -87,5 +89,45 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		.ok()?;
 
 		Some(EntryRef::new(self, key, entry, lru))
+	}
+
+	/// Try to get an entry directly.
+	///
+	/// This will block if a task is busy with the entry.
+	pub(super) async fn wait_entry(&self, key: Key) -> Option<EntryRef<'_, D, R>> {
+		let mut is_referenced = false;
+		future::poll_fn(|cx| {
+			let data = self.data.borrow_mut();
+			let (trees, mut lru) = RefMut::map_split(data, |d| (&mut d.objects, &mut d.lru));
+			let entry = RefMut::filter_map(trees, |t| {
+				let slot = t.get_mut(&key.id())?;
+				let Slot::Present(tree) = slot else { return None };
+				let level = &mut tree.data.data[usize::from(key.depth())];
+				let entry = level.slots.get_mut(&key.offset())?;
+				match entry {
+					Slot::Present(present) => {
+						if is_referenced {
+							let len = CACHE_ENTRY_FIXED_COST + present.data.len();
+							lru.decrease_refcount(&mut present.refcount, key, len);
+						}
+						Some(present)
+					}
+					Slot::Busy(busy) => {
+						let mut busy = busy.borrow_mut();
+						busy.wakers.push(cx.waker().clone());
+						if !is_referenced {
+							busy.refcount = NonZeroUsize::new(busy.refcount.map_or(0, |x| x.get()) + 1);
+							is_referenced = true;
+						}
+						None
+					}
+				}
+			});
+			match entry {
+				Ok(entry) => Poll::Ready(Some(EntryRef::new(self, key, entry, lru))),
+				Err(_) if is_referenced => Poll::Pending,
+				Err(_) => Poll::Ready(None),
+			}
+		}).await
 	}
 }

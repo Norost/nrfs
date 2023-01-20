@@ -62,9 +62,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// Go up and check if a parent entry is either present or being fetched.
 		let entry = 's: {
 			while cur_depth < obj_depth {
-				// Check if the entry is already present.
+				// Check if the entry is already present or being fetched.
 				let key = Key::new(0, id, cur_depth, offset >> depth_offset_shift(cur_depth));
-				if let Some(entry) = self.get_entry(key) {
+				if let Some(entry) = self.wait_entry(key).await {
 					break 's Some(entry);
 				}
 				// Try the next level

@@ -851,7 +851,7 @@ fn shrink_use_after_free() {
 		2045,
 		[
 			Create { size: 27075473812832 },
-			Write { idx: 0, offset: 18414831848224980736, amount: 65535 },
+			Write { idx: 0, offset: 16919377365408, amount: 65535 },
 			Resize { idx: 0, size: 0 },
 		],
 	)

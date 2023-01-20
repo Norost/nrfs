@@ -371,13 +371,6 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		);
 		// The object is guaranteed to exist.
 		// At least, if called by a task that holds an entry, which should be guaranteed.
-		dbg!(&self
-			.cache
-			.data
-			.borrow_mut()
-			.objects
-			.keys()
-			.collect::<Vec<_>>());
 		let cur_root = self.cache.get_object(self.id).expect("no object").root;
 		let len = u64::from(cur_root.total_length);
 		let cur_depth = depth(self.max_record_size(), len);
@@ -436,14 +429,15 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				self.cache.store.destroy(&old_record);
 
 				// Calc offset in parent
-				let index = index * mem::size_of::<Record>();
-				let min_len = data.len().max(index + mem::size_of::<Record>());
+				let offt = index * mem::size_of::<Record>();
+				let min_len = data.len().max(offt + mem::size_of::<Record>());
 
 				// Store new record
 				data.resize(min_len, 0);
-				data.get_mut()[index..index + mem::size_of::<Record>()]
+				data.get_mut()[offt..offt + mem::size_of::<Record>()]
 					.copy_from_slice(record.as_ref());
 			});
+			let entry = self.cache.tree_fetch_entry(self.background, k).await?;
 			Ok(id)
 		}
 	}
@@ -539,7 +533,6 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			}
 			// Fix markers for cur_obj
 			if new_depth > 0 {
-				dbg!(&cur_obj.data.data, &pseudo_obj.data);
 				let marker = cur_obj.data.data[usize::from(new_depth)]
 					.dirty_markers
 					.get_mut(&0);

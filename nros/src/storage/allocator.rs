@@ -101,7 +101,6 @@ impl Allocator {
 			stack.push(record);
 
 			// Get record data
-			dbg!(&record);
 			let data = store.read(&record).await?;
 			let lba = u64::from(record.lba);
 			let size = u64::try_from(data.len()).unwrap();
@@ -182,7 +181,6 @@ impl Allocator {
 				self.statistics.allocated_blocks += blocks;
 				#[cfg(feature = "debug-trace-alloc")]
 				{
-					dbg!(r.start);
 					for i in r.clone() {
 						self.debug_dealloc_traces.remove(&i);
 					}
