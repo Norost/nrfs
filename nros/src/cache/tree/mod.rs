@@ -517,24 +517,39 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 			// Transfer all entries with offset *inside* the range of the "new" object to pseudo
 			// object
-			let mut offt = 1u128 << (self.max_record_size().to_raw() * new_depth);
+			let mut offt = 1u128 << (self.cache.entries_per_parent_p2() * new_depth);
 			for d in 0..new_depth {
-				// Move entries
 				let cur_level = &mut cur_obj.data.data[usize::from(d)];
 				let pseudo_level = &mut pseudo_obj.data[usize::from(d)];
-				for (offset, slot) in cur_level.slots.drain_filter(|k, _| u128::from(*k) >= offt) {
+
+				// Move entries
+				for (offset, slot) in cur_level.slots.drain_filter(|k, _| u128::from(*k) < offt) {
 					pseudo_level.slots.insert(offset, slot);
-					if let Some(marker) = cur_level.dirty_markers.remove(&offset) {
-						pseudo_level.dirty_markers.insert(offset, marker);
-					}
 				}
-				offt >>= self.max_record_size().to_raw();
-			}
-			// Fix marker count for cur_obj
-			if new_depth > 0 {
-				cur_obj.data.data[usize::from(new_depth)]
+
+				// Move markers
+				for (offset, marker) in cur_level
 					.dirty_markers
-					.remove(&0);
+					.drain_filter(|k, _| u128::from(*k) < offt)
+				{
+					pseudo_level.dirty_markers.insert(offset, marker);
+				}
+
+				offt >>= self.cache.entries_per_parent_p2();
+			}
+			// Fix markers for cur_obj
+			if new_depth > 0 {
+				dbg!(&cur_obj.data.data, &pseudo_obj.data);
+				let marker = cur_obj.data.data[usize::from(new_depth)]
+					.dirty_markers
+					.get_mut(&0);
+				if let Some(marker) = marker {
+					marker.is_dirty = true;
+					marker.children.clear();
+					cur_obj
+						.data
+						.unmark_dirty(new_depth, 0, self.max_record_size());
+				}
 			}
 
 			// Swap & insert pseudo-object.

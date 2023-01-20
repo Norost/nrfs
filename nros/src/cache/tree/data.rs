@@ -150,7 +150,7 @@ impl<R: Resource> TreeData<R> {
 				else { unreachable!("no marker") };
 
 			let _present = marker.get_mut().children.remove(&offt);
-			debug_assert!(_present);
+			debug_assert!(_present, "no child");
 
 			if !marker.get().is_dirty && marker.get().children.is_empty() {
 				marker.remove();
