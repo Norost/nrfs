@@ -1,7 +1,14 @@
 use {
-	super::{slot, Cache, Key, Lru, Slot},
+	super::{slot, Busy, Cache, Key, Lru, Slot},
 	crate::{resource::Buf, util::trim_zeros_end, Background, Dev, Resource},
-	core::{cell::RefMut, future, num::NonZeroUsize, ops::Deref, task::Poll},
+	alloc::rc::Rc,
+	core::{
+		cell::{RefCell, RefMut},
+		future,
+		num::NonZeroUsize,
+		ops::Deref,
+		task::Poll,
+	},
 };
 
 /// Reference to an entry.
@@ -83,10 +90,14 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Try to get an entry directly.
 	///
 	/// This will block if a task is busy with the entry.
-	pub(super) async fn wait_entry(&self, key: Key) -> Option<EntryRef<'_, D, R>> {
+	pub(super) async fn wait_entry(&self, mut key: Key) -> Option<EntryRef<'_, D, R>> {
 		trace!("wait_entry {:?}", key);
-		let mut is_referenced = false;
+		let mut busy = None::<Rc<RefCell<Busy>>>;
 		future::poll_fn(|cx| {
+			if let Some(busy) = busy.as_mut() {
+				key = busy.borrow_mut().key;
+			}
+
 			let data = self.data.borrow_mut();
 			let (trees, mut lru) = RefMut::map_split(data, |d| (&mut d.objects, &mut d.lru));
 			let entry = RefMut::filter_map(trees, |t| {
@@ -96,18 +107,17 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				let entry = level.slots.get_mut(&key.offset())?;
 				match entry {
 					Slot::Present(entry) => {
-						if is_referenced {
+						if busy.is_some() {
 							lru.entry_decrease_refcount(key, &mut entry.refcount, entry.data.len());
 						}
 						Some(entry)
 					}
-					Slot::Busy(busy) => {
-						let mut busy = busy.borrow_mut();
-						busy.wakers.push(cx.waker().clone());
-						if !is_referenced {
-							busy.refcount =
-								NonZeroUsize::new(busy.refcount.map_or(0, |x| x.get()) + 1);
-							is_referenced = true;
+					Slot::Busy(entry) => {
+						let mut e = entry.borrow_mut();
+						e.wakers.push(cx.waker().clone());
+						if busy.is_none() {
+							e.refcount = NonZeroUsize::new(e.refcount.map_or(0, |x| x.get()) + 1);
+							busy = Some(entry.clone());
 						}
 						None
 					}
@@ -115,7 +125,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			});
 			match entry {
 				Ok(entry) => Poll::Ready(Some(EntryRef::new(self, key, entry, lru))),
-				Err(_) if is_referenced => Poll::Pending,
+				Err(_) if busy.is_some() => Poll::Pending,
+				Err(_) if busy.is_some() => Poll::Pending,
 				Err(_) => Poll::Ready(None),
 			}
 		})

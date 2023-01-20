@@ -1,16 +1,13 @@
 #![forbid(unused_must_use)]
+#![forbid(rust_2018_idioms)]
 #![feature(pin_macro)]
 
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use {
 	clap::Parser,
-	core::{
-		future::Future,
-		pin::{pin, Pin},
-		ptr,
-		task::{Context, RawWaker, RawWakerVTable, Waker},
-	},
+	core::{future::Future, pin::Pin},
+	futures_util::FutureExt,
 	nrfs::{dev::FileDev, dir::ItemRef, BlockSize, Nrfs},
 	std::{
 		fs::{self, File, OpenOptions},
@@ -57,8 +54,6 @@ struct Make {
 	compression: Compression,
 	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the global cache size")]
 	global_cache_size: usize,
-	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the dirty cache size")]
-	dirty_cache_size: usize,
 }
 
 #[derive(Clone, Debug, clap::ArgEnum)]
@@ -74,13 +69,7 @@ struct Dump {
 	path: String,
 	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the global cache size")]
 	global_cache_size: usize,
-	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the dirty cache size")]
-	dirty_cache_size: usize,
 }
-
-// https://github.com/rust-lang/rust/pull/96875/files
-const VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RAW, |_| {}, |_| {}, |_| {});
-const RAW: RawWaker = RawWaker::new(ptr::null(), &VTABLE);
 
 fn main() {
 	let fut = async {
@@ -89,9 +78,6 @@ fn main() {
 			Command::Dump(args) => dump(args).await,
 		}
 	};
-	let mut fut = pin!(fut);
-	let waker = unsafe { Waker::from_raw(RAW) };
-	let mut cx = Context::from_waker(&waker);
 	futures_executor::block_on(fut);
 }
 
@@ -133,22 +119,33 @@ async fn make(args: Make) {
 		&opt,
 		compr,
 		args.global_cache_size,
-		args.dirty_cache_size,
 	)
 	.await
 	.unwrap();
 
-	if let Some(d) = &args.directory {
-		let root = nrfs.root_dir().await.unwrap();
-		add_files(root, d, &args, extensions).await;
+	let bg = nrfs::Background::default();
+
+	{
+		let fut = async {
+			if let Some(d) = &args.directory {
+				let root = nrfs.root_dir(&bg).await.unwrap();
+				add_files(root, d, &args, extensions).await;
+			}
+			nrfs.finish_transaction(&bg).await.unwrap();
+		};
+		let mut fut = core::pin::pin!(fut.fuse());
+		let mut bg_fut = core::pin::pin!(bg.process_background().fuse());
+		futures_util::select_biased! {
+			r = fut => r,
+			r = bg_fut => r.unwrap(),
+		};
 	}
 
-	nrfs.finish_transaction().await.unwrap();
-	dbg!(nrfs.statistics());
+	bg.drop().await.unwrap();
 	nrfs.unmount().await.unwrap();
 
 	async fn add_files(
-		root: nrfs::DirRef<'_, FileDev>,
+		root: nrfs::DirRef<'_, '_, FileDev>,
 		from: &Path,
 		args: &Make,
 		extensions: nrfs::dir::EnableExtensions,
@@ -219,20 +216,29 @@ async fn dump(args: Dump) {
 	f.read_exact(&mut block_size_p2).unwrap();
 
 	let s = FileDev::new(f, BlockSize::from_raw(block_size_p2[0]).unwrap());
-	let nrfs = Nrfs::load(
-		[s].into(),
-		args.global_cache_size,
-		args.dirty_cache_size,
-		true,
-	)
-	.await
-	.unwrap();
+	let nrfs = Nrfs::load([s].into(), args.global_cache_size, true)
+		.await
+		.unwrap();
 
-	let root = nrfs.root_dir().await.unwrap();
-	println!("block size: 2**{}", block_size_p2[0]);
-	list_files(root, 0).await;
+	let bg = nrfs::Background::default();
 
-	async fn list_files(root: nrfs::DirRef<'_, FileDev>, indent: usize) {
+	{
+		let fut = async {
+			let root = nrfs.root_dir(&bg).await.unwrap();
+			println!("block size: 2**{}", block_size_p2[0]);
+			list_files(root, 0).await;
+		};
+		let mut fut = core::pin::pin!(fut.fuse());
+		let mut bg_fut = core::pin::pin!(bg.process_background().fuse());
+		futures_util::select_biased! {
+			r = fut => r,
+			r = bg_fut => r.unwrap(),
+		};
+	}
+
+	bg.drop().await.unwrap();
+
+	async fn list_files(root: nrfs::DirRef<'_, '_, FileDev>, indent: usize) {
 		let mut i = 0;
 		while let Some((e, next_i)) = root.next_from(i).await.unwrap() {
 			let data = e.data().await.unwrap();

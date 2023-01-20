@@ -2,17 +2,20 @@ use {super::*, crate::dir::RemoveError};
 
 #[test]
 fn get_root() {
-	run(async {
-		let fs = new().await;
-		fs.root_dir().await.unwrap().drop().await.unwrap();
-	})
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		fs.root_dir(&bg).await.unwrap().drop().await.unwrap();
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn create_file() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_file(b"file".into(), &Default::default())
 			.await
 			.unwrap()
@@ -21,14 +24,16 @@ fn create_file() {
 			.await
 			.unwrap();
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn create_dir() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_dir(
 			b"dir".into(),
 			&DirOptions::new(&[0; 16]),
@@ -41,14 +46,16 @@ fn create_dir() {
 		.await
 		.unwrap();
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn create_sym() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_sym(b"sym".into(), &Default::default())
 			.await
 			.unwrap()
@@ -57,14 +64,16 @@ fn create_sym() {
 			.await
 			.unwrap();
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn create_file_long_name() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_file(
 			b"This is a string with len equal to 37"[..]
 				.try_into()
@@ -78,14 +87,16 @@ fn create_file_long_name() {
 		.await
 		.unwrap();
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn get_file() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_file(b"file".into(), &Default::default())
 			.await
 			.unwrap()
@@ -99,14 +110,16 @@ fn get_file() {
 		file.drop().await.unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn get_dir() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_dir(
 			b"dir".into(),
 			&DirOptions::new(&[0; 16]),
@@ -124,14 +137,16 @@ fn get_dir() {
 		dir.drop().await.unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn get_sym() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_sym(b"sym".into(), &Default::default())
 			.await
 			.unwrap()
@@ -145,14 +160,16 @@ fn get_sym() {
 		sym.drop().await.unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn get_file_long_name() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_file(
 			b"This is a string with len >= 27".into(),
 			&Default::default(),
@@ -173,14 +190,16 @@ fn get_file_long_name() {
 		file.drop().await.unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn remove_file() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_file(b"file".into(), &Default::default())
 			.await
 			.unwrap()
@@ -192,14 +211,16 @@ fn remove_file() {
 		root.remove(b"file".into()).await.unwrap().unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn remove_large_file() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		let file = root
 			.create_file(b"file".into(), &Default::default())
 			.await
@@ -213,15 +234,17 @@ fn remove_large_file() {
 		root.remove(b"file".into()).await.unwrap().unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 /// Try removing an empty directory, which should succeed.
 #[test]
 fn remove_empty_dir() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_dir(
 			b"dir".into(),
 			&DirOptions::new(&[0; 16]),
@@ -237,15 +260,17 @@ fn remove_empty_dir() {
 		root.remove(b"dir".into()).await.unwrap().unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 /// Try removing an non-empty directory, which should fail.
 #[test]
 fn remove_nonempty_dir() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		let dir = root
 			.create_dir(
 				b"dir".into(),
@@ -270,14 +295,16 @@ fn remove_nonempty_dir() {
 		));
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn remove_sym() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_sym(b"sym".into(), &Default::default())
 			.await
 			.unwrap()
@@ -289,14 +316,16 @@ fn remove_sym() {
 		root.remove(b"sym".into()).await.unwrap().unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn remove_file_long_name() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_file(
 			b"This is a string with len >= 14".into(),
 			&Default::default(),
@@ -314,14 +343,16 @@ fn remove_file_long_name() {
 			.unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn rename() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 
 		let file = root
 			.create_file(b"file".into(), &Default::default())
@@ -339,14 +370,16 @@ fn rename() {
 		file.drop().await.unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn transfer() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 
 		let dir = root
 			.create_dir(
@@ -375,15 +408,17 @@ fn transfer() {
 		dir.drop().await.unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 /// Get a directory while another [`DirRef`] pointing to the same directory is alive.
 #[test]
 fn get_dir_existing_ref() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		let dir = root
 			.create_dir(
 				b"dir".into(),
@@ -400,15 +435,17 @@ fn get_dir_existing_ref() {
 		dir.drop().await.unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 /// `NotEmpty` & other errors must be returned before `LiveReference` to avoid confusion.
 #[test]
 fn error_priority() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 
 		let dir = root
 			.create_dir(
@@ -432,7 +469,8 @@ fn error_priority() {
 		dir.drop().await.unwrap();
 
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 /// The key is stored in two places: the hashmap entry and the item.
@@ -440,9 +478,10 @@ fn error_priority() {
 /// Ensure that rename updates both.
 #[test]
 fn rename_item_key() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 		root.create_file(b"file".into(), &Default::default())
 			.await
 			.unwrap()
@@ -467,4 +506,5 @@ fn rename_item_key() {
 
 		root.drop().await.unwrap();
 	});
+	block_on(bg.drop()).unwrap();
 }

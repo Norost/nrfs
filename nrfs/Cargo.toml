@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 trace-all = ["trace", "nros/trace"]
 trace = []
+parallel = ["nros/parallel"]
 
 [dependencies.arena]
 git = "https://git.sr.ht/~demindiro/arena"

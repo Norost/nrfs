@@ -63,9 +63,11 @@ const EMBED_FACTOR: u64 = 4;
 
 /// Helper structure for working with files.
 #[derive(Debug)]
-pub(crate) struct File<'a, D: Dev> {
+pub(crate) struct File<'a, 'b, D: Dev> {
 	/// The filesystem containing the file's data.
 	fs: &'a Nrfs<D>,
+	/// Background task runner.
+	bg: &'b nros::Background<'a, D>,
 	/// The index of this file.
 	idx: Idx,
 	/// What type of file this is.
@@ -81,10 +83,10 @@ enum Ty {
 	Sym,
 }
 
-impl<'a, D: Dev> File<'a, D> {
+impl<'a, 'b, D: Dev> File<'a, 'b, D> {
 	/// Create a [`File`] helper structure.
-	fn new(fs: &'a Nrfs<D>, idx: Idx, ty: Ty) -> Self {
-		Self { fs, idx, ty }
+	fn new(fs: &'a Nrfs<D>, bg: &'b nros::Background<'a, D>, idx: Idx, ty: Ty) -> Self {
+		Self { fs, bg, idx, ty }
 	}
 
 	/// Read data.
@@ -96,12 +98,19 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.header.parent_id);
+		let dir = Dir::new(self.bg, self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
 				drop(data_f);
-				self.fs.read(id, offset, buf).await
+				let len = self
+					.fs
+					.storage
+					.get(self.bg, id)
+					.await?
+					.read(offset, buf)
+					.await?;
+				Ok(len)
 			}
 			&Inner::Embed { offset: offt, length } => {
 				drop(data_f);
@@ -129,12 +138,13 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(());
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.header.parent_id);
+		let dir = Dir::new(self.bg, self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
 				drop(data_f);
-				self.fs.read_exact(id, offset, buf).await
+				let obj = self.fs.storage.get(self.bg, id).await?;
+				crate::read_exact(&obj, offset, buf).await
 			}
 			&Inner::Embed { offset: offt, length } => {
 				drop(data_f);
@@ -162,12 +172,19 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.header.parent_id);
+		let dir = Dir::new(self.bg, self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
 				drop(data_f);
-				self.fs.write(id, offset, data).await
+				let len = self
+					.fs
+					.storage
+					.get(&self.bg, id)
+					.await?
+					.write(offset, data)
+					.await?;
+				Ok(len)
 			}
 			&Inner::Embed { offset: offt, length } => {
 				drop(data_f);
@@ -190,12 +207,13 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(());
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.header.parent_id);
+		let dir = Dir::new(self.bg, self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
 				drop(data_f);
-				self.fs.write_all(id, offset, data).await
+				let obj = self.fs.storage.get(&self.bg, id).await?;
+				crate::write_all(&obj, offset, data).await
 			}
 			&Inner::Embed { offset: offt, length } => {
 				drop(data_f);
@@ -217,12 +235,13 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(());
 		}
 		let data_f = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data_f.header.parent_id);
+		let dir = Dir::new(self.bg, self.fs, data_f.header.parent_id);
 
 		match &data_f.inner {
 			&Inner::Object { id } => {
 				drop(data_f);
-				self.fs.write_grow(id, offset, data).await
+				let obj = self.fs.storage.get(&self.bg, id).await?;
+				crate::write_grow(&obj, offset, data).await
 			}
 			&Inner::Embed { offset: offt, length } => {
 				drop(data_f);
@@ -248,7 +267,7 @@ impl<'a, D: Dev> File<'a, D> {
 					Inner::Embed { offset: o, length: end.try_into().unwrap() }
 				} else {
 					// Create object, copy existing & new data to it.
-					let obj = self.fs.storage.create().await?;
+					let obj = self.fs.storage.create(self.bg).await?;
 					obj.resize(end).await?;
 					// TODO ditto
 					obj.write(0, &buf).await?;
@@ -271,7 +290,7 @@ impl<'a, D: Dev> File<'a, D> {
 	async fn resize(&self, new_len: u64) -> Result<(), Error<D>> {
 		trace!("resize {}", new_len);
 		let mut data = self.fs.file_data(self.idx);
-		let dir = Dir::new(self.fs, data.header.parent_id);
+		let dir = Dir::new(self.bg, self.fs, data.header.parent_id);
 
 		match &data.inner {
 			&Inner::Object { id } if new_len == 0 => {
@@ -282,7 +301,7 @@ impl<'a, D: Dev> File<'a, D> {
 				dir.set_ty(index, ty).await?;
 				self.fs
 					.storage
-					.get(id)
+					.get(self.bg, id)
 					.await?
 					.decrease_reference_count()
 					.await?;
@@ -291,7 +310,13 @@ impl<'a, D: Dev> File<'a, D> {
 			&Inner::Object { id } => {
 				// TODO consider re-embedding.
 				drop(data);
-				self.fs.resize(id, new_len).await
+				self.fs
+					.storage
+					.get(self.bg, id)
+					.await?
+					.resize(new_len)
+					.await?;
+				Ok(())
 			}
 			&Inner::Embed { length, .. } if u64::from(length) == new_len => {
 				// Don't bother doing anything
@@ -313,7 +338,7 @@ impl<'a, D: Dev> File<'a, D> {
 					Inner::Embed { offset: o, length: new_len.try_into().unwrap() }
 				} else {
 					// Move to an object.
-					let obj = self.fs.storage.create().await?;
+					let obj = self.fs.storage.create(self.bg).await?;
 					obj.resize(new_len).await?;
 					obj.write(0, &buf).await?;
 					Inner::Object { id: obj.id() }
@@ -336,7 +361,7 @@ impl<'a, D: Dev> File<'a, D> {
 		match &data.inner {
 			&Inner::Object { id } => {
 				drop(data);
-				Ok(self.fs.storage.get(id).await?.len().await?)
+				Ok(self.fs.storage.get(self.bg, id).await?.len().await?)
 			}
 			&Inner::Embed { length, .. } => Ok(length.into()),
 		}
@@ -400,27 +425,27 @@ macro_rules! impl_common {
 		}
 
 		/// Construct a helper [`File`]
-		pub(crate) fn file(&self) -> File<'a, D> {
+		pub(crate) fn file(&self) -> File<'a, 'b, D> {
 			let $s = self;
 			let s = &$self;
-			File::new(s.fs, s.idx, $ty)
+			File::new(s.fs, s.bg, s.idx, $ty)
 		}
 	};
 }
 
-impl<'a, D: Dev> FileRef<'a, D> {
+impl<'a, 'b, D: Dev> FileRef<'a, 'b, D> {
 	/// Create a new [`FileRef`] to an object.
-	pub(crate) fn from_obj(dir: &Dir<'a, D>, id: u64, index: u32) -> Self {
+	pub(crate) fn from_obj(dir: &Dir<'a, 'b, D>, id: u64, index: u32) -> Self {
 		Self::new_ref(dir, Inner::Object { id }, index)
 	}
 
 	/// Create a new [`FileRef`] to embedded data.
-	pub(crate) fn from_embed(dir: &Dir<'a, D>, offset: u64, length: u16, index: u32) -> Self {
+	pub(crate) fn from_embed(dir: &Dir<'a, 'b, D>, offset: u64, length: u16, index: u32) -> Self {
 		Self::new_ref(dir, Inner::Embed { offset, length }, index)
 	}
 
 	/// Create a new [`FileRef`].
-	fn new_ref(dir: &Dir<'a, D>, inner: Inner, index: u32) -> Self {
+	fn new_ref(dir: &Dir<'a, 'b, D>, inner: Inner, index: u32) -> Self {
 		// Split RefMut so we don't need to drop and reborrow the annoying way.
 		let (mut dirs, mut files) = RefMut::map_split(dir.fs.data.borrow_mut(), |data| {
 			(&mut data.directories, &mut data.files)
@@ -451,7 +476,7 @@ impl<'a, D: Dev> FileRef<'a, D> {
 			}
 		};
 
-		Self { fs: dir.fs, idx }
+		Self { fs: dir.fs, bg: dir.bg, idx }
 	}
 
 	/// Destroy the reference to this file.
@@ -460,7 +485,7 @@ impl<'a, D: Dev> FileRef<'a, D> {
 	/// and this was the last reference.
 	pub async fn drop(self) -> Result<(), Error<D>> {
 		// Don't run the Drop impl
-		let Self { fs, idx } = self;
+		let Self { fs, bg, idx } = self;
 		mem::forget(self);
 
 		let mut fs_ref = fs.data.borrow_mut();
@@ -484,7 +509,7 @@ impl<'a, D: Dev> FileRef<'a, D> {
 			drop(fs_ref);
 
 			// Reconstruct DirRef to parent.
-			let dir = DirRef { fs, id: data.header.parent_id };
+			let dir = DirRef { fs, bg, id: data.header.parent_id };
 
 			// If dangling, destroy associated file data.
 			let r = async {
@@ -494,7 +519,11 @@ impl<'a, D: Dev> FileRef<'a, D> {
 							dir.dir().dealloc_heap(offset, length.into()).await?
 						}
 						Inner::Object { id } => {
-							fs.storage.get(id).await?.decrease_reference_count().await?
+							fs.storage
+								.get(bg, id)
+								.await?
+								.decrease_reference_count()
+								.await?
 						}
 					}
 					dir.dir().clear_item(data.header.parent_index).await?;
@@ -515,14 +544,14 @@ impl<'a, D: Dev> FileRef<'a, D> {
 	impl_common!(s -> s, Ty::File);
 }
 
-impl<'a, D: Dev> SymRef<'a, D> {
+impl<'a, 'b, D: Dev> SymRef<'a, 'b, D> {
 	/// Create a new [`SymRef`] to an object.
-	pub(crate) fn from_obj(dir: &Dir<'a, D>, id: u64, index: u32) -> Self {
+	pub(crate) fn from_obj(dir: &Dir<'a, 'b, D>, id: u64, index: u32) -> Self {
 		Self(FileRef::from_obj(dir, id, index))
 	}
 
 	/// Create a new [`SymRef`] to embedded data.
-	pub(crate) fn from_embed(dir: &Dir<'a, D>, offset: u64, length: u16, index: u32) -> Self {
+	pub(crate) fn from_embed(dir: &Dir<'a, 'b, D>, offset: u64, length: u16, index: u32) -> Self {
 		Self(FileRef::from_embed(dir, offset, length, index))
 	}
 
@@ -537,9 +566,9 @@ impl<'a, D: Dev> SymRef<'a, D> {
 	impl_common!(s -> s.0, Ty::Sym);
 }
 
-impl<'a, D: Dev> UnknownRef<'a, D> {
+impl<'a, 'b, D: Dev> UnknownRef<'a, 'b, D> {
 	/// Create a new [`UnknownRef`].
-	pub(crate) fn new(dir: &Dir<'a, D>, index: u32) -> Self {
+	pub(crate) fn new(dir: &Dir<'a, 'b, D>, index: u32) -> Self {
 		Self(FileRef::from_embed(dir, 0, 0, index))
 	}
 

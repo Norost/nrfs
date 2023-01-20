@@ -195,7 +195,6 @@ impl<D: super::Dev, R: super::Resource> super::Cache<D, R> {
 	#[cfg(test)]
 	#[track_caller]
 	pub(crate) fn verify_cache_usage(&self) {
-		dbg!("[DEBUG] verify_cache_usage");
 		use super::{Buf, Present, Slot};
 		let data = self.data.borrow();
 		let real_usage = data.objects.values().fold(0, |x, s| {

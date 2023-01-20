@@ -3,9 +3,10 @@ use super::*;
 /// Transfer a file with embedded data and ensure the *heap* data is also moved.
 #[test]
 fn transfer_embed() {
-	run(async {
-		let fs = new().await;
-		let root = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let root = fs.root_dir(&bg).await.unwrap();
 
 		let dir = root
 			.create_dir(
@@ -38,5 +39,6 @@ fn transfer_embed() {
 		file.drop().await.unwrap();
 		dir.drop().await.unwrap();
 		root.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }

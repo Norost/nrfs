@@ -775,6 +775,11 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		let (obj, _) = self.cache.fetch_object(self.background, self.id).await?;
 		Ok((obj.data.root, u64::from(obj.data.root.total_length)))
 	}
+
+	/// Get a reference to the background task runner.
+	pub fn background_runner(&self) -> &'b Background<'a, D> {
+		self.background
+	}
 }
 
 /// Determine record range given an offset, record size and length.

@@ -4,9 +4,9 @@ use {
 		fmt,
 		future::{self, Future},
 		pin::Pin,
-		task::Waker,
+		task::{Poll, Waker},
 	},
-	futures_util::{stream::FuturesUnordered, TryStreamExt},
+	futures_util::{stream::FuturesUnordered, Stream, TryStreamExt},
 };
 
 /// Background task runner.
@@ -41,9 +41,22 @@ impl<Fut: Future<Output = Result<(), E>>, E> Background<Fut> {
 	/// Returns as soon as an error is caught.
 	pub(crate) async fn try_run_all(&self) -> Result<(), E> {
 		trace!("Background::try_run_all");
-		Pin::new(&mut self.inner.borrow_mut().tasks)
-			.try_for_each(|_| future::ready(Ok(())))
-			.await
+		future::poll_fn(|cx| {
+			let mut bg = self.inner.borrow_mut();
+			match Pin::new(&mut bg.tasks).poll_next(cx) {
+				Poll::Ready(None) => Poll::Ready(Ok(())),
+				Poll::Ready(Some(Err(e))) => Poll::Ready(Err(e)),
+				Poll::Ready(Some(Ok(()))) => {
+					cx.waker().wake_by_ref();
+					Poll::Pending
+				}
+				Poll::Pending => {
+					let _ = bg.waker.insert(cx.waker().clone());
+					Poll::Pending
+				}
+			}
+		})
+		.await
 	}
 
 	pub async fn drop(self) -> Result<(), E> {
@@ -64,17 +77,21 @@ impl<Fut: Future<Output = Result<(), E>>, E> Background<Fut> {
 	/// Poll & complete background tasks.
 	///
 	/// This future never finishes unless an error occurs.
-	#[cfg(test)]
-	pub(crate) async fn process_background(&self) -> Result<!, E> {
-		use {core::task::Poll, futures_util::Stream};
+	pub async fn process_background(&self) -> Result<!, E> {
 		trace!("Background::process_background");
 		future::poll_fn(|cx| {
 			let mut bg = self.inner.borrow_mut();
-			let _ = bg.waker.insert(cx.waker().clone());
-			if let Poll::Ready(Some(Err(e))) = Pin::new(&mut bg.tasks).poll_next(cx) {
-				return Poll::Ready(Err(e));
+			match Pin::new(&mut bg.tasks).poll_next(cx) {
+				Poll::Ready(Some(Err(e))) => Poll::Ready(Err(e)),
+				Poll::Ready(Some(Ok(()))) => {
+					cx.waker().wake_by_ref();
+					Poll::Pending
+				}
+				Poll::Ready(None) | Poll::Pending => {
+					let _ = bg.waker.insert(cx.waker().clone());
+					Poll::Pending
+				}
 			}
-			Poll::Pending
 		})
 		.await
 	}

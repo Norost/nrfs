@@ -648,7 +648,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					//
 					// Specifically, we must ensure the Flushing state is removed before
 					// we attempt to run the background tasks to completion.
-					bg.drop().await
+					bg.drop().await?;
+					Ok(())
 				}
 			});
 			entry.map(box_fut)
@@ -859,7 +860,6 @@ pub struct Statistics {
 	pub global_usage: usize,
 }
 
-#[cfg(debug_assertions)]
 fn is_pseudo_id(id: u64) -> bool {
 	id != OBJECT_LIST_ID && id & ID_PSEUDO != 0
 }
