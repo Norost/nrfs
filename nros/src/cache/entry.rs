@@ -1,5 +1,5 @@
 use {
-	super::{slot, Cache, Key, Lru, Slot, CACHE_ENTRY_FIXED_COST},
+	super::{slot, Cache, Key, Lru, Slot},
 	crate::{resource::Buf, util::trim_zeros_end, Background, Dev, Resource},
 	core::{cell::RefMut, future, num::NonZeroUsize, ops::Deref, task::Poll},
 };
@@ -38,14 +38,7 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 		// Trim zeros, which we always want to do.
 		trim_zeros_end(&mut entry.data);
 
-		if let slot::RefCount::NoRef { lru_index } = entry.refcount {
-			// Adjust cache use
-			lru.cache_size += entry.data.len();
-			lru.cache_size -= original_len;
-
-			// Bump entry to front of LRU.
-			lru.lru.promote(lru_index);
-		}
+		lru.entry_adjust(&entry.refcount, original_len, entry.data.len());
 
 		// Update dirty counters if not already dirty.
 		drop((lru, entry));
@@ -102,12 +95,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				let level = &mut tree.data.data[usize::from(key.depth())];
 				let entry = level.slots.get_mut(&key.offset())?;
 				match entry {
-					Slot::Present(present) => {
+					Slot::Present(entry) => {
 						if is_referenced {
-							let len = CACHE_ENTRY_FIXED_COST + present.data.len();
-							lru.decrease_refcount(&mut present.refcount, key, len);
+							lru.entry_decrease_refcount(key, &mut entry.refcount, entry.data.len());
 						}
-						Some(present)
+						Some(entry)
 					}
 					Slot::Busy(busy) => {
 						let mut busy = busy.borrow_mut();

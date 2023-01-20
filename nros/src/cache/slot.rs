@@ -58,30 +58,3 @@ pub(super) enum RefCount {
 		lru_index: lru::Idx,
 	},
 }
-
-impl RefCount {
-	pub(super) fn busy_to_present(
-		refcount: Option<NonZeroUsize>,
-		lru: &mut super::Lru,
-		key: super::Key,
-		len: usize,
-	) -> Self {
-		match refcount {
-			Some(count) => Self::Ref { count },
-			None => {
-				let lru_index = lru.add(key, len);
-				Self::NoRef { lru_index }
-			}
-		}
-	}
-
-	pub(super) fn present_to_busy(&self, lru: &mut super::Lru, len: usize) -> Option<NonZeroUsize> {
-		match self {
-			Self::Ref { count } => Some(*count),
-			Self::NoRef { lru_index } => {
-				lru.remove(*lru_index, len);
-				None
-			}
-		}
-	}
-}

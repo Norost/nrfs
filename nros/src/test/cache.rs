@@ -383,7 +383,7 @@ fn grow_write_flush_shrink_flush_many_d2() {
 /// Depth > 2
 #[test]
 fn grow_write_flush_shrink_flush_many_deep() {
-	let s = new(MaxRecordSize::K1);
+	let s = new_cap(MaxRecordSize::K1, 64, 4096);
 	let bg = Background::default();
 	run2(&bg, async {
 		let obj = s.create(&bg).await.unwrap();

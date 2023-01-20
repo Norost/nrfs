@@ -1,7 +1,5 @@
 use {
-	super::super::{
-		slot::Present, Lru, MaxRecordSize, Slot, CACHE_OBJECT_FIXED_COST, RECORD_SIZE_P2,
-	},
+	super::super::{slot::Present, Lru, MaxRecordSize, Slot, RECORD_SIZE_P2},
 	crate::{resource::Buf, Record, Resource},
 	core::fmt,
 	rustc_hash::{FxHashMap, FxHashSet},
@@ -178,6 +176,6 @@ impl<R: Resource> Present<TreeData<R>> {
 			.slots
 			.insert(offset, entry);
 		debug_assert!(_r.is_none(), "entry already present");
-		lru.increase_refcount(&mut self.refcount, CACHE_OBJECT_FIXED_COST);
+		lru.object_increase_refcount(&mut self.refcount);
 	}
 }

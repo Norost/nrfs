@@ -22,6 +22,7 @@ use {
 	entry::EntryRef,
 	futures_util::{stream::FuturesUnordered, TryStreamExt},
 	key::Key,
+	lru::Lru,
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
 	slot::{Busy, Present, RefCount, Slot},
@@ -34,14 +35,6 @@ const OBJECT_LIST_ID: u64 = 1 << 59; // 2**64 / 2**5 = 2**59, ergo 2**59 is just
 
 /// Record size as a power-of-two.
 const RECORD_SIZE_P2: u8 = mem::size_of::<Record>().ilog2() as _;
-
-/// Estimated fixed cost for every cached entry.
-///
-/// This is in addition to the amount of data stored by the entry.
-// TODO generic... constants?
-const CACHE_ENTRY_FIXED_COST: usize = 32;
-
-const CACHE_OBJECT_FIXED_COST: usize = 128;
 
 /// The ID refers to a pseudo-object or an entry of a pseudo-object.
 pub const ID_PSEUDO: u64 = 1 << 59;
@@ -78,97 +71,6 @@ impl<R: Resource> CacheData<R> {
 		self.pseudo_id_counter = NonZeroU64::new(counter).unwrap_or(NonZeroU64::MIN);
 		trace!("--> {:?}", id | ID_PSEUDO);
 		id | ID_PSEUDO
-	}
-}
-
-/// Cache LRU queue, with tracking per byte used.
-#[derive(Debug)]
-struct Lru {
-	/// Linked list for LRU entries
-	lru: lru::LruList<Key>,
-	/// The maximum amount of total bytes to keep cached.
-	cache_max: usize,
-	/// The amount of cached bytes.
-	cache_size: usize,
-}
-
-impl Lru {
-	fn add(&mut self, key: Key, len: usize) -> lru::Idx {
-		self.cache_size += len;
-		self.lru.insert(key)
-	}
-
-	fn remove(&mut self, index: lru::Idx, len: usize) {
-		self.lru.remove(index);
-		self.cache_size -= len;
-	}
-
-	/// Decrease reference count.
-	///
-	/// Inserts a new entry if it reaches 0.
-	///
-	/// # Panics
-	///
-	/// If the reference count is [`RefCount::NoRef`].
-	fn decrease_refcount(&mut self, refcount: &mut RefCount, key: Key, len: usize) {
-		debug_assert!(
-			key.flags() & Key::FLAG_OBJECT == 0
-				|| key.id() == OBJECT_LIST_ID
-				|| key.id() & ID_PSEUDO == 0,
-			"pseudo-object don't belong in the LRU (id: {:#x})",
-			key.id(),
-		);
-		let RefCount::Ref { count } = refcount else { panic!("NoRef") };
-		match NonZeroUsize::new(count.get() - 1) {
-			Some(c) => *count = c,
-			None => {
-				let lru_index = self.add(key, len);
-				*refcount = RefCount::NoRef { lru_index };
-			}
-		}
-	}
-
-	/// Increase reference count.
-	///
-	/// Removes entry if it was 0.
-	///
-	/// # Panics
-	///
-	/// If the reference count overflows.
-	fn increase_refcount(&mut self, refcount: &mut RefCount, len: usize) {
-		match refcount {
-			RefCount::Ref { count } => *count = count.checked_add(1).unwrap(),
-			RefCount::NoRef { lru_index } => {
-				self.remove(*lru_index, len);
-				*refcount = RefCount::Ref { count: NonZeroUsize::new(1).unwrap() };
-			}
-		}
-	}
-
-	/// Decrease reference count for an object.
-	///
-	/// If the reference count reaches zero, either
-	/// - for regular objects: a new entry is added.
-	/// - for pseudo-objects: `true` is returned to indicate the object should be destroyed.
-	///
-	/// In all other cases `false` is returned.
-	fn object_decrease_refcount(&mut self, id: u64, refcount: &mut RefCount) -> bool {
-		// Dereference the corresponding object.
-		let flags = Key::FLAG_OBJECT;
-		if id == OBJECT_LIST_ID || id & ID_PSEUDO == 0 {
-			// Regular object.
-			self.decrease_refcount(refcount, Key::new(flags, id, 0, 0), CACHE_OBJECT_FIXED_COST);
-			false
-		} else {
-			// Pseudo-object.
-			let RefCount::Ref { count } = refcount else { panic!("dangling pseudo object") };
-			if let Some(c) = NonZeroUsize::new(count.get() - 1) {
-				*count = c;
-				false
-			} else {
-				true
-			}
-		}
 	}
 }
 
@@ -212,7 +114,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			store,
 			data: RefCell::new(CacheData {
 				objects: Default::default(),
-				lru: Lru { lru: Default::default(), cache_max: global_cache_max, cache_size: 0 },
+				lru: Lru::new(global_cache_max),
 				used_objects_ids,
 				pseudo_id_counter: NonZeroU64::MIN,
 			}),
@@ -317,7 +219,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						Slot::Present(Present {
 							refcount: RefCount::NoRef { lru_index }, ..
 						}) => {
-							let key = data.lru.lru.get_mut(*lru_index).expect("not in lru");
+							let key = data.lru.get_mut(*lru_index).expect("not in lru");
 							*key = f(*key)
 						}
 						Slot::Busy(busy) => {
@@ -478,12 +380,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			let Slot::Busy(busy) = slot else { unreachable!("not busy") };
 			let mut busy = busy.borrow_mut();
 			busy.wakers.drain(..).for_each(|w| w.wake());
-			let refcount = RefCount::busy_to_present(
-				busy.refcount,
-				&mut data.lru,
-				Key::new(Key::FLAG_OBJECT, id, 0, 0),
-				CACHE_OBJECT_FIXED_COST,
-			);
+			let refcount = data.lru.object_add(id, busy.refcount);
 			drop(busy);
 			*slot = Slot::Present(Present {
 				data: TreeData::new(root, self.max_record_size()),
@@ -546,12 +443,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			let Slot::Busy(busy) = slot else { unreachable!("not busy") };
 			let mut busy = busy.borrow_mut();
 			busy.wakers.drain(..).for_each(|w| w.wake());
-			let refcount = RefCount::busy_to_present(
-				busy.refcount,
-				&mut data.lru,
-				key,
-				CACHE_ENTRY_FIXED_COST + entry.len(),
-			);
+			let refcount = data.lru.entry_add(key, busy.refcount, entry.len());
 			drop(busy);
 			*slot = Slot::Present(Present { data: entry, refcount });
 			let Slot::Present(e) = slot else { unreachable!() };
@@ -574,7 +466,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		bg: &'b Background<'a, D>,
 		global_max: usize,
 	) -> Result<(), Error<D>> {
-		self.data.borrow_mut().lru.cache_max = global_max;
+		self.data.borrow_mut().lru.set_cache_max(global_max);
 		self.evict_excess(bg);
 		Ok(())
 	}
@@ -584,10 +476,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		trace!("evict_excess");
 		let mut data = self.data.borrow_mut();
 
-		while data.lru.cache_size > data.lru.cache_max {
+		while data.lru.has_excess() {
 			// Get last read entry.
-			let &key = data
-				.lru
+			let key = data
 				.lru
 				.last()
 				.expect("no nodes despite non-zero write cache size");
@@ -646,7 +537,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 			let RefCount::NoRef { lru_index } = obj.refcount
 				else { unreachable!("not in lru") };
-			data.lru.remove(lru_index, CACHE_OBJECT_FIXED_COST);
+			data.lru.object_remove(lru_index);
 			data.objects.remove(&key.id());
 
 			fut.map(box_fut)
@@ -662,8 +553,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					else { unreachable!("no entry, or entry not in LRU") };
 				let entry = mem::replace(entry, self.resource().alloc());
 
-				data.lru
-					.remove(*lru_index, entry.len() + CACHE_ENTRY_FIXED_COST);
+				data.lru.entry_remove(*lru_index, entry.len());
 
 				let busy = Busy::new(key);
 				*slot = Slot::Busy(busy.clone());
@@ -675,8 +565,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				let level = &mut obj.data.data[usize::from(key.depth())];
 				let Some(Slot::Present(Present { data: entry, refcount: RefCount::NoRef { lru_index } })) = level.slots.remove(&key.offset())
 					else { unreachable!("no entry") };
-				data.lru
-					.remove(lru_index, entry.len() + CACHE_ENTRY_FIXED_COST);
+				data.lru.entry_remove(lru_index, entry.len());
 				// Dereference the corresponding object.
 				if data
 					.lru
@@ -789,9 +678,13 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let slot = level.slots.get_mut(&key.offset()).expect("no entry");
 		let Slot::Present(present) = slot else { unreachable!("no entry") };
 		let entry = mem::replace(&mut present.data, self.resource().alloc());
-		let refcount = present
-			.refcount
-			.present_to_busy(&mut data.lru, CACHE_ENTRY_FIXED_COST + entry.len());
+		let refcount = match present.refcount {
+			RefCount::Ref { count } => Some(count),
+			RefCount::NoRef { lru_index } => {
+				data.lru.entry_remove(lru_index, entry.len());
+				None
+			}
+		};
 		*slot = Slot::Busy(Busy::with_refcount(key, refcount));
 
 		// Store entry.
@@ -810,12 +703,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let Slot::Busy(busy) = slot else { unreachable!("entry not busy") };
 		let mut busy = busy.borrow_mut();
 		busy.wakers.drain(..).for_each(|w| w.wake());
-		let refcount = RefCount::busy_to_present(
-			busy.refcount,
-			&mut data.lru,
-			key,
-			CACHE_ENTRY_FIXED_COST + entry.len(),
-		);
+		let refcount = data.lru.entry_add(key, busy.refcount, entry.len());
 		drop(busy);
 		*slot = Slot::Present(Present { data: entry, refcount });
 
@@ -947,36 +835,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();
-		Statistics { storage: self.store.statistics(), global_usage: data.lru.cache_size }
-	}
-
-	/// Check if cache size matches real usage
-	#[cfg(test)]
-	#[track_caller]
-	pub fn verify_cache_usage(&self) {
-		let data = self.data.borrow();
-		let real_usage = data.objects.values().fold(0, |x, s| {
-			x + if let Slot::Present(slot) = s {
-				let mut y = 0;
-				if matches!(slot.refcount, RefCount::NoRef { .. }) {
-					y += CACHE_OBJECT_FIXED_COST;
-				}
-				y += slot
-					.data
-					.data
-					.iter()
-					.flat_map(|m| m.slots.values())
-					.flat_map(|s| match s {
-						Slot::Present(slot) => Some(&slot.data),
-						_ => None,
-					})
-					.fold(0, |x, v| x + v.len() + CACHE_ENTRY_FIXED_COST);
-				y
-			} else {
-				0
-			}
-		});
-		assert_eq!(real_usage, data.lru.cache_size, "cache size mismatch");
+		Statistics { storage: self.store.statistics(), global_usage: data.lru.size() }
 	}
 
 	/// Amount of entries in a parent record as a power of two.

@@ -2,10 +2,7 @@ pub mod data;
 mod fetch;
 
 use {
-	super::{
-		slot::RefCount, Cache, EntryRef, Key, Present, Slot, CACHE_ENTRY_FIXED_COST,
-		OBJECT_LIST_ID, RECORD_SIZE_P2,
-	},
+	super::{slot::RefCount, Cache, EntryRef, Key, Present, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2},
 	crate::{
 		resource::Buf, util::get_record, Background, Dev, Error, MaxRecordSize, Record, Resource,
 	},
@@ -563,8 +560,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 						match slot {
 							Slot::Present(Present { refcount, .. }) => {
 								if let RefCount::NoRef { lru_index } = *refcount {
-									let key =
-										data.lru.lru.get_mut(lru_index).expect("no lru entry");
+									let key = data.lru.get_mut(lru_index).expect("no lru entry");
 									*key = f(*key);
 								}
 							}
@@ -675,8 +671,8 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				Record { total_length: 0.into(), references: 0.into(), ..cur_root }.as_ref(),
 			);
 			crate::util::trim_zeros_end(&mut d);
-			let lru_index = data.lru.add(key, CACHE_ENTRY_FIXED_COST + d.len());
-			let entry = Slot::Present(Present { data: d, refcount: RefCount::NoRef { lru_index } });
+			let refcount = data.lru.entry_add(key, None, d.len());
+			let entry = Slot::Present(Present { data: d, refcount });
 			obj.add_entry(&mut data.lru, key.depth(), key.offset(), entry);
 
 			// 4. Update root record.
