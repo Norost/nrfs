@@ -339,14 +339,14 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 	/// Update a record.
 	/// This will write the record to the parent record or the root of this object.
-	// TODO avoid Box
-	#[async_recursion::async_recursion(?Send)]
+	///
+	/// Returns the current ID of the tree, which may have changed due to a concurrent Tree::shrink.
 	pub(super) async fn update_record(
 		&self,
 		record_depth: u8,
 		offset: u64,
 		record: Record,
-	) -> Result<(), Error<D>> {
+	) -> Result<u64, Error<D>> {
 		trace!(
 			"update_record id {}, depth {}, offset {}, record.(lba, length) ({}, {})",
 			self.id,
@@ -386,6 +386,8 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let mut obj = self.cache.get_object(self.id).expect("no object");
 			obj.root = new_root;
 			obj.set_dirty(true);
+
+			Ok(self.id)
 		} else {
 			// Update a parent record.
 			// Find parent
@@ -394,11 +396,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 			let k = Key::new(0, self.id, parent_depth, offt);
 			let entry = self.cache.tree_fetch_entry(self.background, k).await?;
+			let id = entry.key.id();
 			let old_record = get_record(entry.get(), index).unwrap_or_default();
 			if old_record.length == 0 && record.length == 0 {
 				// Both the old and new record are zero, so don't dirty the parent.
 				trace!("--> skip both zero");
-				return Ok(());
+				return Ok(id);
 			}
 			entry.modify(self.background, |data| {
 				// Destroy old record
@@ -419,9 +422,9 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				data.resize(min_len, 0);
 				data.get_mut()[index..index + mem::size_of::<Record>()]
 					.copy_from_slice(record.as_ref());
-			})
+			});
+			Ok(id)
 		}
-		Ok(())
 	}
 
 	/// Resize record tree.
@@ -481,15 +484,19 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 			// 1a. Split object into two: current with new root and pseudo-object with records to
 			//     be zeroed.
-			let mut data = self.cache.data.borrow_mut();
+
+			// Create a pseudo object.
+			// This will be swapped with the current object.
+			let mut data_ref = self.cache.data.borrow_mut();
+			let data = &mut *data_ref;
 			let pseudo_id = data.new_pseudo_id();
 			let Some(Slot::Present(cur_obj)) = data.objects.get_mut(&self.id)
 				else { unreachable!("no object") };
 			let mut pseudo_obj = data::TreeData::new(new_root, self.max_record_size());
 
-			// Transfer all entries with offset < new_len to pseudo object
+			// Transfer all entries with offset *inside* the range of the "new" object to pseudo
+			// object
 			let mut offt = 1 << (self.max_record_size().to_raw() * new_depth);
-			let mut refcount = 0;
 			for d in 0..new_depth {
 				// Move entries
 				let cur_level = &mut cur_obj.data.data[usize::from(d)];
@@ -500,12 +507,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 						pseudo_level.dirty_markers.insert(offset, marker);
 					}
 				}
-				refcount += cur_level.slots.len();
 				offt >>= self.max_record_size().to_raw();
-			}
-			for d in new_depth..cur_depth {
-				let cur_level = &mut cur_obj.data.data[usize::from(d)];
-				refcount += cur_level.slots.len();
 			}
 			// Fix marker count for cur_obj
 			if new_depth > 0 {
@@ -515,21 +517,29 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			}
 
 			// Swap & insert pseudo-object.
+			mem::swap(&mut cur_obj.data, &mut pseudo_obj);
+
 			// If the pseudo-object has no entries, it's already zeroed and there is nothing
 			// left to do.
-			mem::swap(&mut cur_obj.data, &mut pseudo_obj);
+			let refcount = pseudo_obj.data.iter().fold(0, |x, lvl| x + lvl.slots.len());
 			if let Some(count) = NonZeroUsize::new(refcount) {
-				// Fix keys of any busy tasks
+				// Fix keys of LRU entries & any busy tasks.
 				for lvl in pseudo_obj.data.iter_mut() {
 					for slot in lvl.slots.values() {
-						if let Slot::Busy(busy) = &slot {
-							let mut busy = busy.borrow_mut();
-							busy.key = Key::new(
-								busy.key.flags(),
-								pseudo_id,
-								busy.key.depth(),
-								busy.key.offset(),
-							);
+						let f =
+							|key: Key| Key::new(key.flags(), pseudo_id, key.depth(), key.offset());
+						match slot {
+							Slot::Present(Present { refcount, .. }) => {
+								if let RefCount::NoRef { lru_index } = *refcount {
+									let key =
+										data.lru.lru.get_mut(lru_index).expect("no lru entry");
+									*key = f(*key);
+								}
+							}
+							Slot::Busy(busy) => {
+								let mut busy = busy.borrow_mut();
+								busy.key = f(busy.key);
+							}
 						}
 					}
 				}
@@ -537,8 +547,9 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				let refcount = RefCount::Ref { count };
 				let present = Present { data: pseudo_obj, refcount };
 				data.objects.insert(pseudo_id, Slot::Present(present));
+
 				// Zero out pseudo-object.
-				drop(data);
+				drop(data_ref);
 				Tree::new(self.cache, self.background, pseudo_id)
 					.write_zeros(0, u64::MAX)
 					.await?;

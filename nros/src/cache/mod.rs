@@ -72,10 +72,12 @@ impl<R: Resource> CacheData<R> {
 
 	/// Allocate a pseudo-ID.
 	fn new_pseudo_id(&mut self) -> u64 {
+		trace!("new_pseudo_id");
 		let mut counter @ id = self.pseudo_id_counter.get();
 		counter += 1;
 		counter %= 1 << 59;
 		self.pseudo_id_counter = NonZeroU64::new(counter).unwrap_or(NonZeroU64::MIN);
+		trace!("--> {:?}", id | ID_PSEUDO);
 		id | ID_PSEUDO
 	}
 }
@@ -140,6 +142,32 @@ impl Lru {
 			RefCount::NoRef { lru_index } => {
 				self.remove(*lru_index, len);
 				*refcount = RefCount::Ref { count: NonZeroUsize::new(1).unwrap() };
+			}
+		}
+	}
+
+	/// Decrease reference count for an object.
+	///
+	/// If the reference count reaches zero, either
+	/// - for regular objects: a new entry is added.
+	/// - for pseudo-objects: `true` is returned to indicate the object should be destroyed.
+	///
+	/// In all other cases `false` is returned.
+	fn object_decrease_refcount(&mut self, id: u64, refcount: &mut RefCount) -> bool {
+		// Dereference the corresponding object.
+		let flags = Key::FLAG_OBJECT;
+		if id == OBJECT_LIST_ID || id & ID_PSEUDO == 0 {
+			// Regular object.
+			self.decrease_refcount(refcount, Key::new(flags, id, 0, 0), CACHE_OBJECT_FIXED_COST);
+			false
+		} else {
+			// Pseudo-object.
+			let RefCount::Ref { count } = refcount else { panic!("dangling pseudo object") };
+			if let Some(c) = NonZeroUsize::new(count.get() - 1) {
+				*count = c;
+				false
+			} else {
+				true
 			}
 		}
 	}
@@ -657,6 +685,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				obj.data.is_dirty().then(|| {
 					let offset = key.id() << RECORD_SIZE_P2;
 					async move {
+						trace!("evict_entry::object {:?}", key.id());
 						let bg = Default::default(); // TODO get rid of this sillyness
 						Tree::new(self, &bg, OBJECT_LIST_ID)
 							.write(offset, root.as_ref())
@@ -699,27 +728,31 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				data.lru
 					.remove(lru_index, entry.len() + CACHE_ENTRY_FIXED_COST);
 				// Dereference the corresponding object.
-				let flags = Key::FLAG_OBJECT | key.flags();
-				data.lru.decrease_refcount(
-					&mut obj.refcount,
-					Key::new(flags, key.id(), key.depth(), key.offset()),
-					CACHE_OBJECT_FIXED_COST,
-				);
+				if data
+					.lru
+					.object_decrease_refcount(key.id(), &mut obj.refcount)
+				{
+					data.objects.remove(&key.id());
+				}
 				None
 			};
 
 			let entry = entry.map(|(entry, busy)| {
 				async move {
-					trace!("evict_entry::is_dirty {:?}", key);
+					trace!("evict_entry::entry {:?}", key);
 					// Store record.
 					let (record, entry) = self.store.write(entry).await?;
 
+					{
+						trace!("{:?} ~~> {:?}", key, busy.borrow_mut().key);
+					}
 					let key = busy.borrow_mut().key;
 
 					let bg = Default::default(); // TODO get rid of this sillyness
-					Tree::new(self, &bg, key.id())
+					let id = Tree::new(self, &bg, key.id())
 						.update_record(key.depth(), key.offset(), record)
 						.await?;
+					assert_eq!(id, key.id());
 
 					// Unmark as being flushed.
 					let mut data_ref = self.data.borrow_mut();
@@ -752,29 +785,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						debug_assert!(busy.wakers.is_empty(), "refcount is zero with wakers");
 						drop(busy);
 						slot.remove();
-						// Dereference the corresponding object.
-						let flags = Key::FLAG_OBJECT | key.flags();
-						if key.id() == OBJECT_LIST_ID || key.id() & ID_PSEUDO == 0 {
-							// Regular object.
-							data.lru.decrease_refcount(
-								&mut obj.refcount,
-								Key::new(flags, key.id(), key.depth(), key.offset()),
-								CACHE_OBJECT_FIXED_COST,
-							);
-						} else {
-							// Pseudo-object.
-							let RefCount::Ref { count } = &mut obj.refcount else { panic!("dangling pseudo object") };
-							if let Some(c) = NonZeroUsize::new(count.get() - 1) {
-								*count = c;
-							} else {
-								// Forget the object, which should be all zeroes.
-								debug_assert!(
-									obj.data.root.length == 0,
-									"pseudo object leaks entries"
-								);
-								do_remove = true;
-							}
-						}
+						do_remove = data
+							.lru
+							.object_decrease_refcount(key.id(), &mut obj.refcount);
 					}
 
 					// Remove dirty marker
@@ -784,6 +797,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					debug_assert!(_r, "not marked");
 
 					if do_remove {
+						// Forget the object, which should be all zeroes.
+						debug_assert!(obj.data.root.length == 0, "pseudo object leaks entries");
 						data.objects.remove(&key.id());
 					}
 
