@@ -671,13 +671,22 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let data = &mut *data_ref;
 		// Clear dirty status
 		let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id()) else { return Ok(()) };
-		obj.data
-			.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
+
+		if !obj.data.is_marked_dirty(key.depth(), key.offset()) {
+			// The entry is not dirty, so skip.
+			return Ok(());
+		}
 
 		// Take entry.
 		let level = &mut obj.data.data[usize::from(key.depth())];
+
 		let slot = level.slots.get_mut(&key.offset()).expect("no entry");
-		let Slot::Present(present) = slot else { unreachable!("no entry") };
+		let Slot::Present(present) = slot else {
+			// The entry is already being evicted - probably
+			// FIXME we need a better guarantee than this.
+			return Ok(());
+		};
+
 		let entry = mem::replace(&mut present.data, self.resource().alloc());
 		let refcount = match present.refcount {
 			RefCount::Ref { count } => Some(count),
@@ -707,6 +716,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let refcount = data.lru.entry_add(key, busy.refcount, entry.len());
 		drop(busy);
 		*slot = Slot::Present(Present { data: entry, refcount });
+
+		// Unmark as dirty
+		let r = obj
+			.data
+			.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
+		debug_assert!(r, "not marked");
 
 		Ok(())
 	}

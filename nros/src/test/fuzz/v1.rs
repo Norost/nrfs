@@ -857,3 +857,17 @@ fn shrink_use_after_free() {
 	)
 	.run()
 }
+
+#[test]
+fn flush_entry_not_present() {
+	Test::new(
+		1 << 16,
+		58160,
+		[
+			Create { size: 2377900809628855616 },
+			Write { idx: 4294926591, offset: 18446742974197925947, amount: 65535 },
+			Remount,
+		],
+	)
+	.run()
+}
