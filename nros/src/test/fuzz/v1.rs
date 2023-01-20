@@ -885,3 +885,17 @@ fn shrink_wrong_transfer_offset() {
 	)
 	.run()
 }
+
+#[test]
+fn move_object_fix_lru_object() {
+	Test::new(
+		1 << 16,
+		1311,
+		[
+			Create { size: 0 },
+			Create { size: 1 << 20 },
+			Move { from_idx: 0, to_idx: 1 },
+		],
+	)
+	.run()
+}

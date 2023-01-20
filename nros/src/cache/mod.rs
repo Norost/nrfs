@@ -207,31 +207,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		}
 
 		// Helper function to fixup keys
-		let transfer = |from, to| {
-			let mut data = self.data.borrow_mut();
-			let Some(Slot::Present(obj)) = data.objects.remove(&from) else { panic!("no object") };
-
-			for level in obj.data.data.iter() {
-				for slot in level.slots.values() {
-					let f = |key: Key| Key::new(0, to, key.depth(), key.offset());
-					match slot {
-						Slot::Present(Present { refcount: RefCount::Ref { .. }, .. }) => {}
-						Slot::Present(Present {
-							refcount: RefCount::NoRef { lru_index }, ..
-						}) => {
-							let key = data.lru.get_mut(*lru_index).expect("not in lru");
-							*key = f(*key)
-						}
-						Slot::Busy(busy) => {
-							let mut busy = busy.borrow_mut();
-							busy.key = f(busy.key);
-						}
-					}
-				}
-			}
-
-			data.objects.insert(to, Slot::Present(obj));
-		};
 
 		// 1. Shrink 'to' object to zero size.
 		//    Tree::shrink will move all entries to a pseudo-object.
@@ -239,7 +214,37 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		// 2. Move 'from' object to 'to' ID.
 		let _ = self.fetch_object(bg, from).await?;
-		transfer(from, to);
+
+		let mut data_ref = self.data.borrow_mut();
+		let data = &mut *data_ref;
+		let Some(Slot::Present(obj)) = data.objects.remove(&from) else { panic!("no object") };
+
+		// Fix entries
+		for level in obj.data.data.iter() {
+			for slot in level.slots.values() {
+				let f = |key: Key| Key::new(0, to, key.depth(), key.offset());
+				match slot {
+					Slot::Present(Present { refcount: RefCount::Ref { .. }, .. }) => {}
+					Slot::Present(Present { refcount: RefCount::NoRef { lru_index }, .. }) => {
+						let key = data.lru.get_mut(*lru_index).expect("not in lru");
+						*key = f(*key)
+					}
+					Slot::Busy(busy) => {
+						let mut busy = busy.borrow_mut();
+						busy.key = f(busy.key);
+					}
+				}
+			}
+		}
+
+		// Fix object
+		if let RefCount::NoRef { lru_index } = obj.refcount {
+			*data.lru.get_mut(lru_index).expect("no lru entry") =
+				Key::new(Key::FLAG_OBJECT, to, 0, 0);
+		}
+		data.objects.insert(to, Slot::Present(obj));
+
+		drop(data_ref);
 
 		// 3. Clear 'from' in object list.
 		let offset = from << RECORD_SIZE_P2;
