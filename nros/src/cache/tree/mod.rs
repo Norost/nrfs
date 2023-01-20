@@ -536,7 +536,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				let marker = cur_obj.data.data[usize::from(new_depth)]
 					.dirty_markers
 					.get_mut(&0);
-				if let Some(marker) = marker {
+				if let Some(marker) = marker.filter(|m| !m.is_dirty) {
 					marker.is_dirty = true;
 					marker.children.clear();
 					cur_obj

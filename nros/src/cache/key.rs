@@ -58,7 +58,7 @@ impl fmt::Debug for Key {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Key))
 			.field("flags", &self.flags())
-			.field("id", &self.id())
+			.field("id", &format_args!("{:#x}", self.id()))
 			.field("depth", &self.depth())
 			.field("offset", &self.offset())
 			.finish()

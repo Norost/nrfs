@@ -1,10 +1,8 @@
 use {
 	super::{lru, slot, Cache, Key, Lru, Slot, CACHE_ENTRY_FIXED_COST},
-	core::task::Poll,
 	crate::{resource::Buf, util::trim_zeros_end, Background, Dev, Error, Resource},
-	core::{future, cell::RefMut, fmt, ops::Deref},
+	core::{cell::RefMut, fmt, future, num::NonZeroUsize, ops::Deref, task::Poll},
 	std::collections::hash_map,
-	core::num::NonZeroUsize,
 };
 
 /// Reference to an entry.
@@ -32,6 +30,7 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 	///
 	/// This consumes the entry to ensure no reference is held across an await point.
 	pub fn modify(self, bg: &Background<'a, D>, f: impl FnOnce(&mut R::Buf)) {
+		trace!("modify {:?}", self.key);
 		let Self { cache, key, mut lru, mut entry } = self;
 		let original_len = entry.data.len();
 
@@ -47,19 +46,16 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 
 			// Bump entry to front of LRU.
 			lru.lru.promote(lru_index);
-
-			// Update dirty counters if not already dirty.
-			drop((lru, entry));
-			let mut data = self.cache.data.borrow_mut();
-			let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id())
-				else { panic!("no object") };
-			obj.data
-				.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
-			drop(data);
-
-			// Flush
-			cache.evict_excess(bg);
 		}
+
+		// Update dirty counters if not already dirty.
+		drop((lru, entry));
+		let mut obj = self.cache.get_object(key.id()).expect("no object");
+		obj.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
+		drop(obj);
+
+		// Flush
+		cache.evict_excess(bg);
 	}
 }
 
@@ -74,6 +70,7 @@ impl<'a, D: Dev, R: Resource> Deref for EntryRef<'a, D, R> {
 impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Try to get an entry directly.
 	pub(super) fn get_entry(&self, key: Key) -> Option<EntryRef<'_, D, R>> {
+		trace!("get_entry {:?}", key);
 		let data = self.data.borrow_mut();
 
 		let (trees, lru) = RefMut::map_split(data, |d| (&mut d.objects, &mut d.lru));
@@ -95,6 +92,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	///
 	/// This will block if a task is busy with the entry.
 	pub(super) async fn wait_entry(&self, key: Key) -> Option<EntryRef<'_, D, R>> {
+		trace!("wait_entry {:?}", key);
 		let mut is_referenced = false;
 		future::poll_fn(|cx| {
 			let data = self.data.borrow_mut();
@@ -113,10 +111,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						Some(present)
 					}
 					Slot::Busy(busy) => {
+						dbg!();
 						let mut busy = busy.borrow_mut();
 						busy.wakers.push(cx.waker().clone());
 						if !is_referenced {
-							busy.refcount = NonZeroUsize::new(busy.refcount.map_or(0, |x| x.get()) + 1);
+							busy.refcount =
+								NonZeroUsize::new(busy.refcount.map_or(0, |x| x.get()) + 1);
 							is_referenced = true;
 						}
 						None
@@ -128,6 +128,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				Err(_) if is_referenced => Poll::Pending,
 				Err(_) => Poll::Ready(None),
 			}
-		}).await
+		})
+		.await
 	}
 }

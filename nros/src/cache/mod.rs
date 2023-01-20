@@ -397,7 +397,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		bg: &'b Background<'a, D>,
 		id: u64,
 	) -> Result<(RefMut<'a, Present<TreeData<R>>>, RefMut<'a, Lru>), Error<D>> {
-		trace!("fetch_object {:?}", id);
+		trace!("fetch_object {:#x}", id);
 		// Steps:
 		// 1. Check the state of the object.
 		// 1a. If present, just return.
@@ -417,6 +417,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				match objects.entry(id) {
 					// 1c. If not present, fetch the root.
 					hash_map::Entry::Vacant(slot) => {
+						debug_assert!(!is_pseudo_id(id));
 						// We need to fetch it ourselves.
 						slot.insert(Slot::Busy(Busy::new(key)));
 						must_fetch = true;
@@ -425,17 +426,16 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					hash_map::Entry::Occupied(mut slot) => match slot.into_mut() {
 						// 1a. If present, just return.
 						Slot::Present(obj) => {
+							dbg!();
 							if is_referenced {
-								lru.decrease_refcount(
-									&mut obj.refcount,
-									key,
-									CACHE_OBJECT_FIXED_COST,
-								);
+								debug_assert!(!is_pseudo_id(id));
+								lru.object_decrease_refcount(id, &mut obj.refcount);
 							}
 							Some(obj)
 						}
 						// 1b. If busy, wait, then check 1a and 1b.
 						Slot::Busy(busy) => {
+							debug_assert!(!is_pseudo_id(id));
 							let mut busy = busy.borrow_mut();
 							if !is_referenced {
 								busy.refcount =
@@ -457,10 +457,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		.await;
 
 		if let Some(obj) = obj {
+			dbg!();
 			return Ok(obj);
 		}
 
 		// 1c. If not present, fetch the root.
+		debug_assert!(!is_pseudo_id(id));
 
 		// Fetch the object root.
 		let mut root = Record::default();
@@ -510,83 +512,31 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	) -> Result<EntryRef<'a, D, R>, Error<D>> {
 		trace!("fetch_entry {:?} <- {:?}", key, record.lba);
 		// Steps:
-		// 1. Fetch the corresponding object first.
-		// 2. Check the state of the entry.
-		// 2a. If present, just return.
-		// 2b. If busy, wait, then check 2a and 2b.
-		// 2c. If not present, fetch the entry.
+		// 1. Try to get the entry directly or by waiting for another tasks.
+		// 2. Otherwise, fetch it ourselves.
 
-		// Check for use-after-frees.
-		#[cfg(debug_assertions)]
-		self.store.assert_alloc(record);
-
-		// 1. Fetch the corresponding object first.
-		let (mut obj, mut lru) = self.fetch_object(bg, key.id()).await?;
-
-		// 2. Check the state of the entry.
-		if obj.data.data[usize::from(key.depth())]
-			.slots
-			.contains_key(&key.offset())
-		{
-			drop((obj, lru));
-			let mut is_referenced = false;
-			let entry = future::poll_fn(|cx| {
-				let (objects, mut lru) =
-					RefMut::map_split(self.data.borrow_mut(), |d| (&mut d.objects, &mut d.lru));
-				let ret = RefMut::filter_map(objects, |objects| {
-					let Some(Slot::Present(obj)) = objects.get_mut(&key.id())
-						else { unreachable!("no object") };
-					let slot = obj.data.data[usize::from(key.depth())]
-						.slots
-						.get_mut(&key.offset())
-						.expect("no entry");
-					match slot {
-						// 2a. If present, just return.
-						Slot::Present(entry) => {
-							if is_referenced {
-								lru.decrease_refcount(
-									&mut entry.refcount,
-									key,
-									CACHE_ENTRY_FIXED_COST + entry.data.len(),
-								);
-							}
-							Some(entry)
-						}
-						// 2b. If busy, wait, then check 2a and 2b.
-						Slot::Busy(busy) => {
-							let mut busy = busy.borrow_mut();
-							if !is_referenced {
-								busy.refcount =
-									NonZeroUsize::new(busy.refcount.map_or(0, |x| x.get()) + 1);
-								is_referenced = true;
-							}
-							busy.wakers.push(cx.waker().clone());
-							None
-						}
-					}
-				});
-				match ret {
-					Ok(entry) => Poll::Ready(EntryRef::new(self, key, entry, lru)),
-					Err(_) => Poll::Pending,
-				}
-			})
-			.await;
+		// 1. Try to get the entry directly or by waiting for another tasks.
+		if let Some(entry) = self.wait_entry(key).await {
 			return Ok(entry);
 		}
 
-		// 2c. If not present, fetch the entry.
+		// 2. Otherwise, fetch it ourselves.
 
 		// Insert a new entry and increase refcount to object.
+		let (mut obj, mut lru) = self.fetch_object(bg, key.id()).await?;
+		let busy = Busy::new(key);
 		obj.add_entry(
 			&mut lru,
 			key.depth(),
 			key.offset(),
-			Slot::Busy(Busy::new(key)),
+			Slot::Busy(busy.clone()),
 		);
 		drop((obj, lru));
 
 		// Fetch it
 		let entry = self.store.read(record).await?;
+
+		let key = busy.borrow_mut().key;
 
 		// Insert the entry.
 		let (entry, lru) = RefMut::map_split(self.data.borrow_mut(), |data| {
@@ -718,12 +668,14 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				data.lru
 					.remove(*lru_index, entry.len() + CACHE_ENTRY_FIXED_COST);
 
-				let busy = Rc::new(RefCell::new(Busy { wakers: vec![], refcount: None, key }));
+				let busy = Busy::new(key);
+				dbg!();
 				*slot = Slot::Busy(busy.clone());
 
 				Some((entry, busy))
 			} else {
 				// Just remove the entry.
+				trace!("--> not dirty");
 				let level = &mut obj.data.data[usize::from(key.depth())];
 				let Some(Slot::Present(Present { data: entry, refcount: RefCount::NoRef { lru_index } })) = level.slots.remove(&key.offset())
 					else { unreachable!("no entry") };
@@ -1050,4 +1002,9 @@ pub struct Statistics {
 	pub storage: storage::Statistics,
 	/// Total amount of memory used by record data, including dirty data.
 	pub global_usage: usize,
+}
+
+#[cfg(debug_assertions)]
+fn is_pseudo_id(id: u64) -> bool {
+	id != OBJECT_LIST_ID && id & ID_PSEUDO != 0
 }
