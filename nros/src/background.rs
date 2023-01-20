@@ -4,9 +4,9 @@ use {
 		fmt,
 		future::{self, Future},
 		pin::Pin,
-		task::{Poll, Waker},
+		task::Waker,
 	},
-	futures_util::{stream::FuturesUnordered, Stream, TryStreamExt},
+	futures_util::{stream::FuturesUnordered, TryStreamExt},
 };
 
 /// Background task runner.
@@ -32,21 +32,6 @@ impl<Fut> Background<Fut> {
 		let mut bg = self.inner.borrow_mut();
 		bg.tasks.push(task);
 		bg.waker.take().map(|w| w.wake());
-	}
-}
-
-impl<Fut: Future> Background<Fut> {
-	/// Poll background tasks until one finishes.
-	///
-	/// If no background tasks remain, `None` is returned.
-	pub(crate) async fn poll_background(&self) -> Option<Fut::Output> {
-		trace!("Background::poll_background");
-		future::poll_fn(|cx| {
-			let mut bg = self.inner.borrow_mut();
-			let _ = bg.waker.insert(cx.waker().clone());
-			Pin::new(&mut bg.tasks).poll_next(cx)
-		})
-		.await
 	}
 }
 
@@ -79,7 +64,9 @@ impl<Fut: Future<Output = Result<(), E>>, E> Background<Fut> {
 	/// Poll & complete background tasks.
 	///
 	/// This future never finishes unless an error occurs.
+	#[cfg(test)]
 	pub(crate) async fn process_background(&self) -> Result<!, E> {
+		use {core::task::Poll, futures_util::Stream};
 		trace!("Background::process_background");
 		future::poll_fn(|cx| {
 			let mut bg = self.inner.borrow_mut();

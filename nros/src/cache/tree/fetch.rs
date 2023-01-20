@@ -45,7 +45,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let root = obj.data.root;
 		let len = u64::from(root.total_length);
 		drop(obj);
-		dbg!();
 
 		// Find the first parent or leaf entry that is present starting from a leaf
 		// and work back downwards.
@@ -65,13 +64,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			while cur_depth < obj_depth {
 				// Check if the entry is already present or being fetched.
 				let key = Key::new(0, id, cur_depth, offset >> depth_offset_shift(cur_depth));
-				dbg!();
 				if let Some(entry) = self.wait_entry(key).await {
-					dbg!();
 					id = entry.key.id();
 					break 's Some(entry);
 				}
-				dbg!();
 				// Try the next level
 				cur_depth += 1;
 			}

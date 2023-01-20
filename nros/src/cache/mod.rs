@@ -11,14 +11,13 @@ use {
 		resource::Buf, storage, util::box_fut, Background, BlockSize, Dev, Error, MaxRecordSize,
 		Record, Resource, Store,
 	},
-	alloc::rc::Rc,
 	core::{
 		cell::{RefCell, RefMut},
 		future::{self, Future},
 		mem,
 		num::{NonZeroU64, NonZeroUsize},
 		pin::Pin,
-		task::{Poll, Waker},
+		task::Poll,
 	},
 	entry::EntryRef,
 	futures_util::{stream::FuturesUnordered, TryStreamExt},
@@ -423,10 +422,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						must_fetch = true;
 						None
 					}
-					hash_map::Entry::Occupied(mut slot) => match slot.into_mut() {
+					hash_map::Entry::Occupied(slot) => match slot.into_mut() {
 						// 1a. If present, just return.
 						Slot::Present(obj) => {
-							dbg!();
 							if is_referenced {
 								debug_assert!(!is_pseudo_id(id));
 								lru.object_decrease_refcount(id, &mut obj.refcount);
@@ -457,7 +455,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		.await;
 
 		if let Some(obj) = obj {
-			dbg!();
 			return Ok(obj);
 		}
 
@@ -669,7 +666,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					.remove(*lru_index, entry.len() + CACHE_ENTRY_FIXED_COST);
 
 				let busy = Busy::new(key);
-				dbg!();
 				*slot = Slot::Busy(busy.clone());
 
 				Some((entry, busy))

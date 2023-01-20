@@ -1,6 +1,5 @@
 use {
 	super::{lru, Key},
-	crate::Resource,
 	alloc::rc::Rc,
 	core::{cell::RefCell, num::NonZeroUsize, task::Waker},
 };

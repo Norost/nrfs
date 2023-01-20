@@ -1,8 +1,7 @@
 use {
-	super::{lru, slot, Cache, Key, Lru, Slot, CACHE_ENTRY_FIXED_COST},
-	crate::{resource::Buf, util::trim_zeros_end, Background, Dev, Error, Resource},
-	core::{cell::RefMut, fmt, future, num::NonZeroUsize, ops::Deref, task::Poll},
-	std::collections::hash_map,
+	super::{slot, Cache, Key, Lru, Slot, CACHE_ENTRY_FIXED_COST},
+	crate::{resource::Buf, util::trim_zeros_end, Background, Dev, Resource},
+	core::{cell::RefMut, future, num::NonZeroUsize, ops::Deref, task::Poll},
 };
 
 /// Reference to an entry.
@@ -111,7 +110,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						Some(present)
 					}
 					Slot::Busy(busy) => {
-						dbg!();
 						let mut busy = busy.borrow_mut();
 						busy.wakers.push(cx.waker().clone());
 						if !is_referenced {

@@ -3,13 +3,13 @@ mod fetch;
 
 use {
 	super::{
-		slot::RefCount, Busy, Cache, EntryRef, Key, Present, Slot, CACHE_ENTRY_FIXED_COST,
+		slot::RefCount, Cache, EntryRef, Key, Present, Slot, CACHE_ENTRY_FIXED_COST,
 		OBJECT_LIST_ID, RECORD_SIZE_P2,
 	},
 	crate::{
 		resource::Buf, util::get_record, Background, Dev, Error, MaxRecordSize, Record, Resource,
 	},
-	core::{cell::RefMut, future::Future, mem, num::NonZeroUsize, ops::RangeInclusive, pin::Pin},
+	core::{mem, num::NonZeroUsize, ops::RangeInclusive},
 };
 
 /// Implementation of a record tree.
@@ -42,20 +42,19 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// It may exit early if the necessary data is not cached (e.g. partial record write)
 	pub async fn write(&self, offset: u64, data: &[u8]) -> Result<usize, Error<D>> {
 		trace!(
-			"write id {}, offset {}, len {}",
+			"write id {:#x}, offset {}, len {}",
 			self.id,
 			offset,
 			data.len()
 		);
 
-		let (root, len) = self.root().await?;
-		let max_depth = depth(self.max_record_size(), len);
+		let root_len = self.len().await?;
 
 		// Ensure all data fits.
-		let data = if offset >= len {
+		let data = if offset >= root_len {
 			return Ok(0);
-		} else if offset.saturating_add(u64::try_from(data.len()).unwrap()) >= len {
-			&data[..usize::try_from(len - offset).unwrap()]
+		} else if offset.saturating_add(u64::try_from(data.len()).unwrap()) >= root_len {
+			&data[..usize::try_from(root_len - offset).unwrap()]
 		} else {
 			data
 		};
@@ -149,7 +148,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			return Ok(0);
 		}
 
-		let (root, root_len) = self.root().await?;
+		let root_len = self.len().await?;
 
 		// TODO Cheat a little here so Tree::shrink works properly.
 		// We should make an internal write_zeros functions instead though, perhaps?
@@ -259,7 +258,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// Replace leaf records with zeros
 			// FIXME we're clearing way too much if offset + len < new_len
 			let entries_per_rec = 1 << self.cache.entries_per_parent_p2();
-			for i in offset % entries_per_rec..entries_per_rec {
+			for _ in offset % entries_per_rec..entries_per_rec {
 				let k = Key::new(0, self.id, 0, offset);
 				let entry = self
 					.cache
@@ -278,9 +277,14 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// Returns the actual amount of bytes read.
 	/// It may exit early if not all data is cached.
 	pub async fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
-		trace!("read id {}, offset {}, len {}", self.id, offset, buf.len());
+		trace!(
+			"read id {:#x}, offset {}, len {}",
+			self.id,
+			offset,
+			buf.len()
+		);
 
-		let (root, root_len) = self.root().await?;
+		let root_len = self.len().await?;
 
 		// Ensure all data fits in buffer.
 		let buf = if root_len <= offset {
@@ -437,7 +441,6 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				data.get_mut()[offt..offt + mem::size_of::<Record>()]
 					.copy_from_slice(record.as_ref());
 			});
-			let entry = self.cache.tree_fetch_entry(self.background, k).await?;
 			Ok(id)
 		}
 	}
