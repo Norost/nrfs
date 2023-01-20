@@ -871,3 +871,17 @@ fn flush_entry_not_present() {
 	)
 	.run()
 }
+
+#[test]
+fn shrink_wrong_transfer_offset() {
+	Test::new(
+		1 << 16,
+		1842,
+		[
+			Create { size: 1026 },
+			Resize { idx: 0, size: 1025 },
+			Resize { idx: 0, size: 1 },
+		],
+	)
+	.run()
+}

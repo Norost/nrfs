@@ -132,7 +132,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	///
 	/// This is more efficient than [`Tree::write`] for clearing large regions.
 	pub async fn write_zeros(&self, offset: u64, len: u64) -> Result<u64, Error<D>> {
-		trace!("write_zeros id {}, offset {}, len {}", self.id, offset, len,);
+		trace!(
+			"write_zeros id {:#x}, offset {}, len {}",
+			self.id,
+			offset,
+			len,
+		);
 
 		// Since a very large range of the object may need to be zeroed simply inserting leaf
 		// records is not an option.
@@ -363,10 +368,8 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		record: Record,
 	) -> Result<u64, Error<D>> {
 		trace!(
-			"update_record id {}, depth {}, offset {}, record.(lba, length) ({}, {})",
-			self.id,
-			record_depth,
-			offset,
+			"update_record {:?} ({}, {})",
+			Key::new(0, self.id, record_depth, offset),
 			record.lba,
 			record.length
 		);
@@ -511,7 +514,11 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 			// Transfer all entries with offset *inside* the range of the "new" object to pseudo
 			// object
-			let mut offt = 1u128 << (self.cache.entries_per_parent_p2() * new_depth);
+			let mut offt = if new_depth > 0 {
+				1u128 << self.cache.entries_per_parent_p2() * (new_depth - 1)
+			} else {
+				0
+			};
 			for d in 0..new_depth {
 				let cur_level = &mut cur_obj.data.data[usize::from(d)];
 				let pseudo_level = &mut pseudo_obj.data[usize::from(d)];
