@@ -151,11 +151,25 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 		let (root, root_len) = self.root().await?;
 
+		// TODO Cheat a little here so Tree::shrink works properly.
+		// We should make an internal write_zeros functions instead though, perhaps?
+		let root_depth = depth(self.max_record_size(), root_len);
+		if root_depth == 0 {
+			return Ok(0);
+		}
+		let root_len = 1u64
+			.checked_shl(
+				(self.max_record_size().to_raw()
+					+ self.cache.entries_per_parent_p2() * (root_depth - 1))
+					.into(),
+			)
+			.unwrap_or(u64::MAX);
+		debug_assert_eq!(depth(self.max_record_size(), root_len), root_depth);
+
 		// Don't even bother if offset exceeds length.
 		if offset >= root_len {
 			return Ok(0);
 		}
-		let root_depth = depth(self.max_record_size(), root_len);
 
 		// Restrict offset + len to the end of the object.
 		let len = len.min(root_len - offset);
@@ -357,6 +371,13 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		);
 		// The object is guaranteed to exist.
 		// At least, if called by a task that holds an entry, which should be guaranteed.
+		dbg!(&self
+			.cache
+			.data
+			.borrow_mut()
+			.objects
+			.keys()
+			.collect::<Vec<_>>());
 		let cur_root = self.cache.get_object(self.id).expect("no object").root;
 		let len = u64::from(cur_root.total_length);
 		let cur_depth = depth(self.max_record_size(), len);
@@ -496,12 +517,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 			// Transfer all entries with offset *inside* the range of the "new" object to pseudo
 			// object
-			let mut offt = 1 << (self.max_record_size().to_raw() * new_depth);
+			let mut offt = 1u128 << (self.max_record_size().to_raw() * new_depth);
 			for d in 0..new_depth {
 				// Move entries
 				let cur_level = &mut cur_obj.data.data[usize::from(d)];
 				let pseudo_level = &mut pseudo_obj.data[usize::from(d)];
-				for (offset, slot) in cur_level.slots.drain_filter(|k, _| *k >= offt) {
+				for (offset, slot) in cur_level.slots.drain_filter(|k, _| u128::from(*k) >= offt) {
 					pseudo_level.slots.insert(offset, slot);
 					if let Some(marker) = cur_level.dirty_markers.remove(&offset) {
 						pseudo_level.dirty_markers.insert(offset, marker);

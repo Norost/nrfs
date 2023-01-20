@@ -296,10 +296,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	) -> Result<(), Error<D>> {
 		trace!("move_object {} -> {}", from, to);
 		// Steps:
-		// 1. Move 'to' object to pseudo ID.
-		// 2. Destroy object at pseudo ID.
-		// 3. Move 'from' object to 'to' ID.
-		// 4. Clear 'from' in object list.
+		// 1. Shrink 'to' object to zero size.
+		//    Tree::shrink will move all entries to a pseudo-object.
+		// 2. Move 'from' object to 'to' ID.
+		// 3. Clear 'from' in object list.
 
 		if from == to {
 			return Ok(()); // Don't even bother.
@@ -312,33 +312,35 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 			for level in obj.data.data.iter() {
 				for slot in level.slots.values() {
-					let Slot::Present(Present { refcount: RefCount::NoRef { lru_index }, .. }) = slot
-						else { continue };
-					let key = data.lru.lru.get_mut(*lru_index).expect("not in lru");
-					*key = Key::new(0, to, key.depth(), key.offset());
+					let f = |key: Key| Key::new(0, to, key.depth(), key.offset());
+					match slot {
+						Slot::Present(Present { refcount: RefCount::Ref { .. }, .. }) => {}
+						Slot::Present(Present {
+							refcount: RefCount::NoRef { lru_index }, ..
+						}) => {
+							let key = data.lru.lru.get_mut(*lru_index).expect("not in lru");
+							*key = f(*key)
+						}
+						Slot::Busy(busy) => {
+							let mut busy = busy.borrow_mut();
+							busy.key = f(busy.key);
+						}
+					}
 				}
 			}
 
 			data.objects.insert(to, Slot::Present(obj));
 		};
 
-		// FIXME tasks may still be using the old IDs.
+		// 1. Shrink 'to' object to zero size.
+		//    Tree::shrink will move all entries to a pseudo-object.
+		Tree::new(self, bg, to).resize(0).await?;
 
-		// 1. Move 'to' object to pseudo ID.
-		let _ = self.fetch_object(bg, to).await?;
-		let pseudo_id = self.data.borrow_mut().new_pseudo_id();
-		transfer(to, pseudo_id);
-
-		// 2. Destroy object at pseudo ID.
-		Tree::new(self, bg, pseudo_id)
-			.write_zeros(0, u64::MAX)
-			.await?;
-
-		// 3. Move 'from' object to 'to' ID.
+		// 2. Move 'from' object to 'to' ID.
 		let _ = self.fetch_object(bg, from).await?;
 		transfer(from, to);
 
-		// 4. Clear 'from' in object list.
+		// 3. Clear 'from' in object list.
 		let offset = from << RECORD_SIZE_P2;
 		Tree::new(self, bg, OBJECT_LIST_ID)
 			.write_zeros(offset, 1 << RECORD_SIZE_P2)

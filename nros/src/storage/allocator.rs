@@ -43,6 +43,8 @@ pub(super) struct Allocator {
 	debug_alloc_traces: rustc_hash::FxHashMap<u64, std::backtrace::Backtrace>,
 	#[cfg(feature = "debug-trace-alloc")]
 	debug_dealloc_traces: rustc_hash::FxHashMap<u64, std::backtrace::Backtrace>,
+	#[cfg(feature = "debug-trace-alloc")]
+	debug_disable: bool,
 }
 
 /// Statistics for this session.
@@ -73,6 +75,10 @@ impl Default for Allocator {
 			debug_alloc_traces: Default::default(),
 			#[cfg(feature = "debug-trace-alloc")]
 			debug_dealloc_traces: Default::default(),
+			// Whether to skip debug_alloc traces.
+			// Necessary for Allocator::load et al.
+			#[cfg(feature = "debug-trace-alloc")]
+			debug_disable: true,
 		}
 	}
 }
@@ -95,6 +101,7 @@ impl Allocator {
 			stack.push(record);
 
 			// Get record data
+			dbg!(&record);
 			let data = store.read(&record).await?;
 			let lba = u64::from(record.lba);
 			let size = u64::try_from(data.len()).unwrap();
@@ -146,15 +153,18 @@ impl Allocator {
 		trace!("==>  {:?}", &alloc_map);
 
 		Ok(Self {
+			#[cfg(feature = "debug-trace-alloc")]
+			debug_alloc_traces: Default::default(),
+			#[cfg(feature = "debug-trace-alloc")]
+			debug_dealloc_traces: Default::default(),
+			#[cfg(feature = "debug-trace-alloc")]
+			debug_disable: !stack.is_empty(),
+
 			alloc_map,
 			free_map: Default::default(),
 			dirty_map: Default::default(),
 			stack,
 			statistics: Default::default(),
-			#[cfg(feature = "debug-trace-alloc")]
-			debug_alloc_traces: Default::default(),
-			#[cfg(feature = "debug-trace-alloc")]
-			debug_dealloc_traces: Default::default(),
 		})
 	}
 
@@ -172,13 +182,14 @@ impl Allocator {
 				self.statistics.allocated_blocks += blocks;
 				#[cfg(feature = "debug-trace-alloc")]
 				{
+					dbg!(r.start);
 					for i in r.clone() {
 						self.debug_dealloc_traces.remove(&i);
 					}
 					let r = self
 						.debug_alloc_traces
 						.insert(r.start, std::backtrace::Backtrace::capture());
-					assert!(r.is_none(), "double alloc");
+					assert!(r.is_none(), "double alloc\n{:#?}", r);
 				}
 				trace!("--> {}", r.start);
 				return Some(r.start);
@@ -228,7 +239,7 @@ impl Allocator {
 	#[cfg(debug_assertions)]
 	pub fn assert_alloc(&self, start: u64, blocks: u64) {
 		#[cfg(feature = "debug-trace-alloc")]
-		{
+		if !self.debug_disable {
 			if let Some(trace) = self.debug_dealloc_traces.get(&start) {
 				panic!("use-after-free. Freed at\n{}", trace);
 			}
@@ -279,6 +290,8 @@ impl Allocator {
 			let lba = u64::from(record.lba);
 			let blocks = store.calc_block_count(record.length.into());
 			alloc_map.remove(lba..lba + u64::try_from(blocks).unwrap());
+			#[cfg(feature = "debug-trace-alloc")]
+			self.debug_alloc_traces.remove(&lba);
 		}
 
 		let mut iter = alloc_map.iter().peekable();

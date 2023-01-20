@@ -134,7 +134,14 @@ impl Test {
 							if l > 0 {
 								let map = self.contents.get(&id).unwrap();
 								for (i, c) in (offt..offt + u64::try_from(l).unwrap()).zip(&*buf) {
-									assert_eq!(map.contains(&i), *c == 1);
+									let expect = u8::from(map.contains(&i));
+									assert!(
+										expect == *c,
+										"expected {}, got {} (offset: {})",
+										expect,
+										*c,
+										i
+									);
 								}
 							}
 						}
