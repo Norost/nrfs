@@ -544,13 +544,8 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					.dirty_markers
 					.get_mut(&0);
 				if let Some(marker) = marker {
-					marker.children.clear();
-					if !marker.is_dirty {
-						marker.is_dirty = true;
-						cur_obj
-							.data
-							.unmark_dirty(new_depth, 0, self.max_record_size());
-					}
+					marker.children.remove(&0);
+					debug_assert!(marker.is_dirty, "modified parent not dirty");
 				}
 			}
 

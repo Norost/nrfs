@@ -944,3 +944,17 @@ fn unref_non_zero_pseudo_object() {
 	)
 	.run()
 }
+
+#[test]
+fn shrink_clear_too_many_children() {
+	Test::new(
+		1 << 16,
+		1 << 10,
+		[
+			Create { size: 1 << 12 },
+			Resize { idx: 0, size: 1 << 11 },
+			Resize { idx: 0, size: 1 },
+		],
+	)
+	.run()
+}
