@@ -975,3 +975,19 @@ fn slot_present_moved() {
 	)
 	.run()
 }
+
+/// unmount() didn't poll the background runner it created.
+#[test]
+fn unmount_no_background_poll() {
+	Test::new(
+		1 << 16,
+		3862,
+		[
+			Create { size: 18377782021482283007 },
+			Write { idx: 4292159555, offset: 10809483180534595583, amount: 33153 },
+			Resize { idx: 1392508927, size: 9337654175918632573 },
+			Remount,
+		],
+	)
+	.run()
+}

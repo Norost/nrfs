@@ -25,20 +25,24 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 			let data = self.data.borrow_mut();
 			let (objects, mut lru) = RefMut::map_split(data, |d| (&mut d.objects, &mut d.lru));
-			let obj = RefMut::filter_map(objects, |objects| match objects.get_mut(&id)? {
-				Slot::Present(obj) => {
+			let obj = RefMut::filter_map(objects, |objects| match objects.get_mut(&id) {
+				Some(Slot::Present(obj)) => {
 					if busy.is_some() {
 						lru.object_decrease_refcount(id, &mut obj.refcount, 1);
 					}
 					Some(obj)
 				}
-				Slot::Busy(obj) => {
+				Some(Slot::Busy(obj)) => {
 					let mut e = obj.borrow_mut();
 					e.wakers.push(cx.waker().clone());
 					if busy.is_none() {
 						e.refcount += 1;
 						busy = Some(obj.clone());
 					}
+					None
+				}
+				None => {
+					debug_assert!(busy.is_none(), "object removed while waiting");
 					None
 				}
 			});

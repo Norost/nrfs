@@ -6,7 +6,7 @@ use {
 		pin::Pin,
 		task::{Poll, Waker},
 	},
-	futures_util::{stream::FuturesUnordered, Stream, TryStreamExt},
+	futures_util::{stream::FuturesUnordered, FutureExt, Stream, TryStreamExt},
 };
 
 /// Background task runner.
@@ -94,6 +94,19 @@ impl<Fut: Future<Output = Result<(), E>>, E> Background<Fut> {
 			}
 		})
 		.await
+	}
+
+	/// Run the given task while polling background tasks.
+	pub async fn run<F, R>(&self, f: F) -> Result<R, E>
+	where
+		F: Future<Output = Result<R, E>>,
+	{
+		let mut f = core::pin::pin!(f.fuse());
+		let mut bg = core::pin::pin!(self.process_background().fuse());
+		futures_util::select_biased! {
+			r = f => r,
+			r = bg => r.map(|r| r),
+		}
 	}
 }
 

@@ -493,6 +493,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 			let fut = if key.id() == OBJECT_LIST_ID {
 				// Just copy
+				trace!("--> object list");
 				self.store.set_object_list(root);
 				data.objects.remove(&key.id());
 				None
@@ -513,38 +514,41 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				Some(async move {
 					trace!("evict_entry::object {:?}", key.id());
 
-					let bg = Default::default(); // TODO get rid of this sillyness
-					Tree::new(self, &bg, OBJECT_LIST_ID)
-						.write(offset, root.as_ref())
-						.await?;
+					let bg = Background::default(); // TODO get rid of this sillyness
+					bg.run(async {
+						Tree::new(self, &bg, OBJECT_LIST_ID)
+							.write(offset, root.as_ref())
+							.await?;
 
-					let mut busy_ref = busy.borrow_mut();
-					debug_assert_eq!(
-						busy_ref.key.id(),
-						key.id(),
-						"id of object changed while evicting"
-					);
-
-					let mut data = self.data.borrow_mut();
-					let hash_map::Entry::Occupied(mut slot) = data.objects.entry(key.id())
-						else { unreachable!("no object") };
-
-					if busy_ref.refcount > 0 {
-						debug_assert!(
-							!busy_ref.wakers.is_empty(),
-							"non-zero refcount with no wakers"
+						let mut busy_ref = busy.borrow_mut();
+						debug_assert_eq!(
+							busy_ref.key.id(),
+							key.id(),
+							"id of object changed while evicting"
 						);
-						busy_ref.wakers.drain(..).for_each(|w| w.wake());
-						drop(busy_ref);
-						obj.refcount = RefCount::Ref { busy };
-						slot.insert(Slot::Present(obj));
-					} else {
-						debug_assert!(busy_ref.wakers.is_empty(), "zero refcount with wakers");
-						drop(busy_ref);
-						slot.remove();
-					}
 
-					drop(data);
+						let mut data = self.data.borrow_mut();
+						let hash_map::Entry::Occupied(mut slot) = data.objects.entry(key.id())
+							else { unreachable!("no object") };
+
+						if busy_ref.refcount > 0 {
+							debug_assert!(
+								!busy_ref.wakers.is_empty(),
+								"non-zero refcount with no wakers"
+							);
+							busy_ref.wakers.drain(..).for_each(|w| w.wake());
+							drop(busy_ref);
+							obj.refcount = RefCount::Ref { busy };
+							slot.insert(Slot::Present(obj));
+						} else {
+							debug_assert!(busy_ref.wakers.is_empty(), "zero refcount with wakers");
+							drop(busy_ref);
+							slot.remove();
+						}
+
+						Ok(())
+					})
+					.await?;
 					bg.drop().await
 				})
 			} else {
@@ -601,10 +605,13 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					}
 					let key = busy.borrow_mut().key;
 
-					let bg = Default::default(); // TODO get rid of this sillyness
-					Tree::new(self, &bg, key.id())
-						.update_record(key.depth(), key.offset(), record)
-						.await?;
+					let bg = Background::default(); // TODO get rid of this sillyness
+					bg.run(Tree::new(self, &bg, key.id()).update_record(
+						key.depth(),
+						key.offset(),
+						record,
+					))
+					.await?;
 
 					{
 						trace!("{:?} ~~> {:?}", key, busy.borrow_mut().key);
@@ -861,8 +868,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// The cache is flushed before returning the underlying [`Store`].
 	pub async fn unmount(self) -> Result<Store<D, R>, Error<D>> {
 		trace!("unmount");
-		let bg = Default::default();
-		self.finish_transaction(&bg).await?;
+		let bg = Background::default();
+		bg.run(self.finish_transaction(&bg)).await?;
 		bg.drop().await?;
 		Ok(self.store)
 	}
