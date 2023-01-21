@@ -899,3 +899,18 @@ fn move_object_fix_lru_object() {
 	)
 	.run()
 }
+
+#[test]
+fn flush_all_object_roots_background_barrier() {
+	Test::new(
+		1 << 16,
+		1024,
+		[
+			Create { size: 62 },
+			Create { size: 11469823825814749087 },
+			Resize { idx: 1, size: 6989585522167382016 },
+			Remount,
+		],
+	)
+	.run()
+}

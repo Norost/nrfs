@@ -798,6 +798,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			data = self.data.borrow_mut();
 		}
 
+		drop(data);
+		bg.try_run_all().await?;
+		data = self.data.borrow_mut();
+
 		// Now flush the object list.
 		for depth in 0..16 {
 			let Some(tree) = data.objects.get_mut(&OBJECT_LIST_ID) else { continue };
