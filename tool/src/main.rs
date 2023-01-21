@@ -7,7 +7,6 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use {
 	clap::Parser,
 	core::{future::Future, pin::Pin},
-	futures_util::FutureExt,
 	nrfs::{dev::FileDev, dir::ItemRef, BlockSize, Nrfs},
 	std::{
 		fs::{self, File, OpenOptions},
@@ -125,23 +124,18 @@ async fn make(args: Make) {
 
 	let bg = nrfs::Background::default();
 
-	{
-		let fut = async {
-			if let Some(d) = &args.directory {
-				let root = nrfs.root_dir(&bg).await.unwrap();
-				add_files(root, d, &args, extensions).await;
-			}
-			nrfs.finish_transaction(&bg).await.unwrap();
-		};
-		let mut fut = core::pin::pin!(fut.fuse());
-		let mut bg_fut = core::pin::pin!(bg.process_background().fuse());
-		futures_util::select_biased! {
-			r = fut => r,
-			r = bg_fut => r.unwrap(),
-		};
-	}
+	bg.run(async {
+		if let Some(d) = &args.directory {
+			let root = nrfs.root_dir(&bg).await?;
+			add_files(root, d, &args, extensions).await;
+		}
+		nrfs.finish_transaction(&bg).await
+	})
+	.await
+	.unwrap();
 
 	bg.drop().await.unwrap();
+	dbg!(nrfs.statistics());
 	nrfs.unmount().await.unwrap();
 
 	async fn add_files(
@@ -222,19 +216,14 @@ async fn dump(args: Dump) {
 
 	let bg = nrfs::Background::default();
 
-	{
-		let fut = async {
-			let root = nrfs.root_dir(&bg).await.unwrap();
-			println!("block size: 2**{}", block_size_p2[0]);
-			list_files(root, 0).await;
-		};
-		let mut fut = core::pin::pin!(fut.fuse());
-		let mut bg_fut = core::pin::pin!(bg.process_background().fuse());
-		futures_util::select_biased! {
-			r = fut => r,
-			r = bg_fut => r.unwrap(),
-		};
-	}
+	bg.run(async {
+		let root = nrfs.root_dir(&bg).await?;
+		println!("block size: 2**{}", block_size_p2[0]);
+		list_files(root, 0).await;
+		Ok::<_, nrfs::Error<_>>(())
+	})
+	.await
+	.unwrap();
 
 	bg.drop().await.unwrap();
 

@@ -11,7 +11,6 @@ use {
 		future::Future,
 		task::{Context, Poll},
 	},
-	futures_util::FutureExt,
 	nros::dev::MemDev,
 };
 
@@ -29,15 +28,7 @@ fn run2<'a, 'b, F>(bg: &'b Background<'a, MemDev>, f: F)
 where
 	F: Future<Output = ()>,
 {
-	let fut = async {
-		let mut f = core::pin::pin!(f.fuse());
-		let mut bg = core::pin::pin!(bg.process_background().fuse());
-		futures_util::select_biased! {
-			r = f => r,
-			r = bg => r.unwrap(),
-		}
-	};
-	block_on(fut)
+	block_on(bg.run(async { Ok(f.await) })).unwrap()
 }
 
 fn new() -> Nrfs<MemDev> {

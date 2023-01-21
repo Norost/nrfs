@@ -551,7 +551,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 							slot.remove();
 						}
 
-						Ok(())
+						Ok::<_, Error<D>>(())
 					})
 					.await?;
 					bg.drop().await

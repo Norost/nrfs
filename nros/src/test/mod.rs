@@ -54,7 +54,7 @@ where
 	D: Dev,
 	D::Error: core::fmt::Debug,
 {
-	block_on(bg.run(async { Ok(f.await) })).unwrap();
+	block_on(bg.run(async { Ok::<_, Error<D>>(f.await) })).unwrap();
 }
 
 #[test]

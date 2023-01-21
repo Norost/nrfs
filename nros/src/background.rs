@@ -97,15 +97,16 @@ impl<Fut: Future<Output = Result<(), E>>, E> Background<Fut> {
 	}
 
 	/// Run the given task while polling background tasks.
-	pub async fn run<F, R>(&self, f: F) -> Result<R, E>
+	pub async fn run<F, R, EE>(&self, f: F) -> Result<R, EE>
 	where
-		F: Future<Output = Result<R, E>>,
+		F: Future<Output = Result<R, EE>>,
+		EE: From<E>,
 	{
 		let mut f = core::pin::pin!(f.fuse());
 		let mut bg = core::pin::pin!(self.process_background().fuse());
 		futures_util::select_biased! {
+			r = bg => r.map(|r| r).map_err(EE::from),
 			r = f => r,
-			r = bg => r.map(|r| r),
 		}
 	}
 }
