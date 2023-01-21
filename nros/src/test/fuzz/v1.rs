@@ -1023,3 +1023,20 @@ fn grow_zero_sized() {
 	)
 	.run()
 }
+
+#[test]
+fn flush_all_skip_pseudo_id() {
+	Test::new(
+		1 << 16,
+		1 << 20,
+		[
+			Create { size: 0 },
+			Create { size: 1 << 63 },
+			Resize { idx: 1, size: 1 << 60 },
+			Write { idx: 1, offset: 0, amount: 1 },
+			Remount,
+			Read { idx: 1, offset: 0, amount: 1 },
+		],
+	)
+	.run()
+}

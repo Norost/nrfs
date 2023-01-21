@@ -122,8 +122,11 @@ impl<Fut> Default for Background<Fut> {
 
 impl<Fut> fmt::Debug for Background<Fut> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let bg = self.inner.borrow_mut();
 		f.debug_struct(stringify!(Background))
-			.finish_non_exhaustive()
+			.field("tasks", &format_args!("[ ... ] (len: {})", bg.tasks.len()))
+			.field("waker", &bg.waker)
+			.finish()
 	}
 }
 

@@ -777,6 +777,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			.copied()
 			.filter(|&id| id != OBJECT_LIST_ID)
 			.collect::<Vec<_>>();
+
 		for depth in 0..16 {
 			for &id in ids.iter() {
 				let Some(tree) = data.objects.get_mut(&id) else { continue };
@@ -806,13 +807,16 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			.iter()
 			.filter(|&(&id, obj)| {
 				let Slot::Present(obj) = obj else { unreachable!() };
-				id != OBJECT_LIST_ID && obj.data.is_dirty()
+				id & ID_PSEUDO == 0 && obj.data.is_dirty()
 			})
 			.map(|(id, _)| *id)
 			.collect::<Vec<_>>();
+
 		ids.sort_unstable();
+
 		for id in ids {
-			let Some(Slot::Present(obj)) = data.objects.get(&id) else { continue };
+			let Some(Slot::Present(obj)) = data.objects.get(&id) else { todo!() };
+			debug_assert!(!is_pseudo_id(id), "can't flush pseudo ID");
 			let mut root = obj.data.root;
 			root._reserved = 0;
 			drop(data);
@@ -858,7 +862,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// Tadha!
 		// Do a sanity check just in case.
 		if cfg!(debug_assertions) {
-			for tree in data.objects.values() {
+			for (_id, tree) in data.objects.iter() {
 				let Slot::Present(tree) = tree else { unreachable!() };
 				for level in tree.data.data.iter() {
 					debug_assert!(level.dirty_markers.is_empty(), "flush_all didn't flush all");
