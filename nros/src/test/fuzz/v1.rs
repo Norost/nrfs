@@ -929,3 +929,18 @@ fn object_root_evict_fetch_race() {
 	)
 	.run()
 }
+
+#[test]
+fn unref_non_zero_pseudo_object() {
+	Test::new(
+		1 << 16,
+		1 << 20,
+		[
+			Create { size: 18446744073709486176 },
+			Write { idx: 2667595591, offset: 17892238369727643649, amount: 20220 },
+			Remount,
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}

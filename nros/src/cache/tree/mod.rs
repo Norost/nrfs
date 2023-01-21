@@ -559,7 +559,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// If the pseudo-object has no entries, it's already zeroed and there is nothing
 			// left to do.
 			let refcount = pseudo_obj.data.iter().fold(0, |x, lvl| x + lvl.slots.len());
-			if let Some(count) = NonZeroUsize::new(refcount) {
+			let refcount = if let Some(count) = NonZeroUsize::new(refcount) {
 				// Adjust refcount of cur_obj.
 				if data
 					.lru
@@ -588,21 +588,20 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					}
 				}
 
-				let refcount = RefCount::Ref { count };
-				let present = Present { data: pseudo_obj, refcount };
-				data.objects.insert(pseudo_id, Slot::Present(present));
-
-				// Zero out pseudo-object.
-				drop(data_ref);
-				Tree::new(self.cache, self.background, pseudo_id)
-					.write_zeros(0, u64::MAX)
-					.await?;
+				RefCount::Ref { count }
 			} else {
-				assert_eq!(
-					pseudo_obj.root.length, 0,
-					"todo: zero out pseudo-obj with non-zero root and no slots"
-				);
-			}
+				RefCount::pseudo_noref()
+			};
+
+			// Insert pseudo-object.
+			let present = Present { data: pseudo_obj, refcount };
+			data.objects.insert(pseudo_id, Slot::Present(present));
+
+			// Zero out pseudo-object.
+			drop(data_ref);
+			Tree::new(self.cache, self.background, pseudo_id)
+				.write_zeros(0, u64::MAX)
+				.await?;
 		} else {
 			// Just change the length.
 			let mut data = self.cache.data.borrow_mut();

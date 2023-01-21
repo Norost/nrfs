@@ -58,3 +58,10 @@ pub(super) enum RefCount {
 		lru_index: lru::Idx,
 	},
 }
+
+impl RefCount {
+	/// Generate an invalid refcount for pseudo-objects.
+	pub fn pseudo_noref() -> Self {
+		Self::NoRef { lru_index: super::lru::IDX_NONE }
+	}
+}

@@ -7,7 +7,7 @@ pub type Gen = u8;
 //pub type Gen = ();
 pub type Idx = arena::Handle<Gen>;
 
-const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
+pub const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
 //const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
 
 /// Estimated fixed cost for every cached entry.
@@ -83,7 +83,9 @@ impl Lru {
 		match refcount {
 			RefCount::Ref { count } => *count = count.checked_add(1).unwrap(),
 			RefCount::NoRef { lru_index } => {
-				self.remove(*lru_index, len);
+				if *lru_index != IDX_NONE {
+					self.remove(*lru_index, len);
+				}
 				*refcount = RefCount::Ref { count: NonZeroUsize::new(1).unwrap() };
 			}
 		}
