@@ -1007,3 +1007,19 @@ fn move_object_busy_to() {
 	)
 	.run()
 }
+
+/// Growing zero-sized trees simply involves changing the length.
+#[test]
+fn grow_zero_sized() {
+	Test::new(
+		1 << 16,
+		1 << 20,
+		[
+			Create { size: 1 },
+			Resize { idx: 0, size: 0 },
+			Resize { idx: 0, size: 16 },
+			Read { idx: 0, offset: 0, amount: 16 },
+		],
+	)
+	.run()
+}

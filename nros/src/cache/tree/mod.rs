@@ -653,7 +653,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 		// Check if the depth changed.
 		// If so we need to move the current root.
-		if cur_depth < new_depth {
+		if cur_depth < new_depth && cur_depth > 0 {
 			// 2. Propagate dirty counters up.
 			// This simply involves inserting counters at 0 offsets.
 			// Since we're going to insert a dirty entry, do it unconditionally.
@@ -722,7 +722,6 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// i.e. there are multiple [`Tree`] instances referring to the same object.
 	/// Hence the object cannot safely be destroyed.
 	pub async fn replace_with(&self, other: Tree<'a, 'b, D, R>) -> Result<(), Error<D>> {
-		// FIXME check locks
 		self.cache
 			.move_object(self.background, other.id, self.id)
 			.await
