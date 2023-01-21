@@ -914,3 +914,18 @@ fn flush_all_object_roots_background_barrier() {
 	)
 	.run()
 }
+
+#[test]
+fn object_root_evict_fetch_race() {
+	Test::new(
+		1 << 16,
+		1183,
+		[
+			Create { size: 0 },
+			Create { size: 2951456134979886889 },
+			Move { from_idx: 1, to_idx: 0 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}

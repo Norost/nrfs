@@ -50,7 +50,7 @@ impl Lru {
 	/// # Panics
 	///
 	/// If the reference count is [`RefCount::NoRef`].
-	fn decrease_refcount(&mut self, refcount: &mut RefCount, key: Key, len: usize) {
+	fn decrease_refcount(&mut self, refcount: &mut RefCount, key: Key, len: usize, amount: usize) {
 		debug_assert!(
 			key.flags() & Key::FLAG_OBJECT == 0
 				|| key.id() == OBJECT_LIST_ID
@@ -59,7 +59,11 @@ impl Lru {
 			key.id(),
 		);
 		let RefCount::Ref { count } = refcount else { panic!("NoRef") };
-		match NonZeroUsize::new(count.get() - 1) {
+		let new_count = count
+			.get()
+			.checked_sub(amount)
+			.expect("amount exceeds count");
+		match NonZeroUsize::new(new_count) {
 			Some(c) => *count = c,
 			None => {
 				let lru_index = self.add(key, len);
@@ -87,7 +91,7 @@ impl Lru {
 
 	/// Decrease reference count for an entry.
 	pub fn entry_decrease_refcount(&mut self, key: Key, refcount: &mut RefCount, len: usize) {
-		self.decrease_refcount(refcount, key, CACHE_ENTRY_FIXED_COST + len);
+		self.decrease_refcount(refcount, key, CACHE_ENTRY_FIXED_COST + len, 1);
 	}
 
 	/// Decrease reference count for an object.
@@ -97,12 +101,22 @@ impl Lru {
 	/// - for pseudo-objects: `true` is returned to indicate the object should be destroyed.
 	///
 	/// In all other cases `false` is returned.
-	pub fn object_decrease_refcount(&mut self, id: u64, refcount: &mut RefCount) -> bool {
+	pub fn object_decrease_refcount(
+		&mut self,
+		id: u64,
+		refcount: &mut RefCount,
+		amount: usize,
+	) -> bool {
 		// Dereference the corresponding object.
 		let flags = Key::FLAG_OBJECT;
 		if id == OBJECT_LIST_ID || id & ID_PSEUDO == 0 {
 			// Regular object.
-			self.decrease_refcount(refcount, Key::new(flags, id, 0, 0), CACHE_OBJECT_FIXED_COST);
+			self.decrease_refcount(
+				refcount,
+				Key::new(flags, id, 0, 0),
+				CACHE_OBJECT_FIXED_COST,
+				amount,
+			);
 			false
 		} else {
 			// Pseudo-object.

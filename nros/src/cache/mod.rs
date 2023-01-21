@@ -1,6 +1,7 @@
 mod entry;
 mod key;
 mod lru;
+mod object;
 mod slot;
 mod tree;
 
@@ -13,11 +14,10 @@ use {
 	},
 	core::{
 		cell::{RefCell, RefMut},
-		future::{self, Future},
+		future::Future,
 		mem,
-		num::{NonZeroU64, NonZeroUsize},
+		num::NonZeroU64,
 		pin::Pin,
-		task::Poll,
 	},
 	entry::EntryRef,
 	futures_util::{stream::FuturesUnordered, TryStreamExt},
@@ -242,7 +242,14 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			*data.lru.get_mut(lru_index).expect("no lru entry") =
 				Key::new(Key::FLAG_OBJECT, to, 0, 0);
 		}
-		data.objects.insert(to, Slot::Present(obj));
+		let prev_obj = data.objects.insert(to, Slot::Present(obj));
+
+		if let Some(prev_obj) = prev_obj {
+			let Slot::Present(p) = prev_obj else { todo!() };
+			//debug_assert!(!p.data.is_dirty());
+			let RefCount::NoRef { lru_index } = p.refcount else { todo!() };
+			data.lru.object_remove(lru_index);
+		}
 
 		drop(data_ref);
 
@@ -301,72 +308,30 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	async fn fetch_object<'a, 'b>(
 		&'a self,
 		bg: &'b Background<'a, D>,
-		id: u64,
+		mut id: u64,
 	) -> Result<(RefMut<'a, Present<TreeData<R>>>, RefMut<'a, Lru>), Error<D>> {
 		trace!("fetch_object {:#x}", id);
 		// Steps:
-		// 1. Check the state of the object.
-		// 1a. If present, just return.
-		// 1b. If busy, wait, then check 1a and 1b.
-		// 1c. If not present, fetch the root.
+		// 1. Try to get the object directly or by waiting for another tasks.
+		// 2. Otherwise, fetch it ourselves.
 
-		let key = Key::new(Key::FLAG_OBJECT, id, 0, 0);
-
-		// Try to get the object directly, i.e. without fetching it ourselves.
-		let mut is_referenced = false;
-		let obj = future::poll_fn(|cx| {
-			let mut must_fetch = true;
-			let (objects, mut lru) =
-				RefMut::map_split(self.data.borrow_mut(), |d| (&mut d.objects, &mut d.lru));
-			let ret = RefMut::filter_map(objects, |objects| {
-				// 1. Check the state of the object.
-				match objects.entry(id) {
-					// 1c. If not present, fetch the root.
-					hash_map::Entry::Vacant(slot) => {
-						debug_assert!(!is_pseudo_id(id));
-						// We need to fetch it ourselves.
-						slot.insert(Slot::Busy(Busy::new(key)));
-						must_fetch = true;
-						None
-					}
-					hash_map::Entry::Occupied(slot) => match slot.into_mut() {
-						// 1a. If present, just return.
-						Slot::Present(obj) => {
-							if is_referenced {
-								debug_assert!(!is_pseudo_id(id));
-								lru.object_decrease_refcount(id, &mut obj.refcount);
-							}
-							Some(obj)
-						}
-						// 1b. If busy, wait, then check 1a and 1b.
-						Slot::Busy(busy) => {
-							debug_assert!(!is_pseudo_id(id));
-							let mut busy = busy.borrow_mut();
-							if !is_referenced {
-								busy.refcount =
-									NonZeroUsize::new(busy.refcount.map_or(0, |x| x.get()) + 1);
-								is_referenced = true;
-							}
-							busy.wakers.push(cx.waker().clone());
-							None
-						}
-					},
-				}
-			});
-			match ret {
-				Ok(obj) => Poll::Ready(Some((obj, lru))),
-				Err(_) if must_fetch => Poll::Ready(None),
-				Err(_) => Poll::Pending,
-			}
-		})
-		.await;
-
-		if let Some(obj) = obj {
+		// 1. Try to get the object directly or by waiting for another tasks.
+		if let Some(obj) = self.wait_object(id).await {
 			return Ok(obj);
 		}
 
-		// 1c. If not present, fetch the root.
-		debug_assert!(!is_pseudo_id(id));
+		// 2. Otherwise, fetch it ourselves.
+		debug_assert!(
+			!is_pseudo_id(id),
+			"can't fetch pseudo-object from object list"
+		);
+
+		// Insert a new object slot.
+		let mut data = self.data.borrow_mut();
+		let busy = Busy::new(Key::new(Key::FLAG_OBJECT, id, 0, 0));
+		let prev = data.objects.insert(id, Slot::Busy(busy.clone()));
+		debug_assert!(prev.is_none(), "object already present");
+		drop(data);
 
 		// Fetch the object root.
 		let mut root = Record::default();
@@ -379,19 +344,22 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			root = self.store.object_list();
 		}
 
-		// Insert the entry.
+		// Insert the object.
 		let obj = RefMut::map_split(self.data.borrow_mut(), |data| {
-			let slot = data.objects.get_mut(&id).expect("no object");
-			let Slot::Busy(busy) = slot else { unreachable!("not busy") };
 			let mut busy = busy.borrow_mut();
+			id = busy.key.id();
 			busy.wakers.drain(..).for_each(|w| w.wake());
 			let refcount = data.lru.object_add(id, busy.refcount);
 			drop(busy);
-			*slot = Slot::Present(Present {
+
+			let hash_map::Entry::Occupied(mut slot) = data.objects.entry(id)
+				else { unreachable!("not busy") };
+			*slot.get_mut() = Slot::Present(Present {
 				data: TreeData::new(root, self.max_record_size()),
 				refcount,
 			});
-			let Slot::Present(obj) = slot else { unreachable!() };
+
+			let Slot::Present(obj) = slot.into_mut() else { unreachable!() };
 			(obj, &mut data.lru)
 		});
 
@@ -514,36 +482,72 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		if key.test_flag(Key::FLAG_OBJECT) {
 			// Evict object
 
+			// Take root
 			let mut root = obj.data.root;
 			root._reserved = 0;
 
+			// Remove from LRU
+			let RefCount::NoRef { lru_index } = obj.refcount
+				else { unreachable!("not in lru") };
+			data.lru.object_remove(lru_index);
+
 			let fut = if key.id() == OBJECT_LIST_ID {
+				// Just copy
 				self.store.set_object_list(root);
+				data.objects.remove(&key.id());
 				None
-			} else {
+			} else if obj.data.is_dirty() {
+				// Save the root
 				debug_assert!(
 					key.id() & ID_PSEUDO == 0,
 					"pseudo object (id: {:#x}) should not be in the LRU",
 					key.id()
 				);
 
-				obj.data.is_dirty().then(|| {
-					let offset = key.id() << RECORD_SIZE_P2;
-					async move {
-						trace!("evict_entry::object {:?}", key.id());
-						let bg = Default::default(); // TODO get rid of this sillyness
-						Tree::new(self, &bg, OBJECT_LIST_ID)
-							.write(offset, root.as_ref())
-							.await?;
-						bg.drop().await
-					}
-				})
-			};
+				let busy = Busy::new(key);
+				let Some(Slot::Present(mut obj)) = data.objects.insert(key.id(), Slot::Busy(busy.clone()))
+					else { unreachable!("no object") };
 
-			let RefCount::NoRef { lru_index } = obj.refcount
-				else { unreachable!("not in lru") };
-			data.lru.object_remove(lru_index);
-			data.objects.remove(&key.id());
+				let offset = key.id() << RECORD_SIZE_P2;
+
+				Some(async move {
+					trace!("evict_entry::object {:?}", key.id());
+
+					let bg = Default::default(); // TODO get rid of this sillyness
+					Tree::new(self, &bg, OBJECT_LIST_ID)
+						.write(offset, root.as_ref())
+						.await?;
+
+					let mut busy = busy.borrow_mut();
+					debug_assert_eq!(
+						busy.key.id(),
+						key.id(),
+						"id of object changed while evicting"
+					);
+
+					let mut data = self.data.borrow_mut();
+					let hash_map::Entry::Occupied(mut slot) = data.objects.entry(key.id())
+						else { unreachable!("no object") };
+
+					if let Some(count) = busy.refcount {
+						debug_assert!(!busy.wakers.is_empty(), "non-zero refcount with no wakers");
+						busy.wakers.drain(..).for_each(|w| w.wake());
+						obj.refcount = RefCount::Ref { count };
+						slot.insert(Slot::Present(obj));
+					} else {
+						debug_assert!(busy.wakers.is_empty(), "zero refcount with wakers");
+						slot.remove();
+					}
+
+					drop((data, busy));
+					bg.drop().await
+				})
+			} else {
+				// Just remove
+				trace!("--> not dirty");
+				data.objects.remove(&key.id());
+				None
+			};
 
 			fut.map(box_fut)
 		} else {
@@ -574,7 +578,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				// Dereference the corresponding object.
 				if data
 					.lru
-					.object_decrease_refcount(key.id(), &mut obj.refcount)
+					.object_decrease_refcount(key.id(), &mut obj.refcount, 1)
 				{
 					data.objects.remove(&key.id());
 				}
@@ -629,9 +633,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						debug_assert!(busy.wakers.is_empty(), "refcount is zero with wakers");
 						drop(busy);
 						slot.remove();
-						do_remove = data
-							.lru
-							.object_decrease_refcount(key.id(), &mut obj.refcount);
+						do_remove =
+							data.lru
+								.object_decrease_refcount(key.id(), &mut obj.refcount, 1);
 					}
 
 					// Remove dirty marker

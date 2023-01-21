@@ -126,7 +126,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			match entry {
 				Ok(entry) => Poll::Ready(Some(EntryRef::new(self, key, entry, lru))),
 				Err(_) if busy.is_some() => Poll::Pending,
-				Err(_) if busy.is_some() => Poll::Pending,
 				Err(_) => Poll::Ready(None),
 			}
 		})

@@ -379,7 +379,10 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		let len = u64::from(cur_root.total_length);
 		let cur_depth = depth(self.max_record_size(), len);
 		let parent_depth = record_depth + 1;
-		assert!(parent_depth <= cur_depth);
+		assert!(parent_depth <= cur_depth, "depth out of range");
+
+		let max_offset = max_offset(self.max_record_size(), cur_depth - record_depth);
+		debug_assert!(u128::from(offset) < max_offset, "offset out of range");
 
 		if cur_depth == parent_depth {
 			assert_eq!(offset, 0, "root can only be at offset 0");
@@ -497,6 +500,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let new_root = Record {
 				references: cur_root.references,
 				total_length: new_len.into(),
+				_reserved: 1,
 				..new_root
 			};
 
@@ -514,11 +518,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 			// Transfer all entries with offset *inside* the range of the "new" object to pseudo
 			// object
-			let mut offt = if new_depth > 0 {
-				1u128 << self.cache.entries_per_parent_p2() * (new_depth - 1)
-			} else {
-				0
-			};
+			let mut offt = max_offset(self.max_record_size(), new_depth);
 			for d in 0..new_depth {
 				let cur_level = &mut cur_obj.data.data[usize::from(d)];
 				let pseudo_level = &mut pseudo_obj.data[usize::from(d)];
@@ -543,22 +543,31 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				let marker = cur_obj.data.data[usize::from(new_depth)]
 					.dirty_markers
 					.get_mut(&0);
-				if let Some(marker) = marker.filter(|m| !m.is_dirty) {
-					marker.is_dirty = true;
+				if let Some(marker) = marker {
 					marker.children.clear();
-					cur_obj
-						.data
-						.unmark_dirty(new_depth, 0, self.max_record_size());
+					if !marker.is_dirty {
+						marker.is_dirty = true;
+						cur_obj
+							.data
+							.unmark_dirty(new_depth, 0, self.max_record_size());
+					}
 				}
 			}
 
-			// Swap & insert pseudo-object.
 			mem::swap(&mut cur_obj.data, &mut pseudo_obj);
 
 			// If the pseudo-object has no entries, it's already zeroed and there is nothing
 			// left to do.
 			let refcount = pseudo_obj.data.iter().fold(0, |x, lvl| x + lvl.slots.len());
 			if let Some(count) = NonZeroUsize::new(refcount) {
+				// Adjust refcount of cur_obj.
+				if data
+					.lru
+					.object_decrease_refcount(self.id, &mut cur_obj.refcount, refcount)
+				{
+					unreachable!("pseudo object got shrunk?");
+				}
+
 				// Fix keys of LRU entries & any busy tasks.
 				for lvl in pseudo_obj.data.iter_mut() {
 					for slot in lvl.slots.values() {
@@ -588,6 +597,11 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				Tree::new(self.cache, self.background, pseudo_id)
 					.write_zeros(0, u64::MAX)
 					.await?;
+			} else {
+				assert_eq!(
+					pseudo_obj.root.length, 0,
+					"todo: zero out pseudo-obj with non-zero root and no slots"
+				);
 			}
 		} else {
 			// Just change the length.
@@ -595,6 +609,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let Some(Slot::Present(cur_obj)) = data.objects.get_mut(&self.id)
 				else { unreachable!("no object") };
 			cur_obj.data.root.total_length = new_len.into();
+			cur_obj.data.set_dirty(true);
 		}
 
 		// Zero out data written past the end.
@@ -830,6 +845,15 @@ pub(super) fn depth(max_record_size: MaxRecordSize, len: u64) -> u8 {
 			max_len_mask |= max_len_mask << max_record_size.to_raw() - RECORD_SIZE_P2;
 		}
 		depth + 1
+	}
+}
+
+/// Calculate upper offset limit for cached entries for given depth and record size.
+pub(super) fn max_offset(max_record_size: MaxRecordSize, depth: u8) -> u128 {
+	if depth == 0 {
+		0
+	} else {
+		1 << (max_record_size.to_raw() - RECORD_SIZE_P2) * (depth - 1)
 	}
 }
 
