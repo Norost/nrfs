@@ -1,13 +1,14 @@
 use {
-	super::{Key, RefCount, ID_PSEUDO, OBJECT_LIST_ID},
-	core::num::NonZeroUsize,
+	super::{Busy, Key, RefCount, ID_PSEUDO, OBJECT_LIST_ID},
+	alloc::rc::Rc,
+	core::cell::RefCell,
 };
 
 pub type Gen = u8;
 //pub type Gen = ();
 pub type Idx = arena::Handle<Gen>;
 
-pub const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
+const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
 //const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
 
 /// Estimated fixed cost for every cached entry.
@@ -38,9 +39,9 @@ impl Lru {
 		self.lru.insert(key)
 	}
 
-	fn remove(&mut self, index: Idx, len: usize) {
-		self.lru.remove(index);
+	fn remove(&mut self, index: Idx, len: usize) -> Key {
 		self.cache_size -= len;
+		self.lru.remove(index)
 	}
 
 	/// Decrease reference count.
@@ -58,17 +59,13 @@ impl Lru {
 			"pseudo-object don't belong in the LRU (id: {:#x})",
 			key.id(),
 		);
-		let RefCount::Ref { count } = refcount else { panic!("NoRef") };
-		let new_count = count
-			.get()
-			.checked_sub(amount)
-			.expect("amount exceeds count");
-		match NonZeroUsize::new(new_count) {
-			Some(c) => *count = c,
-			None => {
-				let lru_index = self.add(key, len);
-				*refcount = RefCount::NoRef { lru_index };
-			}
+		let RefCount::Ref { busy } = refcount else { panic!("NoRef") };
+		let mut busy_ref = busy.borrow_mut();
+		busy_ref.refcount -= amount;
+		if busy_ref.refcount == 0 {
+			drop(busy_ref);
+			let lru_index = self.add(key, len);
+			*refcount = RefCount::NoRef { lru_index };
 		}
 	}
 
@@ -81,12 +78,11 @@ impl Lru {
 	/// If the reference count overflows.
 	fn increase_refcount(&mut self, refcount: &mut RefCount, len: usize) {
 		match refcount {
-			RefCount::Ref { count } => *count = count.checked_add(1).unwrap(),
+			RefCount::Ref { busy } => busy.borrow_mut().refcount += 1,
 			RefCount::NoRef { lru_index } => {
-				if *lru_index != IDX_NONE {
-					self.remove(*lru_index, len);
-				}
-				*refcount = RefCount::Ref { count: NonZeroUsize::new(1).unwrap() };
+				let key = self.remove(*lru_index, len);
+				let busy = Busy::with_refcount(key, 1);
+				*refcount = RefCount::Ref { busy };
 			}
 		}
 	}
@@ -122,13 +118,10 @@ impl Lru {
 			false
 		} else {
 			// Pseudo-object.
-			let RefCount::Ref { count } = refcount else { panic!("dangling pseudo object") };
-			if let Some(c) = NonZeroUsize::new(count.get() - 1) {
-				*count = c;
-				false
-			} else {
-				true
-			}
+			let RefCount::Ref { busy } = refcount else { panic!("dangling pseudo object") };
+			let mut busy_ref = busy.borrow_mut();
+			busy_ref.refcount -= 1;
+			busy_ref.refcount == 0
 		}
 	}
 
@@ -137,35 +130,42 @@ impl Lru {
 		self.increase_refcount(refcount, CACHE_OBJECT_FIXED_COST)
 	}
 
-	/// Add an entry, depending on `refcount`.
-	pub fn entry_add(&mut self, key: Key, refcount: Option<NonZeroUsize>, len: usize) -> RefCount {
-		match refcount {
-			Some(count) => RefCount::Ref { count },
-			None => RefCount::NoRef { lru_index: self.add(key, len + CACHE_ENTRY_FIXED_COST) },
+	/// Add an entry with no references.
+	pub fn entry_add_noref(&mut self, key: Key, len: usize) -> RefCount {
+		RefCount::NoRef { lru_index: self.add(key, len + CACHE_ENTRY_FIXED_COST) }
+	}
+
+	/// Add an entry, depending on `busy.refcount`.
+	pub fn entry_add(&mut self, key: Key, busy: Rc<RefCell<Busy>>, len: usize) -> RefCount {
+		if busy.borrow_mut().refcount == 0 {
+			self.entry_add_noref(key, len)
+		} else {
+			RefCount::Ref { busy }
 		}
 	}
 
-	/// Add an object, depending on `refcount`.
-	pub fn object_add(&mut self, id: u64, refcount: Option<NonZeroUsize>) -> RefCount {
-		match refcount {
-			Some(count) => RefCount::Ref { count },
-			None => RefCount::NoRef {
+	/// Add an object, depending on `busy.refcount`.
+	pub fn object_add(&mut self, id: u64, busy: Rc<RefCell<Busy>>) -> RefCount {
+		if busy.borrow_mut().refcount == 0 {
+			RefCount::NoRef {
 				lru_index: self.add(
 					Key::new(Key::FLAG_OBJECT, id, 0, 0),
 					CACHE_OBJECT_FIXED_COST,
 				),
-			},
+			}
+		} else {
+			RefCount::Ref { busy }
 		}
 	}
 
 	/// Remove an entry.
 	pub fn entry_remove(&mut self, index: Idx, len: usize) {
-		self.remove(index, len + CACHE_ENTRY_FIXED_COST)
+		self.remove(index, len + CACHE_ENTRY_FIXED_COST);
 	}
 
 	/// Remove an object.
 	pub fn object_remove(&mut self, index: Idx) {
-		self.remove(index, CACHE_OBJECT_FIXED_COST)
+		self.remove(index, CACHE_OBJECT_FIXED_COST);
 	}
 
 	/// Get the amount of bytes cached.

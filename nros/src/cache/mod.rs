@@ -224,12 +224,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			for slot in level.slots.values() {
 				let f = |key: Key| Key::new(0, to, key.depth(), key.offset());
 				match slot {
-					Slot::Present(Present { refcount: RefCount::Ref { .. }, .. }) => {}
 					Slot::Present(Present { refcount: RefCount::NoRef { lru_index }, .. }) => {
 						let key = data.lru.get_mut(*lru_index).expect("not in lru");
 						*key = f(*key)
 					}
-					Slot::Busy(busy) => {
+					Slot::Present(Present { refcount: RefCount::Ref { busy }, .. })
+					| Slot::Busy(busy) => {
 						let mut busy = busy.borrow_mut();
 						busy.key = f(busy.key);
 					}
@@ -258,6 +258,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		Tree::new(self, bg, OBJECT_LIST_ID)
 			.write_zeros(offset, 1 << RECORD_SIZE_P2)
 			.await?;
+
 		self.data
 			.borrow_mut()
 			.used_objects_ids
@@ -346,11 +347,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		// Insert the object.
 		let obj = RefMut::map_split(self.data.borrow_mut(), |data| {
-			let mut busy = busy.borrow_mut();
-			id = busy.key.id();
-			busy.wakers.drain(..).for_each(|w| w.wake());
-			let refcount = data.lru.object_add(id, busy.refcount);
-			drop(busy);
+			let mut busy_ref = busy.borrow_mut();
+			id = busy_ref.key.id();
+			busy_ref.wakers.drain(..).for_each(|w| w.wake());
+			drop(busy_ref);
+			let refcount = data.lru.object_add(id, busy);
 
 			let hash_map::Entry::Occupied(mut slot) = data.objects.entry(id)
 				else { unreachable!("not busy") };
@@ -414,10 +415,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				.get_mut(&key.offset())
 				.expect("no entry");
 			let Slot::Busy(busy) = slot else { unreachable!("not busy") };
-			let mut busy = busy.borrow_mut();
-			busy.wakers.drain(..).for_each(|w| w.wake());
-			let refcount = data.lru.entry_add(key, busy.refcount, entry.len());
-			drop(busy);
+			busy.borrow_mut().wakers.drain(..).for_each(|w| w.wake());
+			let refcount = data.lru.entry_add(key, busy.clone(), entry.len());
+
 			*slot = Slot::Present(Present { data: entry, refcount });
 			let Slot::Present(e) = slot else { unreachable!() };
 			(e, &mut data.lru)
@@ -518,9 +518,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						.write(offset, root.as_ref())
 						.await?;
 
-					let mut busy = busy.borrow_mut();
+					let mut busy_ref = busy.borrow_mut();
 					debug_assert_eq!(
-						busy.key.id(),
+						busy_ref.key.id(),
 						key.id(),
 						"id of object changed while evicting"
 					);
@@ -529,17 +529,22 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					let hash_map::Entry::Occupied(mut slot) = data.objects.entry(key.id())
 						else { unreachable!("no object") };
 
-					if let Some(count) = busy.refcount {
-						debug_assert!(!busy.wakers.is_empty(), "non-zero refcount with no wakers");
-						busy.wakers.drain(..).for_each(|w| w.wake());
-						obj.refcount = RefCount::Ref { count };
+					if busy_ref.refcount > 0 {
+						debug_assert!(
+							!busy_ref.wakers.is_empty(),
+							"non-zero refcount with no wakers"
+						);
+						busy_ref.wakers.drain(..).for_each(|w| w.wake());
+						drop(busy_ref);
+						obj.refcount = RefCount::Ref { busy };
 						slot.insert(Slot::Present(obj));
 					} else {
-						debug_assert!(busy.wakers.is_empty(), "zero refcount with wakers");
+						debug_assert!(busy_ref.wakers.is_empty(), "zero refcount with wakers");
+						drop(busy_ref);
 						slot.remove();
 					}
 
-					drop((data, busy));
+					drop(data);
 					bg.drop().await
 				})
 			} else {
@@ -597,10 +602,14 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					let key = busy.borrow_mut().key;
 
 					let bg = Default::default(); // TODO get rid of this sillyness
-					let id = Tree::new(self, &bg, key.id())
+					Tree::new(self, &bg, key.id())
 						.update_record(key.depth(), key.offset(), record)
 						.await?;
-					assert_eq!(id, key.id());
+
+					{
+						trace!("{:?} ~~> {:?}", key, busy.borrow_mut().key);
+					}
+					let key = busy.borrow_mut().key;
 
 					// Unmark as being flushed.
 					let mut data_ref = self.data.borrow_mut();
@@ -613,25 +622,25 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 					let Slot::Busy(busy) = slot.get_mut()
 						else { unreachable!("no entry or entry is not flushing") };
-					let mut busy = busy.borrow_mut();
+					let mut busy_ref = busy.borrow_mut();
 
 					// Wake a waiting fetcher, if any.
 					// We have to insert the entry again since the fetcher *will* have an outdated record.
 					let mut do_remove = false;
-					if let Some(count) = busy.refcount.take() {
+					if busy_ref.refcount > 0 {
 						debug_assert!(
-							!busy.wakers.is_empty(),
+							!busy_ref.wakers.is_empty(),
 							"refcount is non-zero without wakers"
 						);
-						busy.wakers.drain(..).for_each(|w| w.wake());
-						drop(busy);
+						busy_ref.wakers.drain(..).for_each(|w| w.wake());
+						drop(busy_ref);
 						*slot.get_mut() = Slot::Present(Present {
 							data: entry,
-							refcount: RefCount::Ref { count },
+							refcount: RefCount::Ref { busy: busy.clone() },
 						});
 					} else {
-						debug_assert!(busy.wakers.is_empty(), "refcount is zero with wakers");
-						drop(busy);
+						debug_assert!(busy_ref.wakers.is_empty(), "refcount is zero with wakers");
+						drop(busy_ref);
 						slot.remove();
 						do_remove =
 							data.lru
@@ -697,14 +706,14 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		};
 
 		let entry = mem::replace(&mut present.data, self.resource().alloc());
-		let refcount = match present.refcount {
-			RefCount::Ref { count } => Some(count),
+		let busy = match &present.refcount {
+			RefCount::Ref { busy } => busy.clone(),
 			RefCount::NoRef { lru_index } => {
-				data.lru.entry_remove(lru_index, entry.len());
-				None
+				data.lru.entry_remove(*lru_index, entry.len());
+				Busy::new(key)
 			}
 		};
-		*slot = Slot::Busy(Busy::with_refcount(key, refcount));
+		*slot = Slot::Busy(busy);
 
 		// Store entry.
 		drop(data_ref);
@@ -719,11 +728,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			else { unreachable!("no object") };
 		let level = &mut obj.data.data[usize::from(key.depth())];
 		let slot = level.slots.get_mut(&key.offset()).expect("no entry");
+
 		let Slot::Busy(busy) = slot else { unreachable!("entry not busy") };
-		let mut busy = busy.borrow_mut();
-		busy.wakers.drain(..).for_each(|w| w.wake());
-		let refcount = data.lru.entry_add(key, busy.refcount, entry.len());
-		drop(busy);
+		busy.borrow_mut().wakers.drain(..).for_each(|w| w.wake());
+		let refcount = data.lru.entry_add(key, busy.clone(), entry.len());
+
 		*slot = Slot::Present(Present { data: entry, refcount });
 
 		// Unmark as dirty

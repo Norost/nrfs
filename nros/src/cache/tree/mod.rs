@@ -2,11 +2,11 @@ pub mod data;
 mod fetch;
 
 use {
-	super::{slot::RefCount, Cache, EntryRef, Key, Present, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2},
+	super::{Busy, Cache, EntryRef, Key, Present, RefCount, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2},
 	crate::{
 		resource::Buf, util::get_record, Background, Dev, Error, MaxRecordSize, Record, Resource,
 	},
-	core::{mem, num::NonZeroUsize, ops::RangeInclusive},
+	core::{mem, ops::RangeInclusive},
 };
 
 /// Implementation of a record tree.
@@ -359,14 +359,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 	/// Update a record.
 	/// This will write the record to the parent record or the root of this object.
-	///
-	/// Returns the current ID of the tree, which may have changed due to a concurrent Tree::shrink.
 	pub(super) async fn update_record(
 		&self,
 		record_depth: u8,
 		offset: u64,
 		record: Record,
-	) -> Result<u64, Error<D>> {
+	) -> Result<(), Error<D>> {
 		trace!(
 			"update_record {:?} ({}, {})",
 			Key::new(0, self.id, record_depth, offset),
@@ -407,8 +405,6 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let mut obj = self.cache.get_object(self.id).expect("no object");
 			obj.root = new_root;
 			obj.set_dirty(true);
-
-			Ok(self.id)
 		} else {
 			// Update a parent record.
 			// Find parent
@@ -417,12 +413,11 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 			let k = Key::new(0, self.id, parent_depth, offt);
 			let entry = self.cache.tree_fetch_entry(self.background, k).await?;
-			let id = entry.key.id();
 			let old_record = get_record(entry.get(), index).unwrap_or_default();
 			if old_record.length == 0 && record.length == 0 {
 				// Both the old and new record are zero, so don't dirty the parent.
 				trace!("--> skip both zero");
-				return Ok(id);
+				return Ok(());
 			}
 			entry.modify(self.background, |data| {
 				// Destroy old record
@@ -444,8 +439,8 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				data.get_mut()[offt..offt + mem::size_of::<Record>()]
 					.copy_from_slice(record.as_ref());
 			});
-			Ok(id)
 		}
+		Ok(())
 	}
 
 	/// Resize record tree.
@@ -554,7 +549,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// If the pseudo-object has no entries, it's already zeroed and there is nothing
 			// left to do.
 			let refcount = pseudo_obj.data.iter().fold(0, |x, lvl| x + lvl.slots.len());
-			let refcount = if let Some(count) = NonZeroUsize::new(refcount) {
+			if refcount > 0 {
 				// Adjust refcount of cur_obj.
 				if data
 					.lru
@@ -569,24 +564,25 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 						let f =
 							|key: Key| Key::new(key.flags(), pseudo_id, key.depth(), key.offset());
 						match slot {
-							Slot::Present(Present { refcount, .. }) => {
-								if let RefCount::NoRef { lru_index } = *refcount {
-									let key = data.lru.get_mut(lru_index).expect("no lru entry");
-									*key = f(*key);
-								}
+							Slot::Present(Present {
+								refcount: RefCount::NoRef { lru_index },
+								..
+							}) => {
+								let key = data.lru.get_mut(*lru_index).expect("no lru entry");
+								*key = f(*key);
 							}
-							Slot::Busy(busy) => {
+							Slot::Present(Present { refcount: RefCount::Ref { busy }, .. })
+							| Slot::Busy(busy) => {
 								let mut busy = busy.borrow_mut();
 								busy.key = f(busy.key);
 							}
 						}
 					}
 				}
+			}
 
-				RefCount::Ref { count }
-			} else {
-				RefCount::pseudo_noref()
-			};
+			let busy = Busy::with_refcount(Key::new(Key::FLAG_OBJECT, pseudo_id, 0, 0), refcount);
+			let refcount = RefCount::Ref { busy };
 
 			// Insert pseudo-object.
 			let present = Present { data: pseudo_obj, refcount };
@@ -687,7 +683,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				Record { total_length: 0.into(), references: 0.into(), ..cur_root }.as_ref(),
 			);
 			crate::util::trim_zeros_end(&mut d);
-			let refcount = data.lru.entry_add(key, None, d.len());
+			let refcount = data.lru.entry_add_noref(key, d.len());
 			let entry = Slot::Present(Present { data: d, refcount });
 			obj.add_entry(&mut data.lru, key.depth(), key.offset(), entry);
 

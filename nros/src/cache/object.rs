@@ -4,7 +4,6 @@ use {
 	core::{
 		cell::{RefCell, RefMut},
 		future,
-		num::NonZeroUsize,
 		task::Poll,
 	},
 };
@@ -37,7 +36,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					let mut e = obj.borrow_mut();
 					e.wakers.push(cx.waker().clone());
 					if busy.is_none() {
-						e.refcount = NonZeroUsize::new(e.refcount.map_or(0, |x| x.get()) + 1);
+						e.refcount += 1;
 						busy = Some(obj.clone());
 					}
 					None

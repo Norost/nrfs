@@ -5,7 +5,6 @@ use {
 	core::{
 		cell::{RefCell, RefMut},
 		future,
-		num::NonZeroUsize,
 		ops::Deref,
 		task::Poll,
 	},
@@ -101,8 +100,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			let data = self.data.borrow_mut();
 			let (trees, mut lru) = RefMut::map_split(data, |d| (&mut d.objects, &mut d.lru));
 			let entry = RefMut::filter_map(trees, |t| {
-				let slot = t.get_mut(&key.id())?;
-				let Slot::Present(tree) = slot else { return None };
+				let Some(Slot::Present(tree)) = t.get_mut(&key.id()) else {
+					debug_assert!(busy.is_none(), "object with reference got removed");
+					return None
+				};
 				let level = &mut tree.data.data[usize::from(key.depth())];
 				let entry = level.slots.get_mut(&key.offset())?;
 				match entry {
@@ -116,7 +117,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						let mut e = entry.borrow_mut();
 						e.wakers.push(cx.waker().clone());
 						if busy.is_none() {
-							e.refcount = NonZeroUsize::new(e.refcount.map_or(0, |x| x.get()) + 1);
+							e.refcount += 1;
 							busy = Some(entry.clone());
 						}
 						None

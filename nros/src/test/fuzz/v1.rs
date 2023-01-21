@@ -958,3 +958,20 @@ fn shrink_clear_too_many_children() {
 	)
 	.run()
 }
+
+/// Slots that are present *and* referenced also need to keep a Busy struct around
+/// for the tasks that reference it.
+#[test]
+fn slot_present_moved() {
+	Test::new(
+		1 << 16,
+		1152,
+		[
+			Create { size: 650152005029454 },
+			Create { size: 1026497204047 },
+			Resize { idx: 1, size: 16261110305688431531 },
+			Move { from_idx: 1, to_idx: 0 },
+		],
+	)
+	.run()
+}
