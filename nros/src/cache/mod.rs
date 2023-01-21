@@ -199,70 +199,75 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// Steps:
 		// 1. Shrink 'to' object to zero size.
 		//    Tree::shrink will move all entries to a pseudo-object.
-		// 2. Move 'from' object to 'to' ID.
-		// 3. Clear 'from' in object list.
+		// 2. Reference 'to' to prevent eviction.
+		// 3. Swap 'from' & 'to'.
+		// 4. Set reference count of 'from' object to 0.
+		// 5. Dereference 'from'.
 
 		if from == to {
 			return Ok(()); // Don't even bother.
 		}
 
-		// Helper function to fixup keys
-
 		// 1. Shrink 'to' object to zero size.
 		//    Tree::shrink will move all entries to a pseudo-object.
 		Tree::new(self, bg, to).resize(0).await?;
 
-		// 2. Move 'from' object to 'to' ID.
+		// 2. Reference 'to' to prevent eviction.
+		let (mut obj, mut lru) = self.fetch_object(bg, to).await?;
+		lru.object_increase_refcount(&mut obj.refcount);
+		drop((obj, lru));
+
+		// 3. Swap 'from' & 'to'.
 		let _ = self.fetch_object(bg, from).await?;
 
-		let mut data_ref = self.data.borrow_mut();
-		let data = &mut *data_ref;
-		let Some(Slot::Present(obj)) = data.objects.remove(&from) else { panic!("no object") };
+		let data = &mut *self.data.borrow_mut();
 
-		// Fix entries
-		for level in obj.data.data.iter() {
-			for slot in level.slots.values() {
-				let f = |key: Key| Key::new(0, to, key.depth(), key.offset());
-				match slot {
-					Slot::Present(Present { refcount: RefCount::NoRef { lru_index }, .. }) => {
-						let key = data.lru.get_mut(*lru_index).expect("not in lru");
-						*key = f(*key)
-					}
-					Slot::Present(Present { refcount: RefCount::Ref { busy }, .. })
-					| Slot::Busy(busy) => {
-						let mut busy = busy.borrow_mut();
-						busy.key = f(busy.key);
+		let Some([Slot::Present(from_obj), Slot::Present(to_obj)]) = data.objects.get_many_mut([&from, &to])
+			else { unreachable!("no object(s)") };
+
+		let mut transfer = |obj: &mut Present<TreeData<R>>, new_id| {
+			// Fix entries
+			for level in obj.data.data.iter() {
+				for slot in level.slots.values() {
+					let f = |key: Key| Key::new(0, new_id, key.depth(), key.offset());
+					match slot {
+						Slot::Present(Present {
+							refcount: RefCount::NoRef { lru_index }, ..
+						}) => {
+							let key = data.lru.get_mut(*lru_index).expect("not in lru");
+							*key = f(*key)
+						}
+						Slot::Present(Present { refcount: RefCount::Ref { busy }, .. })
+						| Slot::Busy(busy) => {
+							let mut busy = busy.borrow_mut();
+							busy.key = f(busy.key);
+						}
 					}
 				}
 			}
-		}
 
-		// Fix object
-		if let RefCount::NoRef { lru_index } = obj.refcount {
-			*data.lru.get_mut(lru_index).expect("no lru entry") =
-				Key::new(Key::FLAG_OBJECT, to, 0, 0);
-		}
-		let prev_obj = data.objects.insert(to, Slot::Present(obj));
+			// Fix object
+			let key = Key::new(Key::FLAG_OBJECT, new_id, 0, 0);
+			match &obj.refcount {
+				RefCount::NoRef { lru_index } => {
+					*data.lru.get_mut(*lru_index).expect("no lru entry") = key
+				}
+				RefCount::Ref { busy } => busy.borrow_mut().key = key,
+			}
 
-		if let Some(prev_obj) = prev_obj {
-			let Slot::Present(p) = prev_obj else { todo!() };
-			//debug_assert!(!p.data.is_dirty());
-			let RefCount::NoRef { lru_index } = p.refcount else { todo!() };
-			data.lru.object_remove(lru_index);
-		}
+			obj.data.set_dirty(true);
+		};
 
-		drop(data_ref);
+		transfer(from_obj, to);
+		transfer(to_obj, from);
+		mem::swap(from_obj, to_obj);
 
-		// 3. Clear 'from' in object list.
-		let offset = from << RECORD_SIZE_P2;
-		Tree::new(self, bg, OBJECT_LIST_ID)
-			.write_zeros(offset, 1 << RECORD_SIZE_P2)
-			.await?;
+		// 4. Set reference count of 'from' object to 0.
+		from_obj.data.root.references = 0.into();
 
-		self.data
-			.borrow_mut()
-			.used_objects_ids
-			.remove(from..from + 1);
+		// 5. Dereference 'from'.
+		data.lru
+			.object_decrease_refcount(from, &mut from_obj.refcount, 1);
 
 		Ok(())
 	}

@@ -991,3 +991,19 @@ fn unmount_no_background_poll() {
 	)
 	.run()
 }
+
+#[test]
+fn move_object_busy_to() {
+	Test::new(
+		1 << 16,
+		1184,
+		[
+			Create { size: 270751411552 },
+			Create { size: 0 },
+			Write { idx: 177706834, offset: 0, amount: 24576 },
+			Create { size: 18424702927297969920 },
+			Move { from_idx: 10537, to_idx: 0 },
+		],
+	)
+	.run()
+}
