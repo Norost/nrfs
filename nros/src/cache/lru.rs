@@ -4,12 +4,17 @@ use {
 	core::cell::RefCell,
 };
 
+#[cfg(debug_assertions)]
 pub type Gen = u8;
-//pub type Gen = ();
+#[cfg(not(debug_assertions))]
+pub type Gen = ();
+
 pub type Idx = arena::Handle<Gen>;
 
+#[cfg(debug_assertions)]
 const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
-//const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
+#[cfg(not(debug_assertions))]
+const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
 
 /// Estimated fixed cost for every cached entry.
 ///
