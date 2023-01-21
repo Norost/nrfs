@@ -89,7 +89,7 @@ impl Dev for FileDev {
 	}
 
 	fn fence(&self) -> Self::FenceTask<'_> {
-		future::ready(Ok(()))
+		future::ready(self.file.borrow_mut().sync_all().map_err(FileDevError::Io))
 	}
 
 	fn allocator(&self) -> &Self::Allocator {
