@@ -101,12 +101,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// Fetch records until we can lock the one we need.
 		debug_assert!(cur_depth >= target_depth);
 		let entry = loop {
-			if record.length == 0 {
-				// Skip straight to the end since it's all zeroes from here on anyways.
-				let key = Key::new(0, id, target_depth, offset);
-				return self.fetch_entry(bg, key, &Record::default()).await;
-			}
-
 			let key = Key::new(0, id, cur_depth, offset >> depth_offset_shift(cur_depth));
 			let entry = self.fetch_entry(bg, key, &record).await?;
 			id = entry.key.id();

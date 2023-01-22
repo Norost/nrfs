@@ -1103,3 +1103,20 @@ fn flush_all_clear_object_dirty_status() {
 	)
 	.run()
 }
+
+/// Don't blindly skip ahead if there are zero records in parent records,
+/// there may be *dirty* non-zero records below.
+#[test]
+fn tree_fetch_entry_zero_skips_dirty() {
+	Test::new(
+		1 << 16,
+		1109,
+		[
+			Create { size: 82829887134496 },
+			Write { idx: 0, offset: 38019807206645, amount: 22015 },
+			Write { idx: 0, offset: 38019801636085, amount: 21845 },
+			Read { idx: 0, offset: 38019801636085, amount: 1000 },
+		],
+	)
+	.run()
+}

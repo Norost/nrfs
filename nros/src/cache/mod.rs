@@ -386,7 +386,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		key: Key,
 		record: &Record,
 	) -> Result<EntryRef<'a, D, R>, Error<D>> {
-		trace!("fetch_entry {:?} <- {:?}", key, record.lba);
+		trace!(
+			"fetch_entry {:?} <- ({}, {})",
+			key,
+			record.lba,
+			record.length
+		);
 		// Steps:
 		// 1. Try to get the entry directly or by waiting for another tasks.
 		// 2. Otherwise, fetch it ourselves.
@@ -608,7 +613,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					let (record, entry) = self.store.write(entry).await?;
 
 					{
-						trace!("{:?} ~~> {:?}", key, busy.borrow_mut().key);
+						trace!("{:?} ~1> {:?}", key, busy.borrow_mut().key);
 					}
 					let key = busy.borrow_mut().key;
 
@@ -621,7 +626,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					.await?;
 
 					{
-						trace!("{:?} ~~> {:?}", key, busy.borrow_mut().key);
+						trace!("{:?} ~2> {:?}", key, busy.borrow_mut().key);
 					}
 					let key = busy.borrow_mut().key;
 
