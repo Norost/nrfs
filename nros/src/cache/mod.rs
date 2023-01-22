@@ -69,7 +69,7 @@ impl<R: Resource> CacheData<R> {
 		counter += 1;
 		counter %= 1 << 59;
 		self.pseudo_id_counter = NonZeroU64::new(counter).unwrap_or(NonZeroU64::MIN);
-		trace!("--> {:?}", id | ID_PSEUDO);
+		trace!("--> {:#x}", id | ID_PSEUDO);
 		id | ID_PSEUDO
 	}
 }
@@ -255,7 +255,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				RefCount::Ref { busy } => busy.borrow_mut().key = key,
 			}
 
-			obj.data.set_dirty(true);
+			// Mark root as dirty since it moved.
+			obj.data.set_root(&obj.data.root());
 		};
 
 		transfer(from_obj, to);
@@ -263,7 +264,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		mem::swap(from_obj, to_obj);
 
 		// 4. Set reference count of 'from' object to 0.
-		from_obj.data.root.references = 0.into();
+		from_obj
+			.data
+			.set_root(&Record { references: 0.into(), ..from_obj.data.root() });
 
 		// 5. Dereference 'from'.
 		data.lru
@@ -488,8 +491,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			// Evict object
 
 			// Take root
-			let mut root = obj.data.root;
-			root._reserved = 0;
+			let root = obj.data.root();
 
 			// Remove from LRU
 			let RefCount::NoRef { lru_index } = obj.refcount
@@ -667,7 +669,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 					if do_remove {
 						// Forget the object, which should be all zeroes.
-						debug_assert!(obj.data.root.length == 0, "pseudo object leaks entries");
+						debug_assert!(obj.data.root().length == 0, "pseudo object leaks entries");
 						data.objects.remove(&key.id());
 					}
 
@@ -815,10 +817,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		ids.sort_unstable();
 
 		for id in ids {
-			let Some(Slot::Present(obj)) = data.objects.get(&id) else { todo!() };
+			let Some(Slot::Present(obj)) = data.objects.get(&id) else { continue };
 			debug_assert!(!is_pseudo_id(id), "can't flush pseudo ID");
-			let mut root = obj.data.root;
-			root._reserved = 0;
+			let root = obj.data.root();
 			drop(data);
 			let offset = id << RECORD_SIZE_P2;
 			Tree::new(self, bg, OBJECT_LIST_ID)
@@ -854,9 +855,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		// Write object list root.
 		if let Some(Slot::Present(obj)) = data.objects.get(&OBJECT_LIST_ID) {
-			let mut root = obj.data.root;
-			root._reserved = 0;
-			self.store.set_object_list(root);
+			self.store.set_object_list(obj.data.root());
 		}
 
 		// Tadha!

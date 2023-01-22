@@ -1040,3 +1040,20 @@ fn flush_all_skip_pseudo_id() {
 	)
 	.run()
 }
+
+/// Helper methods are important!
+#[test]
+fn root_leaky_dirty_marker() {
+	Test::new(
+		1 << 16,
+		1279,
+		[
+			Create { size: 2442431929820581 },
+			Resize { idx: 0, size: 47106071210353 },
+			Resize { idx: 0, size: 11936128519798521855 },
+			Resize { idx: 0, size: 42405 },
+			Resize { idx: 0, size: 0 },
+		],
+	)
+	.run()
+}

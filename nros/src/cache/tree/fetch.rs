@@ -42,7 +42,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let depth_offset_shift = |d| (rec_size - RECORD_SIZE_P2) * (d - target_depth);
 
 		let (obj, _) = self.fetch_object(bg, id).await?;
-		let root = obj.data.root;
+		let root = obj.data.root();
 		let len = u64::from(root.total_length);
 		drop(obj);
 

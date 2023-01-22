@@ -373,7 +373,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		);
 		// The object is guaranteed to exist.
 		// At least, if called by a task that holds an entry, which should be guaranteed.
-		let cur_root = self.cache.get_object(self.id).expect("no object").root;
+		let cur_root = self.cache.get_object(self.id).expect("no object").root();
 		let len = u64::from(cur_root.total_length);
 		let cur_depth = depth(self.max_record_size(), len);
 		let parent_depth = record_depth + 1;
@@ -402,9 +402,10 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// Store new root
 			// The object is guaranteed to be in the cache as update_record is only called
 			// during flush or evict.
-			let mut obj = self.cache.get_object(self.id).expect("no object");
-			obj.root = new_root;
-			obj.set_dirty(true);
+			self.cache
+				.get_object(self.id)
+				.expect("no object")
+				.set_root(&new_root);
 		} else {
 			// Update a parent record.
 			// Find parent
@@ -598,8 +599,9 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let mut data = self.cache.data.borrow_mut();
 			let Some(Slot::Present(cur_obj)) = data.objects.get_mut(&self.id)
 				else { unreachable!("no object") };
-			cur_obj.data.root.total_length = new_len.into();
-			cur_obj.data.set_dirty(true);
+			cur_obj
+				.data
+				.set_root(&Record { total_length: new_len.into(), ..cur_obj.data.root() });
 		}
 
 		// Zero out data written past the end.
@@ -689,18 +691,19 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 			// 4. Update root record.
 			//    If depth changes, make it a zero record.
-			obj.data.root = Record {
+			obj.data.set_root(&Record {
 				total_length: new_len.into(),
 				references: cur_root.references,
 				..Default::default()
-			};
+			});
 
 			// We just added a record, so evict excess.
 			drop(data_ref);
 			self.cache.evict_excess(self.background);
 		} else {
 			// Just adjust length and presto
-			obj.data.root = Record { total_length: new_len.into(), ..obj.data.root }
+			obj.data
+				.set_root(&Record { total_length: new_len.into(), ..obj.data.root() });
 		}
 
 		Ok(())
@@ -738,11 +741,13 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		);
 
 		let (mut obj, _) = self.cache.fetch_object(self.background, self.id).await?;
-		debug_assert!(obj.data.root.references != 0, "invalid object");
-		if obj.data.root.references == u16::MAX {
+		let mut root = obj.data.root();
+		debug_assert!(root.references != 0, "invalid object");
+		if root.references == u16::MAX {
 			return Ok(false);
 		}
-		obj.data.root.references += 1;
+		root.references += 1;
+		obj.data.set_root(&root);
 
 		Ok(true)
 	}
@@ -758,10 +763,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		);
 
 		let (mut obj, _) = self.cache.fetch_object(self.background, self.id).await?;
-		debug_assert!(obj.data.root.references != 0, "invalid object");
-		obj.data.root.references -= 1;
+		let mut root = obj.data.root();
+		debug_assert!(root.references != 0, "invalid object");
+		root.references -= 1;
+		obj.data.set_root(&root);
 
-		if obj.data.root.references == 0 {
+		if root.references == 0 {
 			drop(obj);
 			// Free space.
 			self.resize(0).await?;
@@ -784,7 +791,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// Get the root and length of this tree.
 	async fn root(&self) -> Result<(Record, u64), Error<D>> {
 		let (obj, _) = self.cache.fetch_object(self.background, self.id).await?;
-		Ok((obj.data.root, u64::from(obj.data.root.total_length)))
+		Ok((obj.data.root(), u64::from(obj.data.root().total_length)))
 	}
 
 	/// Get a reference to the background task runner.

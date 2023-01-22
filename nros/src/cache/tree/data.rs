@@ -8,29 +8,29 @@ use {
 
 /// A single cached record tree.
 #[derive(Debug)]
-pub struct TreeData<R: Resource> {
+pub(in super::super) struct TreeData<R: Resource> {
 	/// The root of the tree.
 	///
 	/// The `_reserved` field is used to indicate whether the root is dirty or not.
-	pub(in super::super) root: Record,
+	root: Record,
 	/// Cached records.
 	///
 	/// The index in the array is correlated with depth.
 	/// The key is correlated with offset.
-	pub(in super::super) data: Box<[Level<R>]>,
+	pub data: Box<[Level<R>]>,
 }
 
-pub struct Level<R: Resource> {
-	pub(in super::super) slots: FxHashMap<u64, Slot<R::Buf>>,
-	pub(in super::super) dirty_markers: FxHashMap<u64, Dirty>,
+pub(in super::super) struct Level<R: Resource> {
+	pub slots: FxHashMap<u64, Slot<R::Buf>>,
+	pub dirty_markers: FxHashMap<u64, Dirty>,
 }
 
 #[derive(Debug, Default)]
-pub struct Dirty {
+pub(in super::super) struct Dirty {
 	/// Whether the entry itself is dirty.
-	pub(super) is_dirty: bool,
+	pub is_dirty: bool,
 	/// Children of the entry that have dirty descendants.
-	pub(super) children: FxHashSet<u64>,
+	pub children: FxHashSet<u64>,
 }
 
 impl<R: Resource> Default for Level<R> {
@@ -75,11 +75,6 @@ impl<R: Resource> TreeData<R> {
 	pub fn new(root: Record, max_record_size: MaxRecordSize) -> Self {
 		let depth = super::depth(max_record_size, root.total_length.into());
 		Self { root, data: (0..depth).map(|_| Default::default()).collect() }
-	}
-
-	/// Mark or unmark the root as dirty.
-	pub fn set_dirty(&mut self, dirty: bool) {
-		self.root._reserved = dirty.into()
 	}
 
 	/// Whether this object is dirty or not.
@@ -166,6 +161,16 @@ impl<R: Resource> TreeData<R> {
 	pub fn is_marked_dirty(&self, depth: u8, offset: u64) -> bool {
 		let level = &self.data[usize::from(depth)];
 		level.dirty_markers.get(&offset).is_some_and(|m| m.is_dirty)
+	}
+
+	/// Get the root of this object.
+	pub fn root(&self) -> Record {
+		Record { _reserved: 0, ..self.root }
+	}
+
+	/// Set the root of this object.
+	pub fn set_root(&mut self, root: &Record) {
+		self.root = Record { _reserved: 1, ..*root };
 	}
 }
 
