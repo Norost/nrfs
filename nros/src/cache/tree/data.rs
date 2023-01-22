@@ -172,6 +172,11 @@ impl<R: Resource> TreeData<R> {
 	pub fn set_root(&mut self, root: &Record) {
 		self.root = Record { _reserved: 1, ..*root };
 	}
+
+	/// Clear the dirty status of this object.
+	pub fn clear_dirty(&mut self) {
+		self.root._reserved = 0;
+	}
 }
 
 impl<R: Resource> Present<TreeData<R>> {

@@ -1057,3 +1057,49 @@ fn root_leaky_dirty_marker() {
 	)
 	.run()
 }
+
+#[test]
+fn flush_all_clear_object_dirty_status() {
+	Test::new(
+		1 << 16,
+		4359,
+		[
+			Create { size: 18446191058167073024 },
+			Create { size: 651061555542690057 },
+			Create { size: 4253941257439086857 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 672819019330704725 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 11315585473156024585 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 6220972285269444873 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Write { idx: 1431655765, offset: 651061555542690134, amount: 2313 },
+			Create { size: 651061555542690057 },
+			Create { size: 651061555542690057 },
+			Remount,
+		],
+	)
+	.run()
+}

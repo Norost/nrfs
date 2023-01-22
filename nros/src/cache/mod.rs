@@ -519,7 +519,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				let offset = key.id() << RECORD_SIZE_P2;
 
 				Some(async move {
-					trace!("evict_entry::object {:?}", key.id());
+					trace!("evict_entry::object {:#x}", key.id());
 
 					let bg = Background::default(); // TODO get rid of this sillyness
 					bg.run(async {
@@ -817,9 +817,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		ids.sort_unstable();
 
 		for id in ids {
-			let Some(Slot::Present(obj)) = data.objects.get(&id) else { continue };
+			let Some(Slot::Present(obj)) = data.objects.get_mut(&id) else { continue };
 			debug_assert!(!is_pseudo_id(id), "can't flush pseudo ID");
 			let root = obj.data.root();
+			obj.data.clear_dirty();
 			drop(data);
 			let offset = id << RECORD_SIZE_P2;
 			Tree::new(self, bg, OBJECT_LIST_ID)
