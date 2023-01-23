@@ -420,24 +420,25 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let key = busy.borrow_mut().key;
 
 		// Insert the entry.
-		let (entry, lru) = RefMut::map_split(self.data.borrow_mut(), |data| {
-			let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id())
-				else { unreachable!("no object") };
-			let slot = obj.data.data[usize::from(key.depth())]
-				.slots
-				.get_mut(&key.offset())
-				.expect("no entry");
+		let mut comp = self.get_entryref_components(key).expect("no entry");
+		let entry = RefMut::map(comp.slot, |slot| {
 			let Slot::Busy(busy) = slot else { unreachable!("not busy") };
 			busy.borrow_mut().wakers.drain(..).for_each(|w| w.wake());
-			let refcount = data.lru.entry_add(key, busy.clone(), entry.len());
+			let refcount = comp.lru.entry_add(key, busy.clone(), entry.len());
 
 			*slot = Slot::Present(Present { data: entry, refcount });
 			let Slot::Present(e) = slot else { unreachable!() };
-			(e, &mut data.lru)
+			e
 		});
 
 		// Presto
-		Ok(EntryRef::new(self, key, entry, lru))
+		Ok(EntryRef::new(
+			self,
+			key,
+			entry,
+			comp.dirty_markers,
+			comp.lru,
+		))
 	}
 
 	/// Readjust cache size.
@@ -867,10 +868,15 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// Tadha!
 		// Do a sanity check just in case.
 		if cfg!(debug_assertions) {
-			for (_id, tree) in data.objects.iter() {
+			for (&id, tree) in data.objects.iter() {
 				let Slot::Present(tree) = tree else { unreachable!() };
+
 				for level in tree.data.data.iter() {
 					debug_assert!(level.dirty_markers.is_empty(), "flush_all didn't flush all");
+				}
+
+				if id != OBJECT_LIST_ID && id & ID_PSEUDO != 0 {
+					debug_assert_eq!(tree.data.root().length, 0, "pseudo object is not zero");
 				}
 			}
 		}

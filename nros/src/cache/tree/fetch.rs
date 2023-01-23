@@ -1,6 +1,6 @@
 use {
 	super::{Cache, EntryRef, Key, Tree, RECORD_SIZE_P2},
-	crate::{resource::Buf, util::get_record, Background, Dev, Error, Record, Resource},
+	crate::{resource::Buf, util::get_record, Background, Dev, Error, Resource},
 };
 
 impl<D: Dev, R: Resource> Cache<D, R> {

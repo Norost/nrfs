@@ -1120,3 +1120,37 @@ fn tree_fetch_entry_zero_skips_dirty() {
 	)
 	.run()
 }
+
+#[test]
+fn pseudo_obj_leak_0() {
+	Test::new(
+		1 << 16,
+		1152,
+		[
+			Create { size: 299489375270469631 },
+			Create { size: 8399089676820909824 },
+			Write { idx: 1, offset: 1945555036615554048, amount: 36751 },
+			Write { idx: 1, offset: 1214522768312295936, amount: 63993 },
+			Move { from_idx: 0, to_idx: 1 },
+			Remount,
+		],
+	)
+	.run()
+}
+
+#[test]
+fn write_zeros_offset_out_of_range() {
+	Test::new(
+		1 << 16,
+		1361,
+		[
+			Create { size: 18374686479973133664 },
+			Remount,
+			Write { idx: 4281291346, offset: 18446462757646641112, amount: 65535 },
+			Write { idx: 539470, offset: 8110804808010534912, amount: 36751 },
+			Write { idx: 1381126738, offset: 18374687579183316818, amount: 65535 },
+			Resize { idx: 4294967295, size: 618465397503 },
+		],
+	)
+	.run()
+}
