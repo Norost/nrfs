@@ -10,7 +10,7 @@ pub struct Test {
 	/// Object store to operate on.
 	store: Nros<MemDev, StdResource>,
 	/// Ops to execute
-	ops: Box<[Op]>,
+	ops: Vec<Op>,
 	/// Valid (created) objects.
 	ids: Vec<u64>,
 	/// Expected contents of each object.
@@ -19,7 +19,7 @@ pub struct Test {
 	contents: FxHashMap<u64, RangeSet<u64>>,
 }
 
-#[derive(Debug, Arbitrary)]
+#[derive(Arbitrary)]
 pub enum Op {
 	/// Create an object.
 	Create { size: u64 },
@@ -27,22 +27,48 @@ pub enum Op {
 	///
 	/// `idx` is and index in `ids`.
 	/// `offset` is modulo size of object.
-	Write { idx: u32, offset: u64, amount: u16 },
+	Write { idx: u8, offset: u64, amount: u16 },
 	/// Read from an object.
 	///
 	/// `idx` is and index in `ids`.
 	/// `offset` is modulo size of object.
 	///
 	/// Also verifies contents.
-	Read { idx: u32, offset: u64, amount: u16 },
+	Read { idx: u8, offset: u64, amount: u16 },
 	/// Remount the filesystem.
 	Remount,
 	/// Move an object.
 	///
 	/// This destroys the old object.
-	Move { from_idx: u32, to_idx: u32 },
+	Move { from_idx: u8, to_idx: u8 },
 	/// Resize an object.
-	Resize { idx: u32, size: u64 },
+	Resize { idx: u8, size: u64 },
+}
+
+impl fmt::Debug for Op {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		macro_rules! hex {
+			($self:ident $f:ident $([$name:ident $($field:ident)*])*) => {
+				match $self {
+					$(
+						Op::$name { $($field,)* } => $f
+							.debug_struct(stringify!($name))
+							$(.field(stringify!($field), &format_args!("{:#x}", $field)))*
+							.finish(),
+					)*
+					Op::Remount => f.debug_struct("Remount").finish(),
+				}
+			};
+		}
+		hex! {
+			self f
+			[Create size]
+			[Write idx offset amount]
+			[Read idx offset amount]
+			[Move from_idx to_idx]
+			[Resize idx size]
+		}
+	}
 }
 
 impl<'a> Arbitrary<'a> for Test {
@@ -59,28 +85,13 @@ impl<'a> Arbitrary<'a> for Test {
 			[Ok(create_op)]
 				.into_iter()
 				.chain(u.arbitrary_iter::<Op>()?)
-				/*
-				.map(|op| {
-					op.map(|op| match op {
-						Op::Create { size } => Op::Create { size: size % m },
-						Op::Write { idx, offset, amount } => {
-							Op::Write { idx, offset: offset % m, amount }
-						}
-						Op::Read { idx, offset, amount } => {
-							Op::Read { idx, offset: offset % m, amount }
-						}
-						Op::Resize { idx, size } => Op::Resize { idx, size: size % m },
-						op => op,
-					})
-				})
-				*/
 				.try_collect::<Box<_>>()?,
 		))
 	}
 }
 
 impl Test {
-	pub fn new(blocks: usize, global_cache: usize, ops: impl Into<Box<[Op]>>) -> Self {
+	pub fn new(blocks: usize, global_cache: usize, ops: impl Into<Vec<Op>>) -> Self {
 		Self {
 			store: new_cap(MaxRecordSize::K1, blocks, global_cache),
 			ops: ops.into(),
@@ -90,108 +101,96 @@ impl Test {
 	}
 
 	pub fn run(mut self) {
-		for op in self.ops.into_vec() {
-			match op {
-				Op::Create { size } => {
-					let bg = Background::default();
-					run2(&bg, async {
-						let obj = self.store.create(&bg).await.unwrap();
-						obj.resize(size).await.unwrap();
-						self.contents.insert(obj.id(), Default::default());
-						self.ids.push(obj.id());
-					});
-					block_on(bg.drop()).unwrap();
-				}
-				Op::Write { idx, offset, amount } => {
-					let bg = Background::default();
-					run2(&bg, async {
-						let id = self.ids[idx as usize % self.ids.len()];
-						let obj = self.store.get(&bg, id).await.unwrap();
-						let len = obj.len().await.unwrap();
-						if len > 0 {
-							let offt = offset % len;
-							let l = obj.write(offt, &vec![1; amount.into()]).await.unwrap();
-							if l > 0 {
-								self.contents
-									.get_mut(&id)
-									.unwrap()
-									.insert(offt..offt + u64::try_from(l).unwrap());
-							}
+		self.ops.reverse();
+		while !self.ops.is_empty() {
+			let bg = Background::default();
+			run2(&bg, async {
+				while let Some(op) = self.ops.pop() {
+					match op {
+						Op::Create { size } => {
+							let obj = self.store.create(&bg).await.unwrap();
+							obj.resize(size).await.unwrap();
+							self.contents.insert(obj.id(), Default::default());
+							self.ids.push(obj.id());
 						}
-					});
-					block_on(bg.drop()).unwrap();
-				}
-				Op::Read { idx, offset, amount } => {
-					let bg = Background::default();
-					run2(&bg, async {
-						let id = self.ids[idx as usize % self.ids.len()];
-						let obj = self.store.get(&bg, id).await.unwrap();
-						let len = obj.len().await.unwrap();
-						if len > 0 {
-							let offt = offset % len;
-							let buf = &mut vec![0; amount.into()];
-							let l = obj.read(offt, buf).await.unwrap();
-							if l > 0 {
-								let map = self.contents.get(&id).unwrap();
-								for (i, c) in (offt..offt + u64::try_from(l).unwrap()).zip(&*buf) {
-									let expect = u8::from(map.contains(&i));
-									assert!(
-										expect == *c,
-										"expected {}, got {} (offset: {})",
-										expect,
-										*c,
-										i
-									);
+						Op::Write { idx, offset, amount } => {
+							let id = self.ids[idx as usize % self.ids.len()];
+							let obj = self.store.get(&bg, id).await.unwrap();
+							let len = obj.len().await.unwrap();
+							if len > 0 {
+								let offt = offset % len;
+								let l = obj.write(offt, &vec![1; amount.into()]).await.unwrap();
+								if l > 0 {
+									self.contents
+										.get_mut(&id)
+										.unwrap()
+										.insert(offt..offt + u64::try_from(l).unwrap());
 								}
 							}
 						}
-					});
-					block_on(bg.drop()).unwrap();
-				}
-				Op::Remount => {
-					self.store = block_on(async {
-						let devs = self.store.unmount().await.unwrap();
-						Nros::load(StdResource::new(), devs, 4096, true)
-							.await
-							.unwrap()
-					})
-				}
-				Op::Move { from_idx, to_idx } => {
-					let bg = Background::default();
-					run2(&bg, async {
-						let from_i = from_idx as usize % self.ids.len();
-						let to_i = to_idx as usize % self.ids.len();
-						let from_id = self.ids[from_i];
-						let to_id = self.ids[to_i];
-						if from_i != to_i {
-							self.ids.swap_remove(from_i);
+						Op::Read { idx, offset, amount } => {
+							let id = self.ids[idx as usize % self.ids.len()];
+							let obj = self.store.get(&bg, id).await.unwrap();
+							let len = obj.len().await.unwrap();
+							if len > 0 {
+								let offt = offset % len;
+								let buf = &mut vec![0; amount.into()];
+								let l = obj.read(offt, buf).await.unwrap();
+								if l > 0 {
+									let map = self.contents.get(&id).unwrap();
+									for (i, c) in
+										(offt..offt + u64::try_from(l).unwrap()).zip(&*buf)
+									{
+										let expect = u8::from(map.contains(&i));
+										assert!(
+											expect == *c,
+											"expected {}, got {} (offset: {})",
+											expect,
+											*c,
+											i
+										);
+									}
+								}
+							}
 						}
-						self.store
-							.get(&bg, to_id)
-							.await
-							.unwrap()
-							.replace_with(self.store.get(&bg, from_id).await.unwrap())
-							.await
-							.unwrap();
+						Op::Remount => break,
+						Op::Move { from_idx, to_idx } => {
+							let from_i = from_idx as usize % self.ids.len();
+							let to_i = to_idx as usize % self.ids.len();
+							let from_id = self.ids[from_i];
+							let to_id = self.ids[to_i];
+							if from_i != to_i {
+								self.ids.swap_remove(from_i);
+							}
+							self.store
+								.get(&bg, to_id)
+								.await
+								.unwrap()
+								.replace_with(self.store.get(&bg, from_id).await.unwrap())
+								.await
+								.unwrap();
 
-						let c = self.contents.remove(&from_id).unwrap();
-						self.contents.insert(to_id, c);
-					});
-					block_on(bg.drop()).unwrap();
-				}
-				Op::Resize { idx, size } => {
-					let bg = Background::default();
-					run2(&bg, async {
-						let id = self.ids[idx as usize % self.ids.len()];
-						let obj = self.store.get(&bg, id).await.unwrap();
-						obj.resize(size).await.unwrap();
-						if size < u64::MAX {
-							self.contents.get_mut(&id).unwrap().remove(size..u64::MAX);
+							let c = self.contents.remove(&from_id).unwrap();
+							self.contents.insert(to_id, c);
 						}
-					});
-					block_on(bg.drop()).unwrap();
+						Op::Resize { idx, size } => {
+							let id = self.ids[idx as usize % self.ids.len()];
+							let obj = self.store.get(&bg, id).await.unwrap();
+							obj.resize(size).await.unwrap();
+							if size < u64::MAX {
+								self.contents.get_mut(&id).unwrap().remove(size..u64::MAX);
+							}
+						}
+					}
 				}
-			}
+			});
+			block_on(bg.drop()).unwrap();
+			self.store = block_on(async {
+				let devs = self.store.unmount().await.unwrap();
+				Nros::load(StdResource::new(), devs, 4096, true)
+					.await
+					.unwrap()
+			});
 		}
 	}
 }
@@ -236,7 +235,7 @@ fn large_object_shift_overflow() {
 		4096,
 		[
 			Create { size: 18446567461959458655 },
-			Write { idx: 4294967295, offset: 6917529024946200575, amount: 24415 },
+			Write { idx: 0, offset: 6917529024946200575, amount: 24415 },
 		],
 	)
 	.run()
@@ -251,7 +250,7 @@ fn tree_write_full_to_id_0() {
 			Create { size: 18446587943058402107 },
 			Remount,
 			Create { size: 5425430176097894400 },
-			Write { idx: 1263225675, offset: 21193410011155275, amount: 19275 },
+			Write { idx: 1, offset: 21193410011155275, amount: 19275 },
 		],
 	)
 	.run()
@@ -264,10 +263,10 @@ fn tree_read_offset_len_check_overflow() {
 		4096,
 		[
 			Create { size: 18446744073709551595 },
-			Read { idx: 2509608341, offset: 18446744073709551509, amount: 38155 },
+			Read { idx: 0, offset: 18446744073709551509, amount: 38155 },
 			Remount,
 			Remount,
-			Read { idx: 4287993237, offset: 697696064, amount: 0 },
+			Read { idx: 0, offset: 697696064, amount: 0 },
 		],
 	)
 	.run()
@@ -326,10 +325,10 @@ fn cache_get_large_shift_offset() {
 		4096,
 		[
 			Create { size: 6872316419617283935 },
-			Write { idx: 4294926175, offset: 18446744073709551615, amount: 24575 },
-			Write { idx: 1600085855, offset: 71777215877963615, amount: 17247 },
+			Write { idx: 0, offset: 18446744073709551615, amount: 24575 },
+			Write { idx: 0, offset: 71777215877963615, amount: 17247 },
 			Create { size: 18446743382226067295 },
-			Move { from_idx: 255, to_idx: 0 },
+			Move { from_idx: 1, to_idx: 0 },
 		],
 	)
 	.run()
@@ -356,8 +355,8 @@ fn tree_grow_add_record_write_cache_size() {
 		4096,
 		[
 			Create { size: 217080124979886539 },
-			Write { idx: 960051513, offset: 18446742978491529529, amount: 65535 },
-			Resize { idx: 4293656575, size: 18301847378652561407 },
+			Write { idx: 0, offset: 18446742978491529529, amount: 65535 },
+			Resize { idx: 0, size: 18301847378652561407 },
 			Resize { idx: 0, size: 0 },
 		],
 	)
@@ -371,8 +370,8 @@ fn tree_get_target_depth_above_dev_depth() {
 		4096,
 		[
 			Create { size: 281474976655851 },
-			Write { idx: 4293603329, offset: 18446743984320625663, amount: 65535 },
-			Resize { idx: 4294967295, size: 16947046754988065023 },
+			Write { idx: 0, offset: 18446743984320625663, amount: 65535 },
+			Resize { idx: 0, size: 16947046754988065023 },
 			Resize { idx: 0, size: 0 },
 		],
 	)
@@ -386,8 +385,8 @@ fn tree_grow_flush_concurrent() {
 		4096,
 		[
 			Create { size: 217080124979923771 },
-			Write { idx: 960051513, offset: 4123390705508810553, amount: 65535 },
-			Resize { idx: 4294967295, size: 1889604303433841151 },
+			Write { idx: 0, offset: 4123390705508810553, amount: 65535 },
+			Resize { idx: 0, size: 1889604303433841151 },
 		],
 	)
 	.run()
@@ -462,7 +461,7 @@ fn write_resize_double_free() {
 		4096,
 		[
 			Create { size: 18446744073692785643 },
-			Write { idx: 3828083684, offset: 16441494229869395940, amount: 11236 },
+			Write { idx: 0, offset: 16441494229869395940, amount: 11236 },
 			Resize { idx: 0, size: 0 },
 		],
 	)
@@ -547,8 +546,8 @@ fn tree_shrink_idk_man() {
 		4096,
 		[
 			Create { size: 18446744073709551614 },
-			Write { idx: 65501, offset: 15987206784517266935, amount: 56797 },
-			Resize { idx: 7415, size: 15987205831607189504 },
+			Write { idx: 0, offset: 15987206784517266935, amount: 56797 },
+			Resize { idx: 0, size: 15987205831607189504 },
 			Resize { idx: 0, size: 0 },
 		],
 	)
@@ -865,7 +864,7 @@ fn flush_entry_not_present() {
 		58160,
 		[
 			Create { size: 2377900809628855616 },
-			Write { idx: 4294926591, offset: 18446742974197925947, amount: 65535 },
+			Write { idx: 0, offset: 18446742974197925947, amount: 65535 },
 			Remount,
 		],
 	)
@@ -937,7 +936,7 @@ fn unref_non_zero_pseudo_object() {
 		1 << 20,
 		[
 			Create { size: 18446744073709486176 },
-			Write { idx: 2667595591, offset: 17892238369727643649, amount: 20220 },
+			Write { idx: 0, offset: 17892238369727643649, amount: 20220 },
 			Remount,
 			Resize { idx: 0, size: 0 },
 		],
@@ -984,8 +983,8 @@ fn unmount_no_background_poll() {
 		3862,
 		[
 			Create { size: 18377782021482283007 },
-			Write { idx: 4292159555, offset: 10809483180534595583, amount: 33153 },
-			Resize { idx: 1392508927, size: 9337654175918632573 },
+			Write { idx: 0, offset: 10809483180534595583, amount: 33153 },
+			Resize { idx: 0, size: 9337654175918632573 },
 			Remount,
 		],
 	)
@@ -1000,9 +999,9 @@ fn move_object_busy_to() {
 		[
 			Create { size: 270751411552 },
 			Create { size: 0 },
-			Write { idx: 177706834, offset: 0, amount: 24576 },
+			Write { idx: 0, offset: 0, amount: 24576 },
 			Create { size: 18424702927297969920 },
-			Move { from_idx: 10537, to_idx: 0 },
+			Move { from_idx: 1, to_idx: 0 },
 		],
 	)
 	.run()
@@ -1095,7 +1094,7 @@ fn flush_all_clear_object_dirty_status() {
 			Create { size: 651061555542690057 },
 			Create { size: 651061555542690057 },
 			Create { size: 651061555542690057 },
-			Write { idx: 1431655765, offset: 651061555542690134, amount: 2313 },
+			Write { idx: 85, offset: 651061555542690134, amount: 2313 },
 			Create { size: 651061555542690057 },
 			Create { size: 651061555542690057 },
 			Remount,
@@ -1146,10 +1145,28 @@ fn write_zeros_offset_out_of_range() {
 		[
 			Create { size: 18374686479973133664 },
 			Remount,
-			Write { idx: 4281291346, offset: 18446462757646641112, amount: 65535 },
-			Write { idx: 539470, offset: 8110804808010534912, amount: 36751 },
-			Write { idx: 1381126738, offset: 18374687579183316818, amount: 65535 },
-			Resize { idx: 4294967295, size: 618465397503 },
+			Write { idx: 0, offset: 18446462757646641112, amount: 65535 },
+			Write { idx: 0, offset: 8110804808010534912, amount: 36751 },
+			Write { idx: 0, offset: 18374687579183316818, amount: 65535 },
+			Resize { idx: 0, size: 618465397503 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn f() {
+	Test::new(
+		1 << 16,
+		1 << 10,
+		[
+			Create { size: 3329111198611275777 },
+			Write { idx: 0, offset: 557601933144439097, amount: 54271 },
+			Write { idx: 0, offset: 4412750543122677053, amount: 15677 },
+			Write { idx: 0, offset: 4412750543122677053, amount: 15677 },
+			Write { idx: 0, offset: 4412964684131403709, amount: 65341 },
+			Resize { idx: 0, size: 72057594054639871 },
+			Resize { idx: 0, size: 2285700095 },
 		],
 	)
 	.run()
