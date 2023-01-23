@@ -149,15 +149,20 @@ impl Lru {
 		}
 	}
 
+	/// Add an object with no references.
+	pub fn object_add_noref(&mut self, id: u64) -> RefCount {
+		RefCount::NoRef {
+			lru_index: self.add(
+				Key::new(Key::FLAG_OBJECT, id, 0, 0),
+				CACHE_OBJECT_FIXED_COST,
+			),
+		}
+	}
+
 	/// Add an object, depending on `busy.refcount`.
 	pub fn object_add(&mut self, id: u64, busy: Rc<RefCell<Busy>>) -> RefCount {
 		if busy.borrow_mut().refcount == 0 {
-			RefCount::NoRef {
-				lru_index: self.add(
-					Key::new(Key::FLAG_OBJECT, id, 0, 0),
-					CACHE_OBJECT_FIXED_COST,
-				),
-			}
+			self.object_add_noref(id)
 		} else {
 			RefCount::Ref { busy }
 		}

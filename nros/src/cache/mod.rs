@@ -139,28 +139,24 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		bg: &'b Background<'a, D>,
 	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
 		trace!("create");
-		let id = self.create_many::<1>(bg).await?;
+		let id = self.create_many(bg, 1).await?;
 		Ok(Tree::new(self, bg, id))
 	}
 
 	/// Create many adjacent objects.
-	pub async fn create_many<'a, 'b, const N: usize>(
+	pub async fn create_many<'a, 'b>(
 		&'a self,
 		bg: &'b Background<'a, D>,
+		amount: u64,
 	) -> Result<u64, Error<D>> {
-		trace!("create_many {}", N);
+		trace!("create_many {}", amount);
 		// Allocate
-		let id = self.alloc_ids(N.try_into().unwrap());
-
-		// Init
-		let mut b = [[0; 32]; N];
-		for c in &mut b {
-			c.copy_from_slice(Record { references: 1.into(), ..Default::default() }.as_ref());
+		let id = self.alloc_ids(amount);
+		{
+			trace!("--> {}", id);
 		}
-		let offset = id << RECORD_SIZE_P2;
 
-		// Write
-		let tree = Tree::new(self, bg, OBJECT_LIST_ID);
+		// Resize if necessary
 		let len = self
 			.data
 			.borrow_mut()
@@ -168,9 +164,29 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			.iter()
 			.last()
 			.map_or(0, |r| r.end);
-		let len = len.max(id + N as u64);
-		tree.resize(len << RECORD_SIZE_P2).await?;
-		tree.write(offset, b.flatten()).await?;
+		Tree::new(self, bg, OBJECT_LIST_ID)
+			.resize(len << RECORD_SIZE_P2)
+			.await?;
+
+		// Create objects
+		for id in id..id + amount {
+			let new_root = Record { references: 1.into(), ..Default::default() };
+			if let Some((mut obj, _)) = self.wait_object(id).await {
+				debug_assert_eq!(obj.data.root().length, 0, "new object is not empty");
+				debug_assert_eq!(
+					obj.data.root().references,
+					0,
+					"new object has non-zero refcount"
+				);
+				obj.data.set_root(&new_root);
+			} else {
+				let mut data = self.data.borrow_mut();
+				let mut tree = TreeData::new(new_root, self.max_record_size());
+				tree.set_root(&new_root); // mark as dirty.
+				let tree = Present { data: tree, refcount: data.lru.object_add_noref(id) };
+				data.objects.insert(id, Slot::Present(tree));
+			}
+		}
 
 		// Tadha!
 		Ok(id)

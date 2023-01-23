@@ -734,7 +734,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		};
 
 		// Create objects (dir, map, heap).
-		let slf_id = fs.storage.create_many::<3>(bg).await?;
+		let slf_id = fs.storage.create_many(bg, 3).await?;
 
 		// Create header.
 		let (hash_ty, hash_key) = data.hasher.to_raw();

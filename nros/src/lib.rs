@@ -208,11 +208,12 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 	}
 
 	/// Create multiple adjacent objects, from ID up to ID + N - 1.
-	pub async fn create_many<'a, 'b, const N: usize>(
+	pub async fn create_many<'a, 'b>(
 		&'a self,
 		bg: &'b Background<'a, D>,
+		amount: u64,
 	) -> Result<u64, Error<D>> {
-		self.store.create_many::<N>(bg).await
+		self.store.create_many(bg, amount).await
 	}
 
 	pub async fn finish_transaction<'a, 'b>(

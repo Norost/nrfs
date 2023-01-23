@@ -92,7 +92,7 @@ fn create_destroy_pair() {
 	let s = new(MaxRecordSize::K1);
 	let bg = Default::default();
 	run2(&bg, async {
-		let id = s.create_many::<2>(&bg).await.unwrap();
+		let id = s.create_many(&bg, 2).await.unwrap();
 		let obj_a = s.get(&bg, id + 0).await.unwrap();
 		let obj_b = s.get(&bg, id + 1).await.unwrap();
 		obj_a.decrease_reference_count().await.unwrap();
