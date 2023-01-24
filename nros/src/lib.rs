@@ -96,30 +96,77 @@ mod trace {
 
 #[cfg(feature = "trace")]
 mod trace {
-	use core::{cell::Cell, fmt::Arguments};
+	use core::{
+		cell::{Cell, RefCell},
+		fmt::Arguments,
+	};
+
+	#[derive(Default)]
+	struct Tracker {
+		task_depth: rustc_hash::FxHashMap<u64, usize>,
+		task_stack: Vec<u64>,
+		id_counter: u64,
+	}
 
 	thread_local! {
-		static DEPTH: Cell<usize> = Cell::new(0);
+		static TRACKER: RefCell<Tracker> = Default::default();
+	}
+
+	fn with<R>(f: impl FnOnce(&mut Tracker) -> R) -> R {
+		TRACKER.with(|t| f(&mut t.borrow_mut()))
 	}
 
 	pub fn print_debug(args: &Arguments<'_>) {
-		DEPTH.with(|depth| {
-			eprintln!("[nros]{:>pad$} {}", "", args, pad = depth.get() * 2);
-		})
+		with(|t| {
+			let id = *t.task_stack.last().unwrap_or(&0);
+			let depth = *t.task_depth.get(&id).unwrap_or(&0);
+			eprintln!("[nros:<{}>]{:>pad$} {}", id, "", args, pad = depth * 2);
+		});
 	}
 
-	pub struct Trace;
+	pub struct Trace(u64);
 
 	impl Trace {
 		pub fn new() -> Self {
-			DEPTH.with(|depth| depth.update(|x| x + 1));
-			Self
+			with(|t| {
+				let id = *t.task_stack.last().unwrap_or(&0);
+				*t.task_depth.entry(id).or_default() += 1;
+				Self(id)
+			})
 		}
 	}
 
 	impl Drop for Trace {
 		fn drop(&mut self) {
-			DEPTH.with(|depth| depth.update(|x| x - 1));
+			with(|t| {
+				let depth = t.task_depth.get_mut(&self.0).unwrap();
+				*depth -= 1;
+				if *depth == 0 {
+					t.task_depth.remove(&self.0).unwrap();
+				}
+			});
+		}
+	}
+
+	pub fn gen_taskid() -> u64 {
+		with(|t| {
+			t.id_counter += 1;
+			t.id_counter
+		})
+	}
+
+	pub struct TraceTask;
+
+	impl TraceTask {
+		pub fn new(id: u64) -> Self {
+			with(|t| t.task_stack.push(id));
+			Self
+		}
+	}
+
+	impl Drop for TraceTask {
+		fn drop(&mut self) {
+			with(|t| t.task_stack.pop());
 		}
 	}
 }
@@ -150,8 +197,7 @@ use {
 	storage::DevSet,
 };
 
-pub type Background<'a, D> =
-	background::Background<Pin<Box<dyn Future<Output = Result<(), Error<D>>> + 'a>>>;
+pub type Background<'a, D> = background::Background<'a, Result<(), Error<D>>>;
 
 #[derive(Debug)]
 pub struct Nros<D: Dev, R: Resource> {

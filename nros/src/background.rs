@@ -6,36 +6,49 @@ use {
 		pin::Pin,
 		task::{Poll, Waker},
 	},
-	futures_util::{stream::FuturesUnordered, FutureExt, Stream, TryStreamExt},
+	futures_util::{stream::FuturesUnordered, FutureExt, Stream},
 };
+
+type Task<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// Background task runner.
 ///
 /// This is used for tasks that have no immediate effect on user applications.
-pub struct Background<Fut> {
-	inner: RefCell<Inner<Fut>>,
+pub struct Background<'a, T> {
+	inner: RefCell<Inner<'a, T>>,
 	// Tell the user very loudly to use Background::drop
 	_anti_drop: Guard,
 }
 
-struct Inner<Fut> {
+struct Inner<'a, T> {
 	/// Active background tasks.
-	tasks: FuturesUnordered<Fut>,
+	tasks: FuturesUnordered<Task<'a, T>>,
 	/// Waker for completing background tasks.
 	waker: Option<Waker>,
 }
 
-impl<Fut> Background<Fut> {
+impl<'a, T: 'a> Background<'a, T> {
 	/// Add a background task.
-	pub(crate) fn run_background(&self, task: Fut) {
+	pub(crate) fn run_background(&self, task: Task<'a, T>) {
 		trace!("run_background");
+
+		#[cfg(feature = "trace")]
+		let task = {
+			let mut task = task;
+			let id = crate::trace::gen_taskid();
+			Box::pin(core::future::poll_fn(move |cx| {
+				let _trace = crate::trace::TraceTask::new(id);
+				Pin::new(&mut task).poll(cx)
+			}))
+		};
+
 		let mut bg = self.inner.borrow_mut();
 		bg.tasks.push(task);
 		bg.waker.take().map(|w| w.wake());
 	}
 }
 
-impl<Fut: Future<Output = Result<(), E>>, E> Background<Fut> {
+impl<'a, E> Background<'a, Result<(), E>> {
 	/// Try to complete all background tasks.
 	///
 	/// Returns as soon as an error is caught.
@@ -61,16 +74,16 @@ impl<Fut: Future<Output = Result<(), E>>, E> Background<Fut> {
 
 	pub async fn drop(self) -> Result<(), E> {
 		trace!("Background::drop");
+
+		let res = self.try_run_all().await;
+
 		let Self { inner, _anti_drop } = self;
 		core::mem::forget(_anti_drop);
-		let mut bg = inner.into_inner();
-		let res = Pin::new(&mut bg.tasks)
-			.try_for_each(|_| future::ready(Ok(())))
-			.await;
+
 		if res.is_err() {
-			bg.tasks.clear();
+			inner.borrow_mut().tasks.clear();
 		}
-		debug_assert!(bg.tasks.is_empty());
+		debug_assert!(inner.borrow_mut().tasks.is_empty());
 		res
 	}
 
@@ -111,7 +124,7 @@ impl<Fut: Future<Output = Result<(), E>>, E> Background<Fut> {
 	}
 }
 
-impl<Fut> Default for Background<Fut> {
+impl<T> Default for Background<'_, T> {
 	fn default() -> Self {
 		Self {
 			inner: Inner { tasks: Default::default(), waker: Default::default() }.into(),
@@ -120,7 +133,7 @@ impl<Fut> Default for Background<Fut> {
 	}
 }
 
-impl<Fut> fmt::Debug for Background<Fut> {
+impl<T> fmt::Debug for Background<'_, T> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let bg = self.inner.borrow_mut();
 		f.debug_struct(stringify!(Background))
