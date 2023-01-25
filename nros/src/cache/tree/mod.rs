@@ -215,6 +215,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		} else if new_len > len {
 			self.grow(new_len, &root).await
 		} else {
+			trace!(info "len is {}, nothing to do", len);
 			Ok(())
 		}
 	}

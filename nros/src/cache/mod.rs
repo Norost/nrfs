@@ -599,7 +599,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 					if do_remove {
 						// Forget the object, which should be all zeroes.
-						debug_assert!(obj.data.root().length == 0, "pseudo object leaks entries");
+						debug_assert_eq!(obj.data.root().length, 0, "pseudo object leaks entries");
 						data.objects.remove(&key.id());
 					}
 

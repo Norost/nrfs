@@ -48,25 +48,22 @@ pub enum Op {
 impl fmt::Debug for Op {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		macro_rules! hex {
-			($self:ident $f:ident $([$name:ident $($field:ident)*])*) => {
-				match $self {
+			($([$name:ident $($field:ident)*])*) => {
+				match self {
 					$(
-						Op::$name { $($field,)* } => $f
+						Op::$name { $($field,)* } => f
 							.debug_struct(stringify!($name))
 							$(.field(stringify!($field), &format_args!("{:#x}", $field)))*
 							.finish(),
 					)*
-					&Op::Remount { cache_size: [a, b, c] } => {
-						let x = u32::from_le_bytes([a, b, c, 0]);
-						f.debug_struct("Remount")
-							.field("cache_size", &format_args!("{:#x}", x))
-							.finish()
-					}
+					&Op::Remount { cache_size } => f
+						.debug_struct("Remount")
+						.field("cache_size", &format_args!("{:#x?}", cache_size))
+						.finish(),
 				}
 			};
 		}
 		hex! {
-			self f
 			[Create size]
 			[Write idx offset amount]
 			[Read idx offset amount]
@@ -1282,6 +1279,24 @@ fn update_record_replace_root_parent_depth_check() {
 			Resize { idx: 0, size: 0xffffffffffffffff },
 			Resize { idx: 0, size: 0x400 },
 			Resize { idx: 0, size: 0x2fff },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn move_object_update_record_stale_self_id() {
+	Test::new(
+		1 << 16,
+		1 << 20,
+		[
+			Create { size: 0 },
+			Create { size: 0x100000 },
+			Remount { cache_size: [89, 0x0, 0x0] },
+			Write { idx: 1, offset: 0, amount: 0x3801 },
+			Write { idx: 1, offset: 0, amount: 0x3801 },
+			Move { from_idx: 1, to_idx: 0 },
+			Resize { idx: 0, size: 0x8000 },
 		],
 	)
 	.run()
