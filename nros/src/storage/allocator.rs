@@ -220,7 +220,7 @@ impl Allocator {
 		for i in start..start + blocks {
 			debug_assert!(self.alloc_map.contains(&i), "double free (lba: {})", i);
 			debug_assert!(!self.free_map.contains(&i), "double free (lba: {})", i);
-			if !cfg!(feature = "never-overwrite-in-transaction") && self.dirty_map.contains(&i) {
+			if !cfg!(feature = "never-overwrite") && self.dirty_map.contains(&i) {
 				self.dirty_map.remove(i..i + 1);
 				self.alloc_map.remove(i..i + 1);
 			} else {

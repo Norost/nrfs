@@ -47,7 +47,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				}
 			});
 			match obj {
-				Ok(obj) => Poll::Ready(Some((obj, lru))),
+				Ok(obj) => {
+					#[cfg(debug_assertions)]
+					obj.data.check_integrity();
+					Poll::Ready(Some((obj, lru)))
+				}
 				Err(_) if busy.is_some() => Poll::Pending,
 				Err(_) => Poll::Ready(None),
 			}

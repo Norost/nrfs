@@ -1,137 +1,68 @@
 use {
-	super::{Cache, EntryRef, Key, Tree, RECORD_SIZE_P2},
-	crate::{resource::Buf, util::get_record, Background, Dev, Error, Resource},
+	super::{Busy, EntryRef, Key, Present, Slot, Tree},
+	crate::{resource::Buf, Dev, Error, Record, Resource},
+	alloc::rc::Rc,
+	core::cell::{RefCell, RefMut},
 };
 
-impl<D: Dev, R: Resource> Cache<D, R> {
-	/// Get a cache entry of a tree node.
-	///
-	/// It may fetch up to [`MAX_DEPTH`] of parent entries.
-	///
-	/// Note that `offset` must already include appropriate shifting.
-	///
-	/// # Note
-	///
-	/// This accounts for entries being moved to pseudo-objects while fetching.
-	///
-	/// The proper ID can be found in the returned entry's `key` field.
-	pub(super) async fn tree_fetch_entry<'a, 'b>(
-		&'a self,
-		bg: &'b Background<'a, D>,
-		key: Key,
+impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
+	/// Fetch a record for a cache entry.
+	pub(super) async fn fetch(
+		&self,
+		record: &Record,
+		busy: &Rc<RefCell<Busy>>,
 	) -> Result<EntryRef<'a, D, R>, Error<D>> {
-		trace!("tree_fetch_entry {:?}", key,);
-
-		// Steps:
-		//
-		// 2. Find the record or the first ancestor that is present.
-		//    If found, extract the proper record from it.
-		//    If none are present, take the root record.
-		// 1. Check if the entry is present.
-		//    If so, just return it.
-		// 3. Fetch the data associated with the taken record.
-		//    Do this "recursively" until the target is reached.
-
-		let rec_size = self.max_record_size().to_raw();
-
-		let mut id = key.id();
-		let target_depth = key.depth();
-		let offset = key.offset();
-
-		let mut cur_depth = target_depth;
-		let depth_offset_shift = |d| (rec_size - RECORD_SIZE_P2) * (d - target_depth);
-
-		let (obj, _) = self.fetch_object(bg, id).await?;
-		let root = obj.data.root();
-		let len = u64::from(root.total_length);
-		drop(obj);
-
-		// Find the first parent or leaf entry that is present starting from a leaf
-		// and work back downwards.
-
-		let obj_depth = super::depth(self.max_record_size(), len);
-
-		debug_assert!(
-			target_depth < obj_depth,
-			"target depth exceeds object depth"
+		trace!(
+			"fetch {:?} <- ({}, {})",
+			busy.borrow_mut().key,
+			record.lba,
+			record.length
 		);
 
-		// FIXME we need to be careful with resizes while this task is running.
-		// Perhaps lock object IDs somehow?
+		let entry = self.cache.store.read(record).await?;
 
-		// Go up and check if a parent entry is either present or being fetched.
-		let entry = 's: {
-			while cur_depth < obj_depth {
-				// Check if the entry is already present or being fetched.
-				let key = Key::new(0, id, cur_depth, offset >> depth_offset_shift(cur_depth));
-				if let Some(entry) = self.wait_entry(key).await {
-					id = entry.key.id();
-					break 's Some(entry);
-				}
-				// Try the next level
-				cur_depth += 1;
-			}
-			None
-		};
+		let key = busy.borrow_mut().key;
 
-		// Get first record to fetch.
-		let mut record;
-		// Check if we found any cached record at all.
-		if let Some(entry) = entry {
-			if cur_depth == target_depth {
-				// The entry we need is already present
-				return Ok(entry);
-			}
+		let mut comp = self.cache.get_entryref_components(key).expect("no entry");
 
-			// Start from a parent record.
-			debug_assert!(cur_depth < obj_depth, "parent should be below root");
-			cur_depth -= 1;
-			let offt = offset >> depth_offset_shift(cur_depth);
-			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
-				.try_into()
-				.unwrap();
-			record = get_record(entry.get(), index).unwrap_or_default();
-		} else {
-			// Start from the root.
-			debug_assert_eq!(cur_depth, obj_depth, "root should be at obj_depth");
-			record = root;
-			cur_depth -= 1;
-		}
+		let entry = RefMut::map(comp.slot, |slot| {
+			let Slot::Busy(busy) = slot else { unreachable!("not busy") };
+			busy.borrow_mut().wakers.drain(..).for_each(|w| w.wake());
+			let refcount = comp.lru.entry_add(key, busy.clone(), entry.len());
 
-		// Fetch records until we can lock the one we need.
-		debug_assert!(cur_depth >= target_depth);
-		let entry = loop {
-			let key = Key::new(0, id, cur_depth, offset >> depth_offset_shift(cur_depth));
-			let entry = self.fetch_entry(bg, key, &record).await?;
-			id = entry.key.id();
+			*slot = Slot::Present(Present { data: entry, refcount });
+			let Slot::Present(e) = slot else { unreachable!() };
+			e
+		});
 
-			// Check if we got the record we need.
-			if cur_depth == target_depth {
-				break entry;
-			}
-
-			cur_depth -= 1;
-
-			// Fetch the next record.
-			let offt = offset >> depth_offset_shift(cur_depth);
-			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
-				.try_into()
-				.unwrap();
-			record = get_record(entry.get(), index).unwrap_or_default();
-		};
-
-		Ok(entry)
+		Ok(EntryRef::new(
+			self.cache,
+			key,
+			entry,
+			comp.dirty_markers,
+			comp.lru,
+		))
 	}
-}
 
-impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
-	/// Get a cache entry of a tree node.
+	/// Mark a slot as busy.
 	///
-	/// It may fetch up to [`MAX_DEPTH`] of parent entries.
+	/// # Panics
 	///
-	/// Note that `offset` must already include appropriate shifting.
-	pub(super) async fn get(&self, depth: u8, offset: u64) -> Result<EntryRef<'a, D, R>, Error<D>> {
-		let key = Key::new(0, self.id, depth, offset);
-		self.cache.tree_fetch_entry(self.background, key).await
+	/// The slot is not empty.
+	pub(super) fn mark_busy(&self, depth: u8, offset: u64) -> Rc<RefCell<Busy>> {
+		let data = &mut *self.cache.data.borrow_mut();
+
+		let Some(Slot::Present(obj)) = data.objects.get_mut(&self.id)
+			else { unreachable!("no object") };
+
+		let busy = Busy::new(Key::new(0, self.id, depth, offset));
+
+		let level = &mut obj.data.data[usize::from(depth)];
+		let prev = level.slots.insert(offset, Slot::Busy(busy.clone()));
+		debug_assert!(prev.is_none());
+
+		data.lru.object_increase_refcount(&mut obj.refcount);
+
+		busy
 	}
 }

@@ -7,7 +7,6 @@ use {
 };
 
 /// A single cached record tree.
-#[derive(Debug)]
 pub(in super::super) struct TreeData<R: Resource> {
 	/// The root of the tree.
 	///
@@ -18,6 +17,15 @@ pub(in super::super) struct TreeData<R: Resource> {
 	/// The index in the array is correlated with depth.
 	/// The key is correlated with offset.
 	pub data: Box<[Level<R>]>,
+}
+
+impl<R: Resource> fmt::Debug for TreeData<R> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(TreeData))
+			.field("root", &self.root)
+			.field("data", &self.data)
+			.finish()
+	}
 }
 
 pub(in super::super) struct Level<R: Resource> {
@@ -176,6 +184,22 @@ impl<R: Resource> TreeData<R> {
 	/// Clear the dirty status of this object.
 	pub fn clear_dirty(&mut self) {
 		self.root._reserved = 0;
+	}
+
+	#[cfg(debug_assertions)]
+	#[track_caller]
+	pub fn check_integrity(&self) {
+		if let Some(Slot::Present(e)) = self.data.last().and_then(|l| l.slots.get(&0)) {
+			let is_dirty = self
+				.data
+				.last()
+				.and_then(|l| l.dirty_markers.get(&0))
+				.is_some_and(|l| l.is_dirty);
+			let must_be_empty = self.root.length == 0;
+			if !is_dirty && (e.data.len() == 0) != must_be_empty {
+				panic!("mismatch between root record and entry");
+			}
+		}
 	}
 }
 

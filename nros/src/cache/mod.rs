@@ -92,11 +92,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	///
 	/// If `dirty_cache_max` is smaller than the maximum record size.
 	pub fn new(store: Store<D, R>, global_cache_max: usize) -> Self {
-		assert!(
-			global_cache_max >= 1 << store.max_record_size().to_raw(),
-			"cache size is smaller than the maximum record size"
-		);
-
 		// TODO iterate over object list to find free slots.
 		let mut used_objects_ids = RangeSet::new();
 		let len = u64::from(store.object_list().total_length);
@@ -392,71 +387,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		Ok(obj)
 	}
 
-	/// Fetch a record for a cache entry.
-	///
-	/// If the entry is already being fetched,
-	/// the caller is instead added to a list to be waken up when the fetcher has finished.
-	async fn fetch_entry<'a, 'b>(
-		&'a self,
-		bg: &'b Background<'a, D>,
-		key: Key,
-		record: &Record,
-	) -> Result<EntryRef<'a, D, R>, Error<D>> {
-		trace!(
-			"fetch_entry {:?} <- ({}, {})",
-			key,
-			record.lba,
-			record.length
-		);
-		// Steps:
-		// 1. Try to get the entry directly or by waiting for another tasks.
-		// 2. Otherwise, fetch it ourselves.
-
-		// 1. Try to get the entry directly or by waiting for another tasks.
-		if let Some(entry) = self.wait_entry(key).await {
-			return Ok(entry);
-		}
-
-		// 2. Otherwise, fetch it ourselves.
-
-		// Insert a new entry and increase refcount to object.
-		let (mut obj, mut lru) = self.fetch_object(bg, key.id()).await?;
-		let busy = Busy::new(key);
-		obj.add_entry(
-			&mut lru,
-			key.depth(),
-			key.offset(),
-			Slot::Busy(busy.clone()),
-		);
-		drop((obj, lru));
-
-		// Fetch it
-		let entry = self.store.read(record).await?;
-
-		let key = busy.borrow_mut().key;
-
-		// Insert the entry.
-		let mut comp = self.get_entryref_components(key).expect("no entry");
-		let entry = RefMut::map(comp.slot, |slot| {
-			let Slot::Busy(busy) = slot else { unreachable!("not busy") };
-			busy.borrow_mut().wakers.drain(..).for_each(|w| w.wake());
-			let refcount = comp.lru.entry_add(key, busy.clone(), entry.len());
-
-			*slot = Slot::Present(Present { data: entry, refcount });
-			let Slot::Present(e) = slot else { unreachable!() };
-			e
-		});
-
-		// Presto
-		Ok(EntryRef::new(
-			self,
-			key,
-			entry,
-			comp.dirty_markers,
-			comp.lru,
-		))
-	}
-
 	/// Readjust cache size.
 	///
 	/// This may be useful to increase or decrease depending on total system memory usage.
@@ -639,6 +569,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 						key.depth(),
 						key.offset(),
 						record,
+						&busy,
 					))
 					.await?;
 
@@ -749,13 +680,13 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				Busy::new(key)
 			}
 		};
-		*slot = Slot::Busy(busy);
+		*slot = Slot::Busy(busy.clone());
 
 		// Store entry.
 		drop(data_ref);
 		let (rec, entry) = self.store.write(entry).await?;
 		Tree::new(self, bg, key.id())
-			.update_record(key.depth(), key.offset(), rec)
+			.update_record(key.depth(), key.offset(), rec, &busy)
 			.await?;
 
 		// Put entry back in.
@@ -765,7 +696,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let level = &mut obj.data.data[usize::from(key.depth())];
 		let slot = level.slots.get_mut(&key.offset()).expect("no entry");
 
-		let Slot::Busy(busy) = slot else { unreachable!("entry not busy") };
+		debug_assert!(matches!(slot, Slot::Busy(_)), "entry not busy");
 		busy.borrow_mut().wakers.drain(..).for_each(|w| w.wake());
 		let refcount = data.lru.entry_add(key, busy.clone(), entry.len());
 

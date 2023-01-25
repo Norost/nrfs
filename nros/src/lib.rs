@@ -96,10 +96,7 @@ mod trace {
 
 #[cfg(feature = "trace")]
 mod trace {
-	use core::{
-		cell::{Cell, RefCell},
-		fmt::Arguments,
-	};
+	use core::{cell::RefCell, fmt::Arguments};
 
 	#[derive(Default)]
 	struct Tracker {
@@ -190,12 +187,7 @@ pub use {
 	storage::{dev, Dev, Store},
 };
 
-use {
-	cache::Cache,
-	core::{fmt, future::Future, pin::Pin},
-	record::Record,
-	storage::DevSet,
-};
+use {cache::Cache, core::fmt, record::Record, storage::DevSet};
 
 pub type Background<'a, D> = background::Background<'a, Result<(), Error<D>>>;
 

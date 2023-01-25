@@ -1,6 +1,6 @@
 use {
 	super::{Buf, Dev, Error, Key, Resource, Tree, RECORD_SIZE_P2},
-	crate::{util, Record},
+	crate::util,
 };
 
 impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
@@ -89,11 +89,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		} else {
 			// If the object depth is 1, determine if we can just insert a zero record and be done.
 			if root_depth == 1 && offset == 0 {
-				let key = Key::new(0, self.id, 0, 0);
-				self.cache
-					.fetch_entry(self.background, key, &Record::default())
-					.await?
-					.modify(self.background, |data| data.resize(0, 0));
+				self.set(0, self.cache.resource().alloc()).await?;
 				return Ok(len);
 			}
 		}
@@ -136,16 +132,11 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				}
 
 				// Check if there are any unvisited dirty children.
-				let dirty_children = &Default::default();
-				let dirty_children = entry
-					.dirty_markers
-					.get(&entry.key.offset())
-					.map_or(dirty_children, |m| &m.children);
-				if dirty_children
-					.iter()
-					.any(|&o| o >= offt * entries_per_parent | index)
-				{
-					break entry;
+				if let Some(markers) = entry.dirty_markers.get(&entry.key.offset()) {
+					let i = offt * entries_per_parent | index;
+					if markers.children.iter().any(|&o| o >= i) {
+						break entry;
+					}
 				}
 
 				// Adjust offset to skip zero records.
@@ -206,11 +197,13 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				// Fetch next entry.
 				depth -= 1;
 				drop(entry);
-				let key = Key::new(0, self.id, depth, offset >> shift(depth));
-				entry = self
-					.cache
-					.fetch_entry(self.background, key, &record)
-					.await?;
+				let k = Key::new(0, self.id, depth, offset >> shift(depth));
+				entry = if let Some(e) = self.cache.wait_entry(k).await {
+					e
+				} else {
+					let busy = self.mark_busy(k.depth(), k.offset());
+					self.fetch(&record, &busy).await?
+				};
 			}
 			debug_assert!(offset <= end_root, "offset out of range");
 
@@ -219,11 +212,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let index = offset % entries_per_parent;
 			let index_end = (entries_per_parent - 1).min(index + end_offset.saturating_sub(offset));
 			for _ in index..index_end + 1 {
-				let key = Key::new(0, self.id, 0, offset);
-				self.cache
-					.fetch_entry(self.background, key, &Record::default())
-					.await?
-					.modify(self.background, |data| data.resize(0, 0));
+				self.set(offset, self.cache.resource().alloc()).await?;
 				offset += 1;
 			}
 

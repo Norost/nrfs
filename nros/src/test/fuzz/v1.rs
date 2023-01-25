@@ -36,7 +36,7 @@ pub enum Op {
 	/// Also verifies contents.
 	Read { idx: u8, offset: u64, amount: u16 },
 	/// Remount the filesystem.
-	Remount,
+	Remount { cache_size: [u8; 3] },
 	/// Move an object.
 	///
 	/// This destroys the old object.
@@ -56,7 +56,12 @@ impl fmt::Debug for Op {
 							$(.field(stringify!($field), &format_args!("{:#x}", $field)))*
 							.finish(),
 					)*
-					Op::Remount => f.debug_struct("Remount").finish(),
+					&Op::Remount { cache_size: [a, b, c] } => {
+						let x = u32::from_le_bytes([a, b, c, 0]);
+						f.debug_struct("Remount")
+							.field("cache_size", &format_args!("{:#x}", x))
+							.finish()
+					}
 				}
 			};
 		}
@@ -76,12 +81,12 @@ impl<'a> Arbitrary<'a> for Test {
 		// Always start with a create.
 		let create_op = Op::Create { size: u.arbitrary()? };
 
-		let dirty_cache_size = u.int_in_range(1024..=1 << 24)?;
-		let global_cache_size = u.int_in_range(dirty_cache_size..=1 << 24)?;
+		let &[a, b, c] = u.bytes(3)? else { unreachable!() };
+		let cache_size = u32::from_le_bytes([a, b, c, 0]) as usize;
 
 		Ok(Self::new(
 			1 << 16,
-			global_cache_size,
+			cache_size,
 			[Ok(create_op)]
 				.into_iter()
 				.chain(u.arbitrary_iter::<Op>()?)
@@ -104,6 +109,7 @@ impl Test {
 		self.ops.reverse();
 		while !self.ops.is_empty() {
 			let bg = Background::default();
+			let mut new_cache_size = 0;
 			run2(&bg, async {
 				while let Some(op) = self.ops.pop() {
 					match op {
@@ -153,7 +159,11 @@ impl Test {
 								}
 							}
 						}
-						Op::Remount => break,
+						Op::Remount { cache_size: [a, b, c] } => {
+							let f = usize::from;
+							new_cache_size = f(a) | f(b) << 8 | f(c) << 16;
+							break;
+						}
 						Op::Move { from_idx, to_idx } => {
 							let from_i = from_idx as usize % self.ids.len();
 							let to_i = to_idx as usize % self.ids.len();
@@ -187,7 +197,7 @@ impl Test {
 			block_on(bg.drop()).unwrap();
 			self.store = block_on(async {
 				let devs = self.store.unmount().await.unwrap();
-				Nros::load(StdResource::new(), devs, 4096, true)
+				Nros::load(StdResource::new(), devs, new_cache_size, true)
 					.await
 					.unwrap()
 			});
@@ -199,7 +209,15 @@ use Op::*;
 
 #[test]
 fn unset_allocator_lba() {
-	Test::new(512, 4096, [Create { size: 18446744073709486123 }, Remount]).run()
+	Test::new(
+		512,
+		4096,
+		[
+			Create { size: 18446744073709486123 },
+			Remount { cache_size: [0, 16, 0] },
+		],
+	)
+	.run()
 }
 
 #[test]
@@ -209,20 +227,20 @@ fn allocator_save_space_leak() {
 		4096,
 		[
 			Create { size: 18446744073709546299 },
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
 		],
 	)
 	.run()
@@ -248,7 +266,7 @@ fn tree_write_full_to_id_0() {
 		4096,
 		[
 			Create { size: 18446587943058402107 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 			Create { size: 5425430176097894400 },
 			Write { idx: 1, offset: 21193410011155275, amount: 19275 },
 		],
@@ -264,8 +282,8 @@ fn tree_read_offset_len_check_overflow() {
 		[
 			Create { size: 18446744073709551595 },
 			Read { idx: 0, offset: 18446744073709551509, amount: 38155 },
-			Remount,
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
+			Remount { cache_size: [0, 16, 0] },
 			Read { idx: 0, offset: 697696064, amount: 0 },
 		],
 	)
@@ -401,7 +419,7 @@ fn grow_root_double_ref() {
 			Create { size: 1 << 60 },
 			Write { idx: 0, offset: 96641949647915046, amount: u16::MAX },
 			Resize { idx: 0, size: u64::MAX },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 		],
 	)
 	.run()
@@ -415,7 +433,7 @@ fn tree_shrink_destroy_depth_off_by_one() {
 		[
 			Create { size: 6223798073269682271 },
 			Write { idx: 0, offset: 5999147927136639863, amount: 65286 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 			Resize { idx: 0, size: 1 },
 		],
 	)
@@ -594,9 +612,9 @@ fn unflushed_empty_dirty_entries() {
 		[
 			Create { size: 1026 },
 			Write { idx: 0, offset: 1025, amount: 1 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 			Resize { idx: 0, size: 1025 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 			Resize { idx: 0, size: 0 },
 		],
 	)
@@ -611,7 +629,7 @@ fn create_shrink() {
 		[
 			Create { size: 1 << 21 },
 			Resize { idx: 0, size: (1 << 20) + 1 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 		],
 	)
 	.run()
@@ -778,7 +796,7 @@ fn write_unmount_write_grow_data_loss() {
 		[
 			Create { size: 288230403347578881 },
 			Write { idx: 0, offset: 0, amount: 1 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 			Write { idx: 0, offset: 261207326956930858, amount: 14144 },
 			Resize { idx: 0, size: 10376293537170274103 },
 			Read { idx: 0, offset: 0, amount: 1 },
@@ -865,7 +883,7 @@ fn flush_entry_not_present() {
 		[
 			Create { size: 2377900809628855616 },
 			Write { idx: 0, offset: 18446742974197925947, amount: 65535 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 		],
 	)
 	.run()
@@ -908,7 +926,7 @@ fn flush_all_object_roots_background_barrier() {
 			Create { size: 62 },
 			Create { size: 11469823825814749087 },
 			Resize { idx: 1, size: 6989585522167382016 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 		],
 	)
 	.run()
@@ -937,7 +955,7 @@ fn unref_non_zero_pseudo_object() {
 		[
 			Create { size: 18446744073709486176 },
 			Write { idx: 0, offset: 17892238369727643649, amount: 20220 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 			Resize { idx: 0, size: 0 },
 		],
 	)
@@ -985,7 +1003,7 @@ fn unmount_no_background_poll() {
 			Create { size: 18377782021482283007 },
 			Write { idx: 0, offset: 10809483180534595583, amount: 33153 },
 			Resize { idx: 0, size: 9337654175918632573 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 		],
 	)
 	.run()
@@ -1033,7 +1051,7 @@ fn flush_all_skip_pseudo_id() {
 			Create { size: 1 << 63 },
 			Resize { idx: 1, size: 1 << 60 },
 			Write { idx: 1, offset: 0, amount: 1 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 			Read { idx: 1, offset: 0, amount: 1 },
 		],
 	)
@@ -1097,7 +1115,7 @@ fn flush_all_clear_object_dirty_status() {
 			Write { idx: 85, offset: 651061555542690134, amount: 2313 },
 			Create { size: 651061555542690057 },
 			Create { size: 651061555542690057 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 		],
 	)
 	.run()
@@ -1131,7 +1149,7 @@ fn pseudo_obj_leak_0() {
 			Write { idx: 1, offset: 1945555036615554048, amount: 36751 },
 			Write { idx: 1, offset: 1214522768312295936, amount: 63993 },
 			Move { from_idx: 0, to_idx: 1 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 		],
 	)
 	.run()
@@ -1144,7 +1162,7 @@ fn write_zeros_offset_out_of_range() {
 		1361,
 		[
 			Create { size: 18374686479973133664 },
-			Remount,
+			Remount { cache_size: [0, 16, 0] },
 			Write { idx: 0, offset: 18446462757646641112, amount: 65535 },
 			Write { idx: 0, offset: 8110804808010534912, amount: 36751 },
 			Write { idx: 0, offset: 18374687579183316818, amount: 65535 },
@@ -1155,7 +1173,7 @@ fn write_zeros_offset_out_of_range() {
 }
 
 #[test]
-fn f() {
+fn use_after_free_0() {
 	Test::new(
 		1 << 16,
 		1 << 10,
@@ -1167,6 +1185,87 @@ fn f() {
 			Write { idx: 0, offset: 4412964684131403709, amount: 65341 },
 			Resize { idx: 0, size: 72057594054639871 },
 			Resize { idx: 0, size: 2285700095 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn pseudo_obj_leak_1() {
+	Test::new(
+		1 << 16,
+		1024,
+		[
+			Create { size: 0x2004000 },
+			Write { idx: 0, offset: 0x2, amount: 0xffff }, // 0x10001
+			Write { idx: 0, offset: 0xf600, amount: 0x2100 }, // 0x11700
+			Resize { idx: 0, size: 0xffff },               // 0xffff (erase 0x10000 to 0x11700)
+		],
+	)
+	.run()
+}
+
+#[test]
+fn pseudo_obj_leak_2() {
+	Test::new(
+		1 << 16,
+		1428,
+		[
+			Create { size: 0x14000 },
+			Write { idx: 0, offset: 0xd300, amount: 0x5300 },
+			Write { idx: 0, offset: 0x7ffb, amount: 0xffff },
+			Resize { idx: 0, size: 0x401 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn use_after_free_1() {
+	Test::new(
+		1 << 16,
+		1085,
+		[
+			Create { size: 0x429ef0040000000 },
+			Write { idx: 0, offset: 0xffffffffffffff, amount: 0x102 },
+			Resize { idx: 0, size: 0xa5fffaffffffff },
+			Resize { idx: 0, size: 0x4900000000009002 },
+			Write { idx: 0, offset: 0xfff9ffffffffffff, amount: 0xffff },
+			Resize { idx: 0, size: 0xfffffff9ffffff },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn pseudo_obj_leak_3() {
+	Test::new(
+		1 << 16,
+		1 << 24,
+		[
+			Create { size: 0xffffffffffffff1e },
+			Write { idx: 0, offset: 0x4ffff, amount: 0xff00 },
+			Remount { cache_size: [0, 16, 0] },
+			Resize { idx: 0, size: 0xf420fb6c201ffff },
+			Resize { idx: 0, size: 0xff49493dffffffff },
+			Write { idx: 0, offset: 0x47ffffffff494949, amount: 0x9fff },
+			Resize { idx: 0, size: 0xf420fb6c201ffff },
+			Resize { idx: 0, size: 0x0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn tree_get_chain_hop_off_by_one() {
+	Test::new(
+		1 << 16,
+		255,
+		[
+			Create { size: 0x2000001 },
+			Write { idx: 0, offset: 0x817000, amount: 0x2000 },
+			Write { idx: 0, offset: 0x817000, amount: 0x2000 },
+			Resize { idx: 0, size: 0x820000 },
 		],
 	)
 	.run()
