@@ -38,17 +38,19 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		debug_assert!(u128::from(offset) < max_offset, "offset out of range");
 
 		let replace_root = || {
+			debug_assert_eq!(offset, 0, "root can only be at offset 0");
+
 			let mut obj = self.cache.get_object(self.id).expect("no object");
 			#[cfg(debug_assertions)]
 			obj.check_integrity();
 			let root = obj.root();
 
-			debug_assert_eq!(offset, 0, "root can only be at offset 0");
-			debug_assert_eq!(
-				super::depth(self.max_record_size(), root.total_length.into()),
-				parent_depth,
-				"parent_depth is not at root depth",
-			);
+			// Ensure the record is actually supposed to be stored at the root.
+			let root_depth = super::depth(self.max_record_size(), root.total_length.into());
+			debug_assert!(parent_depth <= root_depth, "depth out of range");
+			if root_depth != parent_depth {
+				return false;
+			}
 
 			// Copy total length and references to new root.
 			let new_root =
@@ -68,28 +70,34 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// The object is guaranteed to be in the cache as update_record is only called
 			// during flush or evict.
 			obj.set_root(&new_root);
+
+			true
 		};
 
 		if cur_depth == parent_depth {
-			replace_root();
+			let replaced = replace_root();
+			debug_assert!(replaced, "parent_depth is not at root depth");
 		} else {
 			// Update a parent record.
 			// Find parent
 			let shift = self.max_record_size().to_raw() - RECORD_SIZE_P2;
 			let (offt, index) = super::divmod_p2(offset, shift);
 
-			let entry = self.get(parent_depth, offt).await?;
+			let mut entry = self.get(parent_depth, offt).await?;
 
 			// If the ID changed but does not match with what the busy entry gave us,
 			// check if we should write to the (new!) root instead.
-			if entry.key.id() != self.id && busy.borrow_mut().key.id() == self.id {
+			let k = entry.key;
+			if k.id() != self.id && busy.borrow_mut().key.id() == self.id {
 				debug_assert!(
 					!super::super::is_pseudo_id(self.id),
 					"pseudo objects should not be resized"
 				);
 				drop(entry);
-				replace_root();
-				return Ok(());
+				if replace_root() {
+					return Ok(());
+				}
+				entry = self.cache.get_entry(k).expect("no entry");
 			}
 
 			let old_record = util::get_record(entry.get(), index).unwrap_or_default();

@@ -1270,3 +1270,19 @@ fn tree_get_chain_hop_off_by_one() {
 	)
 	.run()
 }
+
+#[test]
+fn update_record_replace_root_parent_depth_check() {
+	Test::new(
+		1 << 16,
+		0,
+		[
+			Create { size: 0xd92300f407000000 },
+			Resize { idx: 0, size: 0xff },
+			Resize { idx: 0, size: 0xffffffffffffffff },
+			Resize { idx: 0, size: 0x400 },
+			Resize { idx: 0, size: 0x2fff },
+		],
+	)
+	.run()
+}
