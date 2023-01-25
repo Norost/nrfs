@@ -2,7 +2,9 @@
 
 set -e
 
-CMD="cargo fuzz run random_ops -s none -- -timeout=1s -max_len=1024"
+TIMEOUT=5s
+MAX_LEN=256
+CMD="cargo fuzz run random_ops -s none -j $2 -- -timeout=$TIMEOUT -max_len=$MAX_LEN"
 
 if [[ $# != 2 ]]
 then
@@ -14,10 +16,5 @@ session="fuzz-$1"
 
 tmux new-session -c "$1" -s "$session" -d "$CMD" \; selectl tiled
 tmux set remain-on-exit on
-
-for i in $(seq 2 "$2")
-do
-	tmux split-window -c "$1" -t "$session" -d "$CMD" \; selectl tiled
-done
 
 tmux attach-session -t "$session"
