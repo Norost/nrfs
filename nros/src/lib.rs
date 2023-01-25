@@ -97,12 +97,17 @@ macro_rules! trace {
 
 #[cfg(not(feature = "trace"))]
 mod trace {
+	use core::fmt::Arguments;
+
 	pub struct Trace;
 
 	impl Trace {
 		#[inline(always)]
 		pub fn new() {}
 	}
+
+	#[inline(always)]
+	pub fn print_debug(_prefix: &str, _args: &Arguments<'_>) {}
 }
 
 #[cfg(feature = "trace")]
