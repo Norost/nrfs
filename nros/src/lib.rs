@@ -77,9 +77,20 @@ macro_rules! n2e {
 
 /// Tracing in debug mode only.
 macro_rules! trace {
+	(info $($arg:tt)*) => {
+		if cfg!(feature = "trace") {
+			$crate::trace::print_debug("--> ", &format_args!($($arg)*));
+		}
+	};
+	(final $($arg:tt)*) => {
+		if cfg!(feature = "trace") {
+			$crate::trace::print_debug("==> ", &format_args!($($arg)*));
+		}
+	};
 	($($arg:tt)*) => {
-		#[cfg(feature = "trace")]
-		$crate::trace::print_debug(&format_args!($($arg)*));
+		if cfg!(feature = "trace") {
+			$crate::trace::print_debug("", &format_args!($($arg)*));
+		}
 		let _t = $crate::trace::Trace::new();
 	};
 }
@@ -113,11 +124,18 @@ mod trace {
 		TRACKER.with(|t| f(&mut t.borrow_mut()))
 	}
 
-	pub fn print_debug(args: &Arguments<'_>) {
+	pub fn print_debug(prefix: &str, args: &Arguments<'_>) {
 		with(|t| {
 			let id = *t.task_stack.last().unwrap_or(&0);
 			let depth = *t.task_depth.get(&id).unwrap_or(&0);
-			eprintln!("[nros:<{}>]{:>pad$} {}", id, "", args, pad = depth * 2);
+			eprintln!(
+				"[nros:<{}>]{:>pad$} {}{}",
+				id,
+				"",
+				prefix,
+				args,
+				pad = depth * 2
+			);
 		});
 	}
 

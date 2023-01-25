@@ -189,11 +189,11 @@ impl Allocator {
 						.insert(r.start, std::backtrace::Backtrace::capture());
 					assert!(r.is_none(), "double alloc\n{:#?}", r);
 				}
-				trace!("--> {}", r.start);
+				trace!(info "{}", r.start);
 				return Some(r.start);
 			}
 		}
-		trace!("--> N/A");
+		trace!(info "N/A");
 		None
 	}
 
@@ -258,18 +258,10 @@ impl Allocator {
 		D: Dev,
 		R: Resource,
 	{
-		{
-			trace!("save");
-		}
-		{
-			trace!("  alloc  {:?}", &self.alloc_map);
-		}
-		{
-			trace!("  dirty  {:?}", &self.dirty_map);
-		}
-		{
-			trace!("  free   {:?}", &self.free_map);
-		}
+		trace!("save");
+		trace!(info "alloc  {:?}", &self.alloc_map);
+		trace!(info "dirty  {:?}", &self.dirty_map);
+		trace!(info "free   {:?}", &self.free_map);
 
 		// Update map
 		// TODO it would be nice if we could avoid a Clone.
@@ -278,7 +270,7 @@ impl Allocator {
 			alloc_map.remove(r.clone());
 		}
 
-		trace!("    -->  {:?}", &alloc_map);
+		trace!(info "{:?}", &alloc_map);
 
 		// Save map
 		// TODO avoid writing the entire log every time.
@@ -367,7 +359,7 @@ impl Allocator {
 		self.free_map = Default::default();
 		self.dirty_map = Default::default();
 
-		trace!("    ==>  {:?}", &self.alloc_map);
+		trace!(final "{:?}", &self.alloc_map);
 
 		Ok(())
 	}

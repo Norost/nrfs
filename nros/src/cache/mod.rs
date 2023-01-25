@@ -69,7 +69,7 @@ impl<R: Resource> CacheData<R> {
 		counter += 1;
 		counter %= 1 << 59;
 		self.pseudo_id_counter = NonZeroU64::new(counter).unwrap_or(NonZeroU64::MIN);
-		trace!("--> {:#x}", id | ID_PSEUDO);
+		trace!(info "{:#x}", id | ID_PSEUDO);
 		id | ID_PSEUDO
 	}
 }
@@ -147,9 +147,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		trace!("create_many {}", amount);
 		// Allocate
 		let id = self.alloc_ids(amount);
-		{
-			trace!("--> {}", id);
-		}
+		trace!(info "{}", id);
 
 		// Resize if necessary
 		let len = self
@@ -452,7 +450,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 			let fut = if key.id() == OBJECT_LIST_ID {
 				// Just copy
-				trace!("--> object list");
+				trace!(info "object list");
 				self.store.set_object_list(root);
 				data.objects.remove(&key.id());
 				None
@@ -512,7 +510,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				})
 			} else {
 				// Just remove
-				trace!("--> not dirty");
+				trace!(info "not dirty");
 				data.objects.remove(&key.id());
 				None
 			};
@@ -538,7 +536,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				Some((entry, busy))
 			} else {
 				// Just remove the entry.
-				trace!("--> not dirty");
+				trace!(info "not dirty");
 				let level = &mut obj.data.data[usize::from(key.depth())];
 				let Some(Slot::Present(Present { data: entry, refcount: RefCount::NoRef { lru_index } })) = level.slots.remove(&key.offset())
 					else { unreachable!("no entry") };
@@ -559,9 +557,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					// Store record.
 					let (record, entry) = self.store.write(entry).await?;
 
-					{
-						trace!("{:?} ~1> {:?}", key, busy.borrow_mut().key);
-					}
+					trace!(info "{:?} ~1> {:?}", key, busy.borrow_mut().key);
 					let key = busy.borrow_mut().key;
 
 					let bg = Background::default(); // TODO get rid of this sillyness
@@ -573,9 +569,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					))
 					.await?;
 
-					{
-						trace!("{:?} ~2> {:?}", key, busy.borrow_mut().key);
-					}
+					trace!(info "{:?} ~2> {:?}", key, busy.borrow_mut().key);
 					let key = busy.borrow_mut().key;
 
 					// Unmark as being flushed.

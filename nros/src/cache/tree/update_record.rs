@@ -56,7 +56,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let new_root =
 				Record { total_length: root.total_length, references: root.references, ..record };
 			trace!(
-				"--> replace root ({}, {}) -> ({}, {})",
+				info "replace root ({}, {}) -> ({}, {})",
 				new_root.lba,
 				new_root.length,
 				root.lba,
@@ -103,7 +103,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let old_record = util::get_record(entry.get(), index).unwrap_or_default();
 			if old_record.length == 0 && record.length == 0 {
 				// Both the old and new record are zero, so don't dirty the parent.
-				trace!("--> skip both zero");
+				trace!(info "skip both zero");
 				debug_assert_eq!(old_record, Record::default());
 				debug_assert_eq!(record, Record::default());
 				return Ok(());
@@ -111,7 +111,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			entry.modify(self.background, |data| {
 				// Destroy old record
 				trace!(
-					"--> replace parent ({}, {}) -> ({}, {})",
+					info "replace parent ({}, {}) -> ({}, {})",
 					record.lba,
 					record.length,
 					old_record.lba,

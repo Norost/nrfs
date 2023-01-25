@@ -25,9 +25,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 		let cur_depth = super::depth(self.max_record_size(), cur_len);
 		let new_depth = super::depth(self.max_record_size(), new_len);
-		{
-			trace!("depth: {} -> {}", cur_depth, new_depth);
-		}
+		trace!(info "depth: {} -> {}", cur_depth, new_depth);
 
 		if new_depth < cur_depth {
 			// 1. If the depth changes, find new root.
