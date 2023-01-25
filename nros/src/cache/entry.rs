@@ -22,13 +22,16 @@ pub struct EntryRef<'a, D: Dev, R: Resource> {
 
 impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 	/// Construct a new [`EntryRef`] for the given entry.
+	///
+	/// This puts the entry at the back of the LRU queue.
 	pub(super) fn new(
 		cache: &'a Cache<D, R>,
 		key: Key,
 		entry: RefMut<'a, Present<R::Buf>>,
 		dirty_markers: RefMut<'a, FxHashMap<u64, Dirty>>,
-		lru: RefMut<'a, Lru>,
+		mut lru: RefMut<'a, Lru>,
 	) -> Self {
+		lru.touch(&entry.refcount);
 		Self { cache, key, entry, dirty_markers, lru }
 	}
 

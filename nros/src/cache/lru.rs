@@ -200,12 +200,16 @@ impl Lru {
 	}
 
 	/// Adjust the data usage of an entry.
-	///
-	/// This puts the entry at the *back* of the queue.
 	pub fn entry_adjust(&mut self, refcount: &RefCount, old_size: usize, new_size: usize) {
-		if let RefCount::NoRef { lru_index } = *refcount {
+		if let RefCount::NoRef { .. } = *refcount {
 			self.cache_size += new_size;
 			self.cache_size -= old_size;
+		}
+	}
+
+	/// Move an entry to the back of the queue.
+	pub fn touch(&mut self, refcount: &RefCount) {
+		if let RefCount::NoRef { lru_index } = *refcount {
 			self.lru.promote(lru_index);
 		}
 	}
