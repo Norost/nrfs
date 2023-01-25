@@ -14,7 +14,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// `busy` is used to ensure the record is written to the correct location
 	/// (root or parent record) in case the tree gets shrunk in the meantime.
 	pub(in super::super) async fn update_record(
-		&self,
+		self,
 		record_depth: u8,
 		offset: u64,
 		record: Record,
@@ -26,27 +26,31 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			record.lba,
 			record.length
 		);
+
+		let Self { mut id, cache, background } = self;
+
 		// The object is guaranteed to exist.
 		// At least, if called by a task that holds an entry, which should be guaranteed.
-		let cur_root = self.cache.get_object(self.id).expect("no object").root();
+		let cur_root = cache.get_object(id).expect("no object").root();
 		let len = u64::from(cur_root.total_length);
-		let cur_depth = super::depth(self.max_record_size(), len);
+		let cur_depth = super::depth(cache.max_record_size(), len);
 		let parent_depth = record_depth + 1;
+
 		debug_assert!(parent_depth <= cur_depth, "depth out of range");
 
-		let max_offset = super::max_offset(self.max_record_size(), cur_depth - record_depth);
+		let max_offset = super::max_offset(cache.max_record_size(), cur_depth - record_depth);
 		debug_assert!(u128::from(offset) < max_offset, "offset out of range");
 
 		let replace_root = |id| {
 			debug_assert_eq!(offset, 0, "root can only be at offset 0");
 
-			let mut obj = self.cache.get_object(id).expect("no object");
+			let mut obj = cache.get_object(id).expect("no object");
 			#[cfg(debug_assertions)]
 			obj.check_integrity();
 			let root = obj.root();
 
 			// Ensure the record is actually supposed to be stored at the root.
-			let root_depth = super::depth(self.max_record_size(), root.total_length.into());
+			let root_depth = super::depth(cache.max_record_size(), root.total_length.into());
 			debug_assert!(parent_depth <= root_depth, "depth out of range");
 			if root_depth != parent_depth {
 				return false;
@@ -64,7 +68,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			);
 
 			// Destroy old root.
-			self.cache.store.destroy(&root);
+			cache.store.destroy(&root);
 
 			// Store new root
 			// The object is guaranteed to be in the cache as update_record is only called
@@ -75,32 +79,41 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		};
 
 		if cur_depth == parent_depth {
-			let replaced = replace_root(self.id);
+			let replaced = replace_root(id);
 			debug_assert!(replaced, "parent_depth is not at root depth");
 		} else {
 			// Update a parent record.
 			// Find parent
-			let shift = self.max_record_size().to_raw() - RECORD_SIZE_P2;
+			let shift = cache.max_record_size().to_raw() - RECORD_SIZE_P2;
 			let (offt, index) = super::divmod_p2(offset, shift);
 
-			let mut entry = self.get(parent_depth, offt).await?;
+			let entry = loop {
+				let entry = Self::new(cache, background, id)
+					.get(parent_depth, offt)
+					.await?;
 
-			// If the ID changed but does not match with what the busy entry gave us,
-			// check if we should write to the (new!) root instead.
-			let entry_key = entry.key;
-			let busy_key = busy.borrow_mut().key;
-			trace!(info "{:?} >>> {:?} (self.id: {:#x})", busy_key, entry_key, self.id);
-			if entry_key.id() != busy_key.id() {
-				debug_assert!(
-					!super::super::is_pseudo_id(self.id),
-					"pseudo objects should not be resized"
-				);
-				drop(entry);
-				if replace_root(busy_key.id()) {
-					return Ok(());
+				// If the ID changed but does not match with what the busy entry gave us,
+				// check if we should write to the (new!) root instead.
+				let entry_key = entry.key;
+				let busy_key = busy.borrow_mut().key;
+				trace!(info "{:?} >>> {:?} (id: {:#x})", busy_key, entry_key, id);
+				if entry_key.id() != busy_key.id() {
+					debug_assert!(
+						!super::super::is_pseudo_id(id),
+						"pseudo objects should not be resized"
+					);
+					drop(entry);
+					if replace_root(busy_key.id()) {
+						return Ok(());
+					}
+				} else {
+					break entry;
 				}
-				entry = self.cache.get_entry(entry_key).expect("no entry");
-			}
+
+				// On failure, ensure we have the proper ID, which may have changed due to
+				// object_move, and try fetching the entry again.
+				id = busy_key.id();
+			};
 
 			let old_record = util::get_record(entry.get(), index).unwrap_or_default();
 			if old_record.length == 0 && record.length == 0 {
@@ -110,7 +123,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				debug_assert_eq!(record, Record::default());
 				return Ok(());
 			}
-			entry.modify(self.background, |data| {
+			entry.modify(background, |data| {
 				// Destroy old record
 				trace!(
 					info "replace parent ({}, {}) -> ({}, {})",
@@ -119,7 +132,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					old_record.lba,
 					old_record.length
 				);
-				self.cache.store.destroy(&old_record);
+				cache.store.destroy(&old_record);
 
 				// Calc offset in parent
 				let offt = index * mem::size_of::<Record>();

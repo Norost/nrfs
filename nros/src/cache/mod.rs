@@ -598,6 +598,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					debug_assert!(_r, "not marked");
 
 					if do_remove {
+						trace!(info "remove {:#x}", key.id());
 						// Forget the object, which should be all zeroes.
 						debug_assert_eq!(obj.data.root().length, 0, "pseudo object leaks entries");
 						data.objects.remove(&key.id());

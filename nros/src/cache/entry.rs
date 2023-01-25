@@ -144,17 +144,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		Some(EntryRefComponents { lru, slot, dirty_markers })
 	}
-
-	/// Try to get an entry directly.
-	pub(super) fn get_entry(&self, key: Key) -> Option<EntryRef<'_, D, R>> {
-		let EntryRefComponents { lru, slot, dirty_markers } = self.get_entryref_components(key)?;
-		let entry = RefMut::filter_map(slot, |s| {
-			let Slot::Present(e) = s else { return None };
-			Some(e)
-		})
-		.ok()?;
-		Some(EntryRef::new(self, key, entry, dirty_markers, lru))
-	}
 }
 
 pub(super) struct EntryRefComponents<'a, R: Resource> {

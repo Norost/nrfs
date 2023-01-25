@@ -1301,3 +1301,19 @@ fn move_object_update_record_stale_self_id() {
 	)
 	.run()
 }
+
+#[test]
+fn grow_shrink_grow_chain_update_record_retry() {
+	Test::new(
+		1 << 16,
+		0,
+		[
+			Create { size: 1 },
+			Write { idx: 0, offset: 0, amount: 1 },
+			Resize { idx: 0, size: 0x8000 },
+			Resize { idx: 0, size: 0x400 },
+			Resize { idx: 0, size: 0x8000 },
+		],
+	)
+	.run()
+}
