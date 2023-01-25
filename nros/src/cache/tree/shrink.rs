@@ -114,26 +114,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				}
 
 				// Fix keys of LRU entries & any busy tasks.
-				for lvl in pseudo_obj.data.iter_mut() {
-					for slot in lvl.slots.values() {
-						let f =
-							|key: Key| Key::new(key.flags(), pseudo_id, key.depth(), key.offset());
-						match slot {
-							Slot::Present(Present {
-								refcount: RefCount::NoRef { lru_index },
-								..
-							}) => {
-								let key = data.lru.get_mut(*lru_index).expect("no lru entry");
-								*key = f(*key);
-							}
-							Slot::Present(Present { refcount: RefCount::Ref { busy }, .. })
-							| Slot::Busy(busy) => {
-								let mut busy = busy.borrow_mut();
-								busy.key = f(busy.key);
-							}
-						}
-					}
-				}
+				pseudo_obj.transfer_entries(&mut data.lru, pseudo_id);
 			}
 
 			let busy = Busy::with_refcount(Key::new(Key::FLAG_OBJECT, pseudo_id, 0, 0), refcount);

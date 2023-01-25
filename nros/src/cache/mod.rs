@@ -236,24 +236,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		let mut transfer = |obj: &mut Present<TreeData<R>>, new_id| {
 			// Fix entries
-			for level in obj.data.data.iter() {
-				for slot in level.slots.values() {
-					let f = |key: Key| Key::new(0, new_id, key.depth(), key.offset());
-					match slot {
-						Slot::Present(Present {
-							refcount: RefCount::NoRef { lru_index }, ..
-						}) => {
-							let key = data.lru.get_mut(*lru_index).expect("not in lru");
-							*key = f(*key)
-						}
-						Slot::Present(Present { refcount: RefCount::Ref { busy }, .. })
-						| Slot::Busy(busy) => {
-							let mut busy = busy.borrow_mut();
-							busy.key = f(busy.key);
-						}
-					}
-				}
-			}
+			obj.data.transfer_entries(&mut data.lru, new_id);
 
 			// Fix object
 			let key = Key::new(Key::FLAG_OBJECT, new_id, 0, 0);

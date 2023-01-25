@@ -1,5 +1,5 @@
 use {
-	super::super::{Lru, MaxRecordSize, Present, Slot, RECORD_SIZE_P2},
+	super::super::{Key, Lru, MaxRecordSize, Present, RefCount, Slot, RECORD_SIZE_P2},
 	crate::{resource::Buf, Record, Resource},
 	core::fmt,
 	rustc_hash::{FxHashMap, FxHashSet},
@@ -198,6 +198,31 @@ impl<R: Resource> TreeData<R> {
 			let must_be_empty = self.root.length == 0;
 			if !is_dirty && (e.data.len() == 0) != must_be_empty {
 				panic!("mismatch between root record and entry");
+			}
+		}
+	}
+
+	/// Transfer entries to a different ID.
+	pub fn transfer_entries(&mut self, lru: &mut Lru, new_id: u64) {
+		trace!("transfer_entries new_id {:#x}", new_id);
+		// Fix entries
+		for level in self.data.iter() {
+			for slot in level.slots.values() {
+				let f = |key: Key| {
+					trace!(info "depth {} offset {}", key.depth(), key.offset());
+					Key::new(0, new_id, key.depth(), key.offset())
+				};
+				match slot {
+					Slot::Present(Present { refcount: RefCount::NoRef { lru_index }, .. }) => {
+						let key = lru.get_mut(*lru_index).expect("not in lru");
+						*key = f(*key)
+					}
+					Slot::Present(Present { refcount: RefCount::Ref { busy }, .. })
+					| Slot::Busy(busy) => {
+						let mut busy = busy.borrow_mut();
+						busy.key = f(busy.key);
+					}
+				}
 			}
 		}
 	}
