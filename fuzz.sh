@@ -3,7 +3,7 @@
 set -e
 
 TIMEOUT=5s
-MAX_LEN=256
+MAX_LEN="${MAX_LEN:-4096}"
 CMD="cargo fuzz run random_ops -s none -- -timeout=$TIMEOUT -max_len=$MAX_LEN"
 
 if [[ $# != 2 ]]
