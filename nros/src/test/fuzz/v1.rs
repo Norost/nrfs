@@ -43,6 +43,12 @@ pub enum Op {
 	Move { from_idx: u8, to_idx: u8 },
 	/// Resize an object.
 	Resize { idx: u8, size: u64 },
+	/// Destroy an object.
+	///
+	/// This decrements the reference count once, then forgets the object.
+	///
+	/// If no objects remain, [`Test::run`] stops and unmounts the filesystem.
+	Destroy { idx: u8 },
 }
 
 impl fmt::Debug for Op {
@@ -69,6 +75,7 @@ impl fmt::Debug for Op {
 			[Read idx offset amount]
 			[Move from_idx to_idx]
 			[Resize idx size]
+			[Destroy idx]
 		}
 	}
 }
@@ -186,6 +193,18 @@ impl Test {
 							obj.resize(size).await.unwrap();
 							if size < u64::MAX {
 								self.contents.get_mut(&id).unwrap().remove(size..u64::MAX);
+							}
+						}
+						Op::Destroy { idx } => {
+							let i = idx as usize % self.ids.len();
+							let id = self.ids[i];
+							let obj = self.store.get(&bg, id).await.unwrap();
+							obj.decrease_reference_count().await.unwrap();
+							self.ids.swap_remove(i);
+							// Stop immediately if no objects remain.
+							if self.ids.is_empty() {
+								self.ops.clear();
+								break;
 							}
 						}
 					}
@@ -1313,6 +1332,21 @@ fn grow_shrink_grow_chain_update_record_retry() {
 			Resize { idx: 0, size: 0x8000 },
 			Resize { idx: 0, size: 0x400 },
 			Resize { idx: 0, size: 0x8000 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn create_many_busy_object() {
+	Test::new(
+		1 << 16,
+		0,
+		[
+			Create { size: 0 },
+			Create { size: 0 },
+			Destroy { idx: 0 },
+			Create { size: 0 },
 		],
 	)
 	.run()
