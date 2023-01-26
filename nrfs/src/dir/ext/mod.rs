@@ -6,7 +6,7 @@ use {
 	crate::{Dev, Error},
 };
 
-impl<'a, D: Dev> Dir<'a, D> {
+impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 	/// Set `unix` extension data.
 	pub(super) async fn ext_set_unix(
 		&self,

@@ -1,131 +1,89 @@
+mod entry;
+mod key;
 mod lru;
+mod object;
+mod slot;
 mod tree;
-mod tree_data;
 
 pub use tree::Tree;
 
 use {
-	crate::{storage, util::trim_zeros_end, BlockSize, Dev, Error, MaxRecordSize, Record, Store},
-	core::{
-		cell::{Ref, RefCell, RefMut},
-		fmt, future, mem,
-		ops::{Deref, DerefMut},
-		task::{Poll, Waker},
+	crate::{
+		resource::Buf, storage, util::box_fut, Background, BlockSize, Dev, Error, MaxRecordSize,
+		Record, Resource, Store,
 	},
+	core::{
+		cell::{RefCell, RefMut},
+		future::Future,
+		mem,
+		num::NonZeroU64,
+		pin::Pin,
+	},
+	entry::EntryRef,
+	futures_util::{stream::FuturesUnordered, TryStreamExt},
+	key::Key,
+	lru::Lru,
 	rangemap::RangeSet,
 	rustc_hash::FxHashMap,
+	slot::{Busy, Present, RefCount, Slot},
 	std::collections::hash_map,
-	tree_data::{FmtTreeData, ReadWriteLock, ResizeLock, TreeData},
+	tree::data::TreeData,
 };
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
-const OBJECT_LIST_ID: u64 = u64::MAX;
+const OBJECT_LIST_ID: u64 = 1 << 59; // 2**64 / 2**5 = 2**59, ergo 2**59 is just out of range.
 
-/// Estimated fixed cost for every cached entry.
-///
-/// This is in addition to the amount of data stored by the entry.
-const CACHE_ENTRY_FIXED_COST: usize = mem::size_of::<Entry>();
+/// Record size as a power-of-two.
+const RECORD_SIZE_P2: u8 = mem::size_of::<Record>().ilog2() as _;
+
+/// The ID refers to a pseudo-object or an entry of a pseudo-object.
+pub const ID_PSEUDO: u64 = 1 << 59;
 
 /// Cache data.
-pub(crate) struct CacheData {
+#[derive(Debug)]
+pub(crate) struct CacheData<R: Resource> {
 	/// Cached records of objects and the object list.
 	///
 	/// The key, in order, is `(id, depth, offset)`.
 	/// Using separate hashmaps allows using only a prefix of the key.
-	data: FxHashMap<u64, TreeData>,
-	/// LRUs to manage cache size.
-	lrus: Lrus,
-	/// Object entries that are currently in use and must not be evicted.
-	locked_objects: FxHashMap<u64, usize>,
-	/// Record entries that are currently in use and must not be evicted.
-	locked_records: FxHashMap<(u64, u8, u64), usize>,
-	/// Record entries that are currently being fetched.
-	fetching: FxHashMap<(u64, u8, u64), Vec<Waker>>,
+	objects: FxHashMap<u64, Slot<TreeData<R>>>,
+	/// LRU to manage cache size.
+	lru: Lru,
 	/// Used object IDs.
 	used_objects_ids: RangeSet<u64>,
-	/// Whether we're already flushing.
-	///
-	/// If yes, avoid flushing again since that breaks stuff.
-	is_flushing: bool,
+	/// Pseudo object ID counter.
+	pseudo_id_counter: NonZeroU64,
 }
 
-impl fmt::Debug for CacheData {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		struct FmtData<'a>(&'a FxHashMap<u64, TreeData>);
-
-		impl fmt::Debug for FmtData<'_> {
-			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-				let mut f = f.debug_map();
-				for (&id, data) in self.0.iter() {
-					f.entry(&id, &FmtTreeData { data, id });
-				}
-				f.finish()
-			}
-		}
-
-		f.debug_struct(stringify!(CacheData))
-			.field("data", &FmtData(&self.data))
-			.field("lrus", &self.lrus)
-			.field("locked_objects", &self.locked_objects)
-			.field("locked_records", &self.locked_records)
-			.field("fetching", &self.fetching)
-			.field("used_objects_ids", &self.used_objects_ids)
-			.field("is_flushing", &self.is_flushing)
-			.finish()
+impl<R: Resource> CacheData<R> {
+	/// Deallocate a single object ID.
+	fn dealloc_id(&mut self, id: u64) {
+		debug_assert!(self.used_objects_ids.contains(&id), "double free");
+		self.used_objects_ids.remove(id..id + 1);
 	}
-}
 
-/// Cache LRU queues, with tracking per byte used.
-#[derive(Debug)]
-struct Lrus {
-	/// LRU list for global evictions.
-	global: Lru,
-	/// LRU list for flushing dirty records.
-	///
-	/// This is not used for eviction but ensures an excessive amount of writes does not hold up
-	/// reads.
-	dirty: Lru,
-}
-
-impl Lrus {
-	/// Adjust cache usage based on manually removed entry.
-	fn adjust_cache_removed_entry(&mut self, entry: &Entry) {
-		self.global.lru.remove(entry.global_index);
-		self.global.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
-		// The entry *must* be dirty as otherwise it either:
-		// - wouldn't exist
-		// - have a parent node, in which case it was already destroyed in a previous
-		//   iteration.
-		// ... except if d == cur_depth. Meh
-		if let Some(idx) = entry.write_index {
-			//debug_assert_eq!(d, cur_depth, "not in dirty LRU");
-			self.dirty.lru.remove(idx);
-			self.dirty.cache_size -= entry.data.len() + CACHE_ENTRY_FIXED_COST;
-		}
+	/// Allocate a pseudo-ID.
+	fn new_pseudo_id(&mut self) -> u64 {
+		trace!("new_pseudo_id");
+		let mut counter @ id = self.pseudo_id_counter.get();
+		counter += 1;
+		counter %= 1 << 59;
+		self.pseudo_id_counter = NonZeroU64::new(counter).unwrap_or(NonZeroU64::MIN);
+		trace!(info "{:#x}", id | ID_PSEUDO);
+		id | ID_PSEUDO
 	}
-}
-
-/// Cache LRU queue, with tracking per byte used.
-#[derive(Debug)]
-struct Lru {
-	/// Linked list for LRU entries
-	lru: lru::LruList<(u64, u8, u64)>,
-	/// The maximum amount of total bytes to keep cached.
-	cache_max: usize,
-	/// The amount of cached bytes.
-	cache_size: usize,
 }
 
 /// Cache algorithm.
 #[derive(Debug)]
-pub(crate) struct Cache<D: Dev> {
+pub(crate) struct Cache<D: Dev, R: Resource> {
 	/// The non-volatile backing store.
-	store: Store<D>,
+	store: Store<D, R>,
 	/// The cached data.
-	data: RefCell<CacheData>,
+	data: RefCell<CacheData<R>>,
 }
 
-impl<D: Dev> Cache<D> {
+impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Initialize a cache layer.
 	///
 	/// # Panics
@@ -133,16 +91,7 @@ impl<D: Dev> Cache<D> {
 	/// If `global_cache_max` is smaller than `dirty_cache_max`.
 	///
 	/// If `dirty_cache_max` is smaller than the maximum record size.
-	pub fn new(store: Store<D>, global_cache_max: usize, dirty_cache_max: usize) -> Self {
-		assert!(
-			global_cache_max >= dirty_cache_max,
-			"global cache size is smaller than write cache"
-		);
-		assert!(
-			dirty_cache_max >= 1 << store.max_record_size().to_raw(),
-			"write cache size is smaller than the maximum record size"
-		);
-
+	pub fn new(store: Store<D, R>, global_cache_max: usize) -> Self {
 		// TODO iterate over object list to find free slots.
 		let mut used_objects_ids = RangeSet::new();
 		let len = u64::from(store.object_list().total_length);
@@ -159,24 +108,10 @@ impl<D: Dev> Cache<D> {
 		Self {
 			store,
 			data: RefCell::new(CacheData {
-				data: Default::default(),
-				lrus: Lrus {
-					global: Lru {
-						lru: Default::default(),
-						cache_max: global_cache_max,
-						cache_size: 0,
-					},
-					dirty: Lru {
-						lru: Default::default(),
-						cache_max: dirty_cache_max,
-						cache_size: 0,
-					},
-				},
-				locked_objects: Default::default(),
-				locked_records: Default::default(),
-				fetching: Default::default(),
+				objects: Default::default(),
+				lru: Lru::new(global_cache_max),
 				used_objects_ids,
-				is_flushing: false,
+				pseudo_id_counter: NonZeroU64::MIN,
 			}),
 		}
 	}
@@ -193,180 +128,160 @@ impl<D: Dev> Cache<D> {
 		unreachable!("more than 2**64 objects allocated");
 	}
 
-	/// Deallocate a single object ID.
-	fn dealloc_id(&self, id: u64) {
-		let mut slf = self.data.borrow_mut();
-		debug_assert!(slf.used_objects_ids.contains(&id), "double free");
-		slf.used_objects_ids.remove(id..id + 1);
-	}
-
-	/// Get an existing root,
-	async fn get_object_root(&self, id: u64) -> Result<Record, Error<D>> {
-		if id == OBJECT_LIST_ID {
-			Ok(self.store.object_list())
-		} else {
-			let offset = id * (mem::size_of::<Record>() as u64);
-			let list = Tree::new_object_list(self).await?;
-			let mut root = Record::default();
-			let l = list.read(offset, root.as_mut()).await?;
-			debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully read");
-			Ok(root)
-		}
-	}
-
-	/// Update an existing root,
-	/// i.e. without resizing the object list.
-	async fn set_object_root(&self, id: u64, root: &Record) -> Result<(), Error<D>> {
-		if id == OBJECT_LIST_ID {
-			self.store.set_object_list(*root);
-		} else {
-			let offset = id * (mem::size_of::<Record>() as u64);
-			let list = Tree::new_object_list(self).await?;
-			let l = list.write(offset, root.as_ref()).await?;
-			debug_assert_eq!(l, mem::size_of::<Record>(), "root wasn't fully written");
-		}
-		Ok(())
-	}
-
-	async fn write_object_table(&self, id: u64, data: &[u8]) -> Result<usize, Error<D>> {
-		let offset = id * (mem::size_of::<Record>() as u64);
-		let min_len = offset + u64::try_from(data.len()).unwrap();
-
-		let list = Tree::new_object_list(self).await?;
-
-		if min_len > list.len().await? {
-			list.resize(min_len).await?;
-		}
-
-		list.write(offset, data).await
-	}
-
-	async fn read_object_table(&self, id: u64, buf: &mut [u8]) -> Result<usize, Error<D>> {
-		let offset = id * (mem::size_of::<Record>() as u64);
-		Tree::new_object_list(self).await?.read(offset, buf).await
-	}
-
 	/// Create an object.
-	pub async fn create(&self) -> Result<Tree<D>, Error<D>> {
-		let id = self.create_many::<1>().await?;
-		Tree::new(self, id).await
+	pub async fn create<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
+		trace!("create");
+		let id = self.create_many(bg, 1).await?;
+		Ok(Tree::new(self, bg, id))
 	}
 
 	/// Create many adjacent objects.
-	pub async fn create_many<const N: usize>(&self) -> Result<u64, Error<D>> {
+	pub async fn create_many<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		amount: u64,
+	) -> Result<u64, Error<D>> {
+		trace!("create_many {}", amount);
 		// Allocate
-		let id = self.alloc_ids(N.try_into().unwrap());
+		let id = self.alloc_ids(amount);
+		trace!(info "{}", id);
 
-		// Init
-		let mut b = [[0; 32]; N];
-		for c in &mut b {
-			c.copy_from_slice(Record { references: 1.into(), ..Default::default() }.as_ref());
+		// Resize if necessary
+		let len = self
+			.data
+			.borrow_mut()
+			.used_objects_ids
+			.iter()
+			.last()
+			.map_or(0, |r| r.end);
+		Tree::new(self, bg, OBJECT_LIST_ID)
+			.resize(len << RECORD_SIZE_P2)
+			.await?;
+
+		// Create objects
+		for id in id..id + amount {
+			let new_root = Record { references: 1.into(), ..Default::default() };
+			if let Some((mut obj, _)) = self.wait_object(id).await {
+				debug_assert_eq!(obj.data.root().length, 0, "new object is not empty");
+				debug_assert_eq!(
+					obj.data.root().references,
+					0,
+					"new object has non-zero refcount"
+				);
+				obj.data.set_root(&new_root);
+			} else {
+				let mut data = self.data.borrow_mut();
+				let mut tree = TreeData::new(new_root, self.max_record_size());
+				tree.set_root(&new_root); // mark as dirty.
+				let tree = Present { data: tree, refcount: data.lru.object_add_noref(id) };
+				data.objects.insert(id, Slot::Present(tree));
+			}
 		}
-		self.write_object_table(id, b.flatten()).await?;
 
 		// Tadha!
 		Ok(id)
 	}
 
 	/// Get an object.
-	pub async fn get(&self, id: u64) -> Result<Tree<D>, Error<D>> {
-		Tree::new(self, id).await
-	}
-
-	/// Destroy a record and it's associated cache entry, if any.
-	fn destroy(&self, id: u64, depth: u8, offset: u64, record: &Record) -> Vec<u8> {
-		let entry = self.remove_entry(id, depth, offset).expect("invalid entry");
-
-		// Free blocks referenced by record.
-		self.store.destroy(record);
-
-		entry.data
-	}
-
-	/// Remove an entry from the cache.
-	///
-	/// This does *not* flush the entry!
-	fn remove_entry(&self, id: u64, depth: u8, offset: u64) -> Option<Entry> {
-		let data = { &mut *self.data.borrow_mut() };
-		let obj = data.data.get_mut(&id)?;
-		let entry = obj.data[usize::from(depth)].remove(&offset)?;
-		data.lrus.adjust_cache_removed_entry(&entry);
-		Some(entry)
+	pub async fn get<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		id: u64,
+	) -> Result<Tree<'a, 'b, D, R>, Error<D>> {
+		trace!("get {}", id);
+		Ok(Tree::new(self, bg, id))
 	}
 
 	/// Move an object to a specific ID.
 	///
 	/// The old object is destroyed.
-	pub async fn move_object(&self, from: u64, to: u64) -> Result<(), Error<D>> {
+	pub async fn move_object<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		from: u64,
+		to: u64,
+	) -> Result<(), Error<D>> {
+		trace!("move_object {} -> {}", from, to);
+		// Steps:
+		// 1. Shrink 'to' object to zero size.
+		//    Tree::shrink will move all entries to a pseudo-object.
+		// 2. Reference 'to' to prevent eviction.
+		// 3. Swap 'from' & 'to'.
+		// 4. Set reference count of 'from' object to 0.
+		// 5. Dereference 'from'.
+
 		if from == to {
 			return Ok(()); // Don't even bother.
 		}
 
-		// Free allocations
-		self.get(to).await?.resize(0).await?;
+		// 1. Shrink 'to' object to zero size.
+		//    Tree::shrink will move all entries to a pseudo-object.
+		Tree::new(self, bg, to).resize(0).await?;
 
-		// NOTE There is a brief period where the lock is not acquired.
-		// However, as long as the API is singlethreaded this should not be an issue
-		// as there is no await point in between the period the lock is released.
+		// 2. Reference 'to' to prevent eviction.
+		let (mut obj, mut lru) = self.fetch_object(bg, to).await?;
+		lru.object_increase_refcount(&mut obj.refcount);
+		drop((obj, lru));
 
-		// Move
-		{
-			let _locks_from = ResizeLock::new(&self.data, from).await;
-			let _locks_to = ResizeLock::new(&self.data, to).await;
-			let rec = self.get_object_root(from).await?;
-			self.set_object_root(to, &rec).await?;
-			self.set_object_root(from, &Default::default()).await?;
-		}
+		// 3. Swap 'from' & 'to'.
+		let _ = self.fetch_object(bg, from).await?;
 
-		// Move object data & fix LRU entries.
-		{
-			let data = { &mut *self.data.borrow_mut() };
+		let data = &mut *self.data.borrow_mut();
 
-			let obj = data.data.remove(&from).expect("object not present");
-			for level in obj.data.iter() {
-				for entry in level.values() {
-					data.lrus
-						.global
-						.lru
-						.get_mut(entry.global_index)
-						.expect("invalid global LRU index")
-						.0 = to;
-					if let Some(idx) = entry.write_index {
-						data.lrus
-							.dirty
-							.lru
-							.get_mut(idx)
-							.expect("invalid write LRU index")
-							.0 = to;
-					}
+		let Some([Slot::Present(from_obj), Slot::Present(to_obj)]) = data.objects.get_many_mut([&from, &to])
+			else { unreachable!("no object(s)") };
+
+		let mut transfer = |obj: &mut Present<TreeData<R>>, new_id| {
+			// Fix entries
+			obj.data.transfer_entries(&mut data.lru, new_id);
+
+			// Fix object
+			let key = Key::new(Key::FLAG_OBJECT, new_id, 0, 0);
+			match &obj.refcount {
+				RefCount::NoRef { lru_index } => {
+					*data.lru.get_mut(*lru_index).expect("no lru entry") = key
 				}
+				RefCount::Ref { busy } => busy.borrow_mut().key = key,
 			}
-			data.data.insert(to, obj);
-		}
 
-		self.dealloc_id(from);
+			// Mark root as dirty since it moved.
+			obj.data.set_root(&obj.data.root());
+		};
+
+		transfer(from_obj, to);
+		transfer(to_obj, from);
+		mem::swap(from_obj, to_obj);
+
+		// 4. Set reference count of 'from' object to 0.
+		from_obj
+			.data
+			.set_root(&Record { references: 0.into(), ..from_obj.data.root() });
+
+		// 5. Dereference 'from'.
+		data.lru
+			.object_decrease_refcount(from, &mut from_obj.refcount, 1);
+
 		Ok(())
 	}
 
 	/// Finish the current transaction, committing any changes to the underlying devices.
-	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
+	pub async fn finish_transaction<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+	) -> Result<(), Error<D>> {
 		// First flush cache
-		let data = self.data.borrow();
-		let global_max = data.lrus.global.cache_max;
-		let dirty_max = data.lrus.dirty.cache_max;
-		drop(data);
-		self.resize_cache(global_max, 0).await?;
-		debug_assert_eq!(
-			self.statistics().dirty_usage,
-			0,
-			"not all data has been flushed"
-		);
+		self.flush_all(bg).await?;
+
+		// Ensure all data has been written.
+		bg.try_run_all().await?;
 
 		// Flush store-specific data.
 		self.store.finish_transaction().await?;
 
-		// Restore cache params
-		self.resize_cache(global_max, dirty_max).await
+		Ok(())
 	}
 
 	/// The block size used by the underlying [`Store`].
@@ -379,195 +294,78 @@ impl<D: Dev> Cache<D> {
 		self.store.max_record_size()
 	}
 
-	/// Lock a cache entry, preventing it from being evicted.
-	///
-	/// Returns `true` if the cache entry was already locked, `false` otherwise.
-	fn lock_entry(&self, id: u64, depth: u8, offset: u64) -> CacheRef<D> {
-		CacheRef::new(self, id, depth, offset)
+	/// Try to get an object directly.
+	fn get_object(&self, id: u64) -> Option<RefMut<'_, TreeData<R>>> {
+		RefMut::filter_map(self.data.borrow_mut(), |d| match d.objects.get_mut(&id) {
+			Some(Slot::Present(slot)) => Some(&mut slot.data),
+			_ => None,
+		})
+		.ok()
 	}
 
-	/// Fetch a record for a cache entry.
+	/// Fetch an object.
 	///
-	/// If the entry is already being fetched,
-	/// the caller is instead added to a list to be waken up when the fetcher has finished.
-	async fn fetch_entry(
-		&self,
-		id: u64,
-		depth: u8,
-		offset: u64,
-		record: &Record,
-	) -> Result<CacheRef<D>, Error<D>> {
-		// Lock now so the entry doesn't get fetched and evicted midway.
-		let entry = self.lock_entry(id, depth, offset);
+	/// Specifically, fetch its root.
+	async fn fetch_object<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		mut id: u64,
+	) -> Result<(RefMut<'a, Present<TreeData<R>>>, RefMut<'a, Lru>), Error<D>> {
+		trace!("fetch_object {:#x}", id);
+		// Steps:
+		// 1. Try to get the object directly or by waiting for another tasks.
+		// 2. Otherwise, fetch it ourselves.
 
-		if self.has_entry(id, depth, offset) {
-			return Ok(entry);
+		// 1. Try to get the object directly or by waiting for another tasks.
+		if let Some(obj) = self.wait_object(id).await {
+			return Ok(obj);
 		}
 
+		// 2. Otherwise, fetch it ourselves.
+		debug_assert!(
+			!is_pseudo_id(id),
+			"can't fetch pseudo-object from object list"
+		);
+
+		// Insert a new object slot.
 		let mut data = self.data.borrow_mut();
-		match data.fetching.entry((id, depth, offset)) {
-			hash_map::Entry::Vacant(e) => {
-				// Add list for other fetchers to register wakers to.
-				e.insert(Default::default());
-				drop(data);
+		let busy = Busy::new(Key::new(Key::FLAG_OBJECT, id, 0, 0));
+		let prev = data.objects.insert(id, Slot::Busy(busy.clone()));
+		debug_assert!(prev.is_none(), "object already present");
+		drop(data);
 
-				// Fetch record
-				// This will be polled in the if branch below
-				// FIXME if we return here other fetchers may end up waiting indefinitely.
-				let d = self.store.read(record).await?;
-
-				let len = d.len();
-
-				let data = { &mut *self.data.borrow_mut() };
-				let prev = data.data.get_mut(&id).expect("object does not exist").data
-					[usize::from(depth)]
-				.insert(
-					offset,
-					Entry {
-						data: d,
-						global_index: data.lrus.global.lru.insert((id, depth, offset)),
-						write_index: None,
-					},
-				);
-				debug_assert!(prev.is_none(), "entry was already present");
-				data.lrus.global.cache_size += len + CACHE_ENTRY_FIXED_COST;
-
-				// Wake other tasks waiting for this entry.
-				data.fetching
-					.remove(&(id, depth, offset))
-					.expect("no wakers list")
-					.into_iter()
-					.for_each(|w| w.wake());
-
-				// Done
-				Ok(entry)
-			}
-			hash_map::Entry::Occupied(_) => {
-				// Wait until the fetcher for this record finishes.
-				drop(data);
-
-				let mut entry = Some(entry);
-
-				// TODO how should we deal with errors that may occur in the fetcher?
-				// TODO kinda ugly IMO.
-				// Is there a cleaner way to write this, without poll_fn perhaps?
-				future::poll_fn(move |cx| {
-					if self.has_entry(id, depth, offset) {
-						Poll::Ready(Ok(entry.take().expect("poll after finish")))
-					} else {
-						let mut data = self.data.borrow_mut();
-						let wakers = data
-							.fetching
-							.get_mut(&(id, depth, offset))
-							.expect("no wakers list");
-						if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
-							wakers.push(cx.waker().clone());
-						}
-						Poll::Pending
-					}
-				})
-				.await
-			}
+		// Fetch the object root.
+		let mut root = Record::default();
+		if id < OBJECT_LIST_ID {
+			let tree = Tree::new(self, bg, OBJECT_LIST_ID);
+			let fut = box_fut(tree.read(id << RECORD_SIZE_P2, root.as_mut()));
+			let len = fut.await?;
+			assert_eq!(len, 1 << RECORD_SIZE_P2, "read partial root");
+		} else {
+			root = self.store.object_list();
 		}
-	}
 
-	/// Check if a cache entry is present.
-	fn has_entry(&self, id: u64, depth: u8, offset: u64) -> bool {
-		self.data
-			.borrow()
-			.data
-			.get(&id)
-			.and_then(|m| m.data[usize::from(depth)].get(&offset))
-			.is_some()
-	}
+		// Insert the object.
+		let obj = RefMut::map_split(self.data.borrow_mut(), |data| {
+			let mut busy_ref = busy.borrow_mut();
+			id = busy_ref.key.id();
+			busy_ref.wakers.drain(..).for_each(|w| w.wake());
+			drop(busy_ref);
+			let refcount = data.lru.object_add(id, busy);
 
-	/// Get a mutable reference to an object's data.
-	///
-	/// # Panics
-	///
-	/// If another borrow is alive.
-	///
-	/// If the object is not present.
-	fn get_object_entry_mut(&self, id: u64) -> RefMut<TreeData> {
-		RefMut::map(self.data.borrow_mut(), |data| {
-			data.data
-				.get_mut(&id)
-				.expect("cache entry by id does not exist")
-		})
-	}
+			let hash_map::Entry::Occupied(mut slot) = data.objects.entry(id)
+				else { unreachable!("not busy") };
+			*slot.get_mut() = Slot::Present(Present {
+				data: TreeData::new(root, self.max_record_size()),
+				refcount,
+			});
 
-	/// Get a cached entry.
-	///
-	/// # Panics
-	///
-	/// If another borrow is alive.
-	///
-	/// If the entry is not present.
-	fn get_entry(&self, id: u64, depth: u8, offset: u64) -> Ref<Entry> {
-		Ref::map(self.data.borrow(), |data| {
-			data.data
-				.get(&id)
-				.expect("cache entry by id does not exist")
-				.data[usize::from(depth)]
-			.get(&offset)
-			.expect("cache entry by offset does not exist")
-		})
-	}
-
-	/// Get a cached entry.
-	///
-	/// Unlike [`Self::get_entry_mut`], this does *not* mark the entry as dirty and hence won't
-	/// trigger a flush.
-	///
-	/// # Panics
-	///
-	/// If another borrow is alive.
-	///
-	/// If the entry is not present.
-	fn get_entry_mut_no_mark(&self, id: u64, depth: u8, offset: u64) -> RefMut<Entry> {
-		RefMut::map(self.get_object_entry_mut(id), |obj| {
-			obj.data[usize::from(depth)]
-				.get_mut(&offset)
-				.expect("cache entry by offset does not exist")
-		})
-	}
-
-	/// Get a cached entry.
-	///
-	/// When the [`EntryRefMut`] is dropped the entry will be marked as dirty.
-	/// This may later trigger a flush.
-	///
-	/// # Panics
-	///
-	/// If another borrow is alive.
-	///
-	/// If the entry is not present.
-	async fn get_entry_mut(
-		&self,
-		id: u64,
-		depth: u8,
-		offset: u64,
-	) -> Result<EntryRefMut, Error<D>> {
-		// Flush since we may be exceeding write cache limits.
-		self.flush().await?;
-
-		let (entry, lrus) = RefMut::map_split(self.data.borrow_mut(), |data| {
-			let entry = data
-				.data
-				.get_mut(&id)
-				.expect("cache entry by id does not exist")
-				.data[usize::from(depth)]
-			.get_mut(&offset)
-			.expect("cache entry by offset does not exist");
-			(entry, &mut data.lrus)
+			let Slot::Present(obj) = slot.into_mut() else { unreachable!() };
+			(obj, &mut data.lru)
 		});
 
-		Ok(EntryRefMut { original_len: entry.data.len(), entry, lrus, id, depth, offset })
-	}
-
-	/// Get the root record of the object list.
-	fn object_list(&self) -> Record {
-		self.store.object_list()
+		// Presto
+		Ok(obj)
 	}
 
 	/// Readjust cache size.
@@ -577,120 +375,447 @@ impl<D: Dev> Cache<D> {
 	/// # Panics
 	///
 	/// If `global_max < write_max`.
-	pub async fn resize_cache(&self, global_max: usize, write_max: usize) -> Result<(), Error<D>> {
-		assert!(
-			global_max >= write_max,
-			"global cache is smaller than write cache"
-		);
-		{
-			let mut data = { &mut *self.data.borrow_mut() };
-			data.lrus.global.cache_max = global_max;
-			data.lrus.dirty.cache_max = write_max;
-		}
-		self.flush().await
+	pub async fn resize_cache<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		global_max: usize,
+	) -> Result<(), Error<D>> {
+		self.data.borrow_mut().lru.set_cache_max(global_max);
+		self.evict_excess(bg);
+		Ok(())
 	}
 
-	/// Flush if total memory use exceeds limits.
-	async fn flush(&self) -> Result<(), Error<D>> {
+	/// Evict entries if global cache limits are being exceeded.
+	fn evict_excess<'a, 'b>(&'a self, bg: &'b Background<'a, D>) {
+		trace!("evict_excess");
 		let mut data = self.data.borrow_mut();
 
-		if data.is_flushing {
-			// Don't bother.
+		while data.lru.has_excess() {
+			// Get last read entry.
+			let key = data
+				.lru
+				.last()
+				.expect("no nodes despite non-zero write cache size");
+
+			// Push to background tasks queue to process in parallel
+			drop(data);
+			if let Some(task) = self.evict_entry(key) {
+				bg.run_background(task);
+			}
+			data = self.data.borrow_mut();
+		}
+	}
+
+	/// Evict an entry from the cache.
+	///
+	/// Does nothing if the entry wasn't present.
+	fn evict_entry(
+		&self,
+		key: Key,
+	) -> Option<Pin<Box<dyn Future<Output = Result<(), Error<D>>> + '_>>> {
+		trace!("evict_entry {:?}", key);
+
+		// Get object
+		let data = &mut *self.data.borrow_mut();
+		let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id())
+			else { unreachable!("no object") };
+
+		if key.test_flag(Key::FLAG_OBJECT) {
+			// Evict object
+
+			// Take root
+			let root = obj.data.root();
+
+			// Remove from LRU
+			let RefCount::NoRef { lru_index } = obj.refcount
+				else { unreachable!("not in lru") };
+			data.lru.object_remove(lru_index);
+
+			let fut = if key.id() == OBJECT_LIST_ID {
+				// Just copy
+				trace!(info "object list");
+				self.store.set_object_list(root);
+				data.objects.remove(&key.id());
+				None
+			} else if obj.data.is_dirty() {
+				// Save the root
+				debug_assert!(
+					key.id() & ID_PSEUDO == 0,
+					"pseudo object (id: {:#x}) should not be in the LRU",
+					key.id()
+				);
+
+				let busy = Busy::new(key);
+				let Some(Slot::Present(mut obj)) = data.objects.insert(key.id(), Slot::Busy(busy.clone()))
+					else { unreachable!("no object") };
+
+				let offset = key.id() << RECORD_SIZE_P2;
+
+				Some(async move {
+					trace!("evict_entry::object {:#x}", key.id());
+
+					let bg = Background::default(); // TODO get rid of this sillyness
+					bg.run(async {
+						Tree::new(self, &bg, OBJECT_LIST_ID)
+							.write(offset, root.as_ref())
+							.await?;
+
+						let mut busy_ref = busy.borrow_mut();
+						debug_assert_eq!(
+							busy_ref.key.id(),
+							key.id(),
+							"id of object changed while evicting"
+						);
+
+						let mut data = self.data.borrow_mut();
+						let hash_map::Entry::Occupied(mut slot) = data.objects.entry(key.id())
+							else { unreachable!("no object") };
+
+						if busy_ref.refcount > 0 {
+							debug_assert!(
+								!busy_ref.wakers.is_empty(),
+								"non-zero refcount with no wakers"
+							);
+							busy_ref.wakers.drain(..).for_each(|w| w.wake());
+							drop(busy_ref);
+							obj.refcount = RefCount::Ref { busy };
+							slot.insert(Slot::Present(obj));
+						} else {
+							debug_assert!(busy_ref.wakers.is_empty(), "zero refcount with wakers");
+							drop(busy_ref);
+							slot.remove();
+						}
+
+						Ok::<_, Error<D>>(())
+					})
+					.await?;
+					bg.drop().await
+				})
+			} else {
+				// Just remove
+				trace!(info "not dirty");
+				data.objects.remove(&key.id());
+				None
+			};
+
+			fut.map(box_fut)
+		} else {
+			// Evict entry
+
+			// Check if the entry is dirty.
+			let entry = if obj.data.is_marked_dirty(key.depth(), key.offset()) {
+				let level = &mut obj.data.data[usize::from(key.depth())];
+
+				let slot = level.slots.get_mut(&key.offset()).expect("no entry");
+				let Slot::Present(Present { data: entry, refcount: RefCount::NoRef { lru_index } }) = slot
+					else { unreachable!("no entry, or entry not in LRU") };
+				let entry = mem::replace(entry, self.resource().alloc());
+
+				data.lru.entry_remove(*lru_index, entry.len());
+
+				let busy = Busy::new(key);
+				*slot = Slot::Busy(busy.clone());
+
+				Some((entry, busy))
+			} else {
+				// Just remove the entry.
+				trace!(info "not dirty");
+				let level = &mut obj.data.data[usize::from(key.depth())];
+				let Some(Slot::Present(Present { data: entry, refcount: RefCount::NoRef { lru_index } })) = level.slots.remove(&key.offset())
+					else { unreachable!("no entry") };
+				data.lru.entry_remove(lru_index, entry.len());
+				// Dereference the corresponding object.
+				if data
+					.lru
+					.object_decrease_refcount(key.id(), &mut obj.refcount, 1)
+				{
+					data.objects.remove(&key.id());
+				}
+				None
+			};
+
+			let entry = entry.map(|(entry, busy)| {
+				async move {
+					trace!("evict_entry::entry {:?}", key);
+					// Store record.
+					let (record, entry) = self.store.write(entry).await?;
+
+					trace!(info "{:?} ~1> {:?}", key, busy.borrow_mut().key);
+					let key = busy.borrow_mut().key;
+
+					let bg = Background::default(); // TODO get rid of this sillyness
+					bg.run(Tree::new(self, &bg, key.id()).update_record(
+						key.depth(),
+						key.offset(),
+						record,
+						&busy,
+					))
+					.await?;
+
+					trace!(info "{:?} ~2> {:?}", key, busy.borrow_mut().key);
+					let key = busy.borrow_mut().key;
+
+					// Unmark as being flushed.
+					let mut data_ref = self.data.borrow_mut();
+					let data = &mut *data_ref;
+					let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id())
+						else { unreachable!("no object") };
+					let level = &mut obj.data.data[usize::from(key.depth())];
+					let hash_map::Entry::Occupied(mut slot) = level.slots.entry(key.offset())
+						else { unreachable!("no entry") };
+
+					let Slot::Busy(busy) = slot.get_mut()
+						else { unreachable!("no entry or entry is not flushing") };
+					let mut busy_ref = busy.borrow_mut();
+
+					// Wake a waiting fetcher, if any.
+					// We have to insert the entry again since the fetcher *will* have an outdated record.
+					let mut do_remove = false;
+					if busy_ref.refcount > 0 {
+						debug_assert!(
+							!busy_ref.wakers.is_empty(),
+							"refcount is non-zero without wakers"
+						);
+						busy_ref.wakers.drain(..).for_each(|w| w.wake());
+						drop(busy_ref);
+						*slot.get_mut() = Slot::Present(Present {
+							data: entry,
+							refcount: RefCount::Ref { busy: busy.clone() },
+						});
+					} else {
+						debug_assert!(busy_ref.wakers.is_empty(), "refcount is zero with wakers");
+						drop(busy_ref);
+						slot.remove();
+						do_remove =
+							data.lru
+								.object_decrease_refcount(key.id(), &mut obj.refcount, 1);
+					}
+
+					// Remove dirty marker
+					let _r =
+						obj.data
+							.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
+					debug_assert!(_r, "not marked");
+
+					if do_remove {
+						trace!(info "remove {:#x}", key.id());
+						// Forget the object, which should be all zeroes.
+						debug_assert_eq!(obj.data.root().length, 0, "pseudo object leaks entries");
+						data.objects.remove(&key.id());
+					}
+
+					drop(data_ref);
+					// Make sure we only drop the "background" runner at the end to avoid
+					// getting stuck when something tries to fetch the entry that is
+					// being evicted.
+					//
+					// Specifically, we must ensure the Flushing state is removed before
+					// we attempt to run the background tasks to completion.
+					bg.drop().await?;
+					Ok(())
+				}
+			});
+			entry.map(box_fut)
+		}
+	}
+
+	/// Flush an entry from the cache.
+	///
+	/// This does not evict the entry.
+	///
+	/// Does nothing if the entry wasn't present or dirty.
+	async fn flush_entry<'a, 'b>(
+		&'a self,
+		bg: &'b Background<'a, D>,
+		key: Key,
+	) -> Result<(), Error<D>> {
+		trace!("flush_entry {:?}", key);
+		let mut data_ref = self.data.borrow_mut();
+		let data = &mut *data_ref;
+		// Clear dirty status
+		let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id()) else { return Ok(()) };
+
+		if !obj.data.is_marked_dirty(key.depth(), key.offset()) {
+			// The entry is not dirty, so skip.
 			return Ok(());
 		}
-		data.is_flushing = true;
 
-		while data.lrus.dirty.cache_size > data.lrus.dirty.cache_max {
-			// Remove last written to entry.
-			let &(id, depth, offset) = data
-				.lrus
-				.dirty
-				.lru
-				.last()
-				.expect("no nodes despite non-zero write cache size");
+		// Take entry.
+		let level = &mut obj.data.data[usize::from(key.depth())];
 
-			// Avoid flushing during a resize, as it can mess up the reference to the root record.
-			if data
-				.data
-				.get(&id)
-				.expect("invalid object")
-				.is_resize_locked()
-			{
-				break; // TODO continue with another record or object.
+		let slot = level.slots.get_mut(&key.offset()).expect("no entry");
+		let Slot::Present(present) = slot else {
+			// The entry is already being evicted - probably
+			// FIXME we need a better guarantee than this.
+			return Ok(());
+		};
+
+		let entry = mem::replace(&mut present.data, self.resource().alloc());
+		let busy = match &present.refcount {
+			RefCount::Ref { busy } => busy.clone(),
+			RefCount::NoRef { lru_index } => {
+				data.lru.entry_remove(*lru_index, entry.len());
+				Busy::new(key)
 			}
+		};
+		*slot = Slot::Busy(busy.clone());
 
-			data.lrus.dirty.lru.remove_last().unwrap();
+		// Store entry.
+		drop(data_ref);
+		let (rec, entry) = self.store.write(entry).await?;
+		Tree::new(self, bg, key.id())
+			.update_record(key.depth(), key.offset(), rec, &busy)
+			.await?;
 
+		// Put entry back in.
+		let data = &mut *self.data.borrow_mut();
+		let Some(Slot::Present(obj)) = data.objects.get_mut(&key.id())
+			else { unreachable!("no object") };
+		let level = &mut obj.data.data[usize::from(key.depth())];
+		let slot = level.slots.get_mut(&key.offset()).expect("no entry");
+
+		debug_assert!(matches!(slot, Slot::Busy(_)), "entry not busy");
+		busy.borrow_mut().wakers.drain(..).for_each(|w| w.wake());
+		let refcount = data.lru.entry_add(key, busy.clone(), entry.len());
+
+		*slot = Slot::Present(Present { data: entry, refcount });
+
+		// Unmark as dirty
+		let r = obj
+			.data
+			.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
+		debug_assert!(r, "not marked");
+
+		Ok(())
+	}
+
+	/// Flush all entries.
+	async fn flush_all<'a, 'b>(&'a self, bg: &'b Background<'a, D>) -> Result<(), Error<D>> {
+		trace!("flush_all");
+		// Go through all trees and flush from bottom to top.
+		//
+		// Start from the bottom of all trees since those are trivial to all flush in parallel.
+
+		// Wait for all "background" tasks to finish, which may include active flushes.
+		bg.try_run_all().await?;
+
+		let mut data = self.data.borrow_mut();
+		let mut queue = FuturesUnordered::new();
+
+		// Flush all objects except the object list,
+		// since the latter will get a lot of updates to the leaves.
+		let ids = data
+			.objects
+			.keys()
+			.copied()
+			.filter(|&id| id != OBJECT_LIST_ID)
+			.collect::<Vec<_>>();
+
+		for depth in 0..16 {
+			for &id in ids.iter() {
+				let Some(tree) = data.objects.get_mut(&id) else { continue };
+				let Slot::Present(tree) = tree else { unreachable!() };
+				let Some(level) = tree.data.data.get_mut(usize::from(depth)) else { continue };
+				let offsets = level.dirty_markers.keys().copied().collect::<Vec<_>>();
+				drop(data);
+
+				// Flush in parallel.
+				for offt in offsets {
+					let key = Key::new(0, id, depth, offt);
+					queue.push(self.flush_entry(bg, key));
+				}
+				while queue.try_next().await?.is_some() {}
+
+				// Wait for background tasks in case higher records got flushed.
+				bg.try_run_all().await?;
+
+				data = self.data.borrow_mut();
+			}
+		}
+
+		// Write object roots.
+		// Sort the objects to take better advantage of caching.
+		let mut ids = data
+			.objects
+			.iter()
+			.filter(|&(&id, obj)| {
+				let Slot::Present(obj) = obj else { unreachable!() };
+				id & ID_PSEUDO == 0 && obj.data.is_dirty()
+			})
+			.map(|(id, _)| *id)
+			.collect::<Vec<_>>();
+
+		ids.sort_unstable();
+
+		for id in ids {
+			let Some(Slot::Present(obj)) = data.objects.get_mut(&id) else { continue };
+			debug_assert!(!is_pseudo_id(id), "can't flush pseudo ID");
+			let root = obj.data.root();
+			obj.data.clear_dirty();
 			drop(data);
-			let mut entry = self.get_entry_mut_no_mark(id, depth, offset);
-
-			// Store record.
-			// TODO try to do concurrent writes.
-			let rec = self.store.write(&entry.data).await?;
-
-			// Remove from write LRU
-			entry.write_index = None;
-			let len = entry.data.len();
-			drop(entry);
-			self.data.borrow_mut().lrus.dirty.cache_size -= len + CACHE_ENTRY_FIXED_COST;
-
-			// Store the record in the appropriate place.
-			let obj = Tree::new(self, id).await?;
-			obj.update_record(depth, offset, rec).await?;
-			drop(obj);
+			let offset = id << RECORD_SIZE_P2;
+			Tree::new(self, bg, OBJECT_LIST_ID)
+				.write(offset, root.as_ref())
+				.await?;
 			data = self.data.borrow_mut();
 		}
 
-		while data.lrus.global.cache_size > data.lrus.global.cache_max {
-			// Remove last written to entry.
-			let &(id, depth, offset) = data
-				.lrus
-				.global
-				.lru
-				.last()
-				.expect("no nodes despite non-zero write cache size");
+		drop(data);
+		bg.try_run_all().await?;
+		data = self.data.borrow_mut();
 
-			if data
-				.data
-				.get(&id)
-				.expect("invalid object")
-				.is_resize_locked()
-			{
-				break; // TODO continue with another record or object.
-			}
-
-			if data.locked_records.contains_key(&(id, depth, offset)) {
-				break; // TODO meh
-			}
-
+		// Now flush the object list.
+		for depth in 0..16 {
+			let Some(tree) = data.objects.get_mut(&OBJECT_LIST_ID) else { continue };
+			let Slot::Present(tree) = tree else { unreachable!() };
+			let Some(level) = tree.data.data.get_mut(usize::from(depth)) else { continue };
+			let offsets = level.dirty_markers.keys().copied().collect::<Vec<_>>();
 			drop(data);
-			let entry = self
-				.remove_entry(id, depth, offset)
-				.expect("entry not present");
 
-			if entry.write_index.is_some() {
-				// Store record.
-				// TODO try to do concurrent writes.
-				let rec = self.store.write(&entry.data).await?;
-
-				// Store the record in the appropriate place.
-				let obj = Tree::new(self, id).await?;
-				obj.update_record(depth, offset, rec).await?;
+			// Flush in parallel.
+			for offt in offsets {
+				let key = Key::new(0, OBJECT_LIST_ID, depth, offt);
+				queue.push(self.flush_entry(bg, key));
 			}
+			while queue.try_next().await?.is_some() {}
+
+			// Wait for background tasks in case higher records got flushed.
+			bg.try_run_all().await?;
 
 			data = self.data.borrow_mut();
 		}
 
-		data.is_flushing = false;
+		// Write object list root.
+		if let Some(Slot::Present(obj)) = data.objects.get(&OBJECT_LIST_ID) {
+			self.store.set_object_list(obj.data.root());
+		}
+
+		// Tadha!
+		// Do a sanity check just in case.
+		if cfg!(debug_assertions) {
+			for (&id, tree) in data.objects.iter() {
+				let Slot::Present(tree) = tree else { unreachable!() };
+
+				for level in tree.data.data.iter() {
+					debug_assert!(level.dirty_markers.is_empty(), "flush_all didn't flush all");
+				}
+
+				if id != OBJECT_LIST_ID && id & ID_PSEUDO != 0 {
+					debug_assert_eq!(tree.data.root().length, 0, "pseudo object is not zero");
+				}
+			}
+		}
 		Ok(())
 	}
 
 	/// Unmount the cache.
 	///
 	/// The cache is flushed before returning the underlying [`Store`].
-	pub async fn unmount(self) -> Result<Store<D>, Error<D>> {
+	pub async fn unmount(self) -> Result<Store<D, R>, Error<D>> {
 		trace!("unmount");
-		self.finish_transaction().await?;
+		let bg = Background::default();
+		bg.run(self.finish_transaction(&bg)).await?;
+		bg.drop().await?;
 		Ok(self.store)
 	}
 
@@ -700,204 +825,16 @@ impl<D: Dev> Cache<D> {
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();
-		Statistics {
-			storage: self.store.statistics(),
-			global_usage: data.lrus.global.cache_size,
-			dirty_usage: data.lrus.dirty.cache_size,
-		}
+		Statistics { storage: self.store.statistics(), global_usage: data.lru.size() }
 	}
 
-	/// Check if cache size matches real usage
-	#[cfg(test)]
-	#[track_caller]
-	pub fn verify_cache_usage(&self) {
-		let data = self.data.borrow();
-		let real_global_usage = data
-			.data
-			.values()
-			.flat_map(|o| o.data.iter())
-			.flat_map(|m| m.values())
-			.map(|v| v.data.len() + CACHE_ENTRY_FIXED_COST)
-			.sum::<usize>();
-		assert_eq!(
-			real_global_usage, data.lrus.global.cache_size,
-			"global cache size mismatch"
-		);
-	}
-}
-
-/// A cache entry.
-///
-/// It is a relatively cheap way to avoid lifetimes while helping ensure consistency.
-///
-/// Cache entries referenced by this structure cannot be removed until all corresponding
-/// `CacheRef`s are dropped.
-///
-/// # Note
-///
-/// `CacheRef` is safe to hold across `await` points.
-struct CacheRef<'a, D: Dev> {
-	cache: &'a Cache<D>,
-	id: u64,
-	depth: u8,
-	offset: u64,
-}
-
-impl<'a, D: Dev> CacheRef<'a, D> {
-	/// Create a new reference to a cache entry.
-	///
-	/// Returns `true` if the cache entry was already locked, `false` otherwise.
-	fn new(cache: &'a Cache<D>, id: u64, depth: u8, offset: u64) -> Self {
-		*cache
-			.data
-			.borrow_mut()
-			.locked_records
-			.entry((id, depth, offset))
-			.or_default() += 1;
-		Self { cache, id, depth, offset }
+	/// Amount of entries in a parent record as a power of two.
+	fn entries_per_parent_p2(&self) -> u8 {
+		self.max_record_size().to_raw() - RECORD_SIZE_P2
 	}
 
-	/// Get a mutable reference to the data.
-	///
-	/// This will mark the entry as dirty, which in turn may trigger a flush of other dirty
-	/// entries.
-	///
-	/// # Note
-	///
-	/// The reference **must not** be held across `await` points!
-	///
-	/// # Panics
-	///
-	/// If something is already borrowing the underlying [`TreeData`].
-	async fn get_mut(&self) -> Result<EntryRefMut, Error<D>> {
-		self.cache
-			.get_entry_mut(self.id, self.depth, self.offset)
-			.await
-	}
-
-	/// Get an immutable reference to the data.
-	///
-	/// # Note
-	///
-	/// The reference **must not** be held across `await` points!
-	///
-	/// # Panics
-	///
-	/// If something is already borrowing the underlying [`TreeData`].
-	fn get(&self) -> Ref<Entry> {
-		self.cache.get_entry(self.id, self.depth, self.offset)
-	}
-
-	/// Destroy the record associated with this entry.
-	///
-	/// # Panics
-	///
-	/// If something is already borrowing the underlying [`TreeData`].
-	fn destroy(self, record: &Record) -> Vec<u8> {
-		let cache = self.cache.clone();
-		let &CacheRef { id, depth, offset, .. } = &self;
-		drop(self);
-		cache.destroy(id, depth, offset, record)
-	}
-}
-
-impl<D: Dev> Drop for CacheRef<'_, D> {
-	fn drop(&mut self) {
-		let mut tree = self.cache.data.borrow_mut();
-		let key = (self.id, self.depth, self.offset);
-		let count = tree
-			.locked_records
-			.get_mut(&key)
-			.expect("record entry is not locked");
-		*count -= 1;
-		if *count == 0 {
-			tree.locked_records.remove(&key);
-		}
-	}
-}
-
-impl<D: Dev> fmt::Debug for CacheRef<'_, D> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct(stringify!(CacheRef))
-			.field("cache", &format_args!("{{ ... }}"))
-			.field("id", &self.id)
-			.field("depth", &self.depth)
-			.field("offset", &self.offset)
-			.finish()
-	}
-}
-
-/// A single cache entry.
-struct Entry {
-	/// The data itself.
-	data: Vec<u8>,
-	/// Global LRU index.
-	global_index: lru::Idx,
-	/// Dirty LRU index, if the data is actually dirty.
-	write_index: Option<lru::Idx>,
-}
-
-impl fmt::Debug for Entry {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct(stringify!(Entry))
-			.field("data", &format_args!("{:?}", &self.data))
-			.field("global_index", &self.global_index)
-			.field("write_index", &self.write_index)
-			.finish()
-	}
-}
-
-/// Mutable reference to a cache entry.
-///
-/// This will mark the entry as dirty when it is dropped.
-struct EntryRefMut<'a> {
-	/// The length of the entry at the time of borrowing.
-	original_len: usize,
-
-	id: u64,
-	depth: u8,
-	offset: u64,
-	entry: RefMut<'a, Entry>,
-	lrus: RefMut<'a, Lrus>,
-}
-
-impl Deref for EntryRefMut<'_> {
-	type Target = Entry;
-
-	fn deref(&self) -> &Entry {
-		&self.entry
-	}
-}
-
-impl DerefMut for EntryRefMut<'_> {
-	fn deref_mut(&mut self) -> &mut Entry {
-		&mut self.entry
-	}
-}
-
-// TODO async drop would be nice.
-impl Drop for EntryRefMut<'_> {
-	fn drop(&mut self) {
-		// Trim zeros, which we always want to do.
-		trim_zeros_end(&mut self.entry.data);
-
-		// Check if we still need to mark the entry as dirty.
-		// Otherwise promote.
-		if let Some(idx) = self.entry.write_index {
-			self.lrus.dirty.lru.promote(idx);
-			self.lrus.dirty.cache_size += self.entry.data.len();
-			self.lrus.dirty.cache_size -= self.original_len;
-		} else {
-			let idx = self
-				.lrus
-				.dirty
-				.lru
-				.insert((self.id, self.depth, self.offset));
-			self.lrus.dirty.cache_size += self.entry.data.len() + CACHE_ENTRY_FIXED_COST;
-			self.entry.write_index = Some(idx);
-		}
-		self.lrus.global.cache_size += self.entry.data.len();
-		self.lrus.global.cache_size -= self.original_len;
+	fn resource(&self) -> &R {
+		self.store.resource()
 	}
 }
 
@@ -910,6 +847,8 @@ pub struct Statistics {
 	pub storage: storage::Statistics,
 	/// Total amount of memory used by record data, including dirty data.
 	pub global_usage: usize,
-	/// Total amount of memory used by dirty record data.
-	pub dirty_usage: usize,
+}
+
+fn is_pseudo_id(id: u64) -> bool {
+	id != OBJECT_LIST_ID && id & ID_PSEUDO != 0
 }

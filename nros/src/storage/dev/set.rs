@@ -1,6 +1,7 @@
 use {
 	super::{Allocator, Buf, Dev},
-	crate::{header::Header, BlockSize, Compression, Error, MaxRecordSize, Record},
+	crate::{header::Header, BlockSize, Compression, Error, MaxRecordSize, Record, Resource},
+	alloc::sync::Arc,
 	core::{cell::Cell, future, mem},
 	futures_util::stream::{FuturesUnordered, StreamExt, TryStreamExt},
 };
@@ -18,7 +19,7 @@ struct Node<D> {
 
 /// Wrapper around a set of devices.
 #[derive(Debug)]
-pub struct DevSet<D: Dev> {
+pub struct DevSet<D: Dev, R: Resource> {
 	/// The devices and their respective block counts.
 	///
 	/// It is an array of mirrors, which in turns represents a chain of devices.
@@ -36,9 +37,12 @@ pub struct DevSet<D: Dev> {
 
 	pub allocation_log: Cell<Record>,
 	pub object_list: Cell<Record>,
+
+	/// Resources for allocation & parallel processing.
+	pub resource: Arc<R>,
 }
 
-impl<D: Dev> DevSet<D> {
+impl<D: Dev, R: Resource> DevSet<D, R> {
 	/// Create a new device set.
 	///
 	/// # Note
@@ -53,6 +57,7 @@ impl<D: Dev> DevSet<D> {
 	///
 	/// If any device has no blocks.
 	pub async fn new<M, C>(
+		resource: R,
 		mirrors: M,
 		block_size: BlockSize,
 		max_record_size: MaxRecordSize,
@@ -119,13 +124,14 @@ impl<D: Dev> DevSet<D> {
 			uid: *b" TODO TODO TODO ",
 			allocation_log: Default::default(),
 			object_list: Default::default(),
+			resource: resource.into(),
 		})
 	}
 
 	/// Load an existing device set.
 	///
 	/// `read_only` prevents fixing any headers that may be broken.
-	pub async fn load(devices: Vec<D>, read_only: bool) -> Result<Self, Error<D>> {
+	pub async fn load(resource: R, devices: Vec<D>, read_only: bool) -> Result<Self, Error<D>> {
 		// We're looking to retrieve two types of data from the devices:
 		//
 		// 1. Global info that is shared among all devices.
@@ -248,6 +254,8 @@ impl<D: Dev> DevSet<D> {
 
 			object_list: header.object_list.into(),
 			allocation_log: header.allocation_log.into(),
+
+			resource: resource.into(),
 		};
 
 		// If any headers are broken, fix them now.
@@ -277,7 +285,7 @@ impl<D: Dev> DevSet<D> {
 		async fn save_header<D: Dev>(
 			tail: bool,
 			node: &Node<D>,
-			header: <D::Allocator as Allocator>::Buf<'_>,
+			header: <D::Allocator as Allocator>::Buf,
 		) -> Result<(), D::Error> {
 			let lba = if tail { 0 } else { 1 + node.block_count };
 			node.dev.write(lba, header);
@@ -404,7 +412,7 @@ impl<D: Dev> DevSet<D> {
 	pub async fn write(
 		&self,
 		lba: u64,
-		data: SetBuf<'_, D>,
+		data: SetBuf<D>,
 		whitelist: Set256,
 	) -> Result<(), Error<D>> {
 		assert!(
@@ -470,11 +478,11 @@ impl<D: Dev> DevSet<D> {
 	}
 
 	/// Create a header for writing to a device.
-	async fn create_header<'a>(
+	async fn create_header(
 		&self,
 		chain: u8,
-		node: &'a Node<D>,
-	) -> Result<<D::Allocator as Allocator>::Buf<'a>, D::Error> {
+		node: &Node<D>,
+	) -> Result<<D::Allocator as Allocator>::Buf, D::Error> {
 		let mut header = Header {
 			compression: self.compression.to_raw(),
 			block_length_p2: self.block_size.to_raw(),
@@ -506,7 +514,7 @@ impl<D: Dev> DevSet<D> {
 	}
 
 	/// Allocate memory for writing.
-	pub async fn alloc(&self, size: usize) -> Result<SetBuf<'_, D>, Error<D>> {
+	pub async fn alloc(&self, size: usize) -> Result<SetBuf<D>, Error<D>> {
 		self.devices[0][0]
 			.dev
 			.allocator()
@@ -551,9 +559,9 @@ impl<D: Dev> DevSet<D> {
 }
 
 /// Buffer for use with [`DevSet`].
-pub struct SetBuf<'a, D: Dev + 'a>(<D::Allocator as Allocator>::Buf<'a>);
+pub struct SetBuf<D: Dev>(<D::Allocator as Allocator>::Buf);
 
-impl<D: Dev> SetBuf<'_, D> {
+impl<D: Dev> SetBuf<D> {
 	/// Get an immutable reference to the data.
 	pub fn get(&self) -> &[u8] {
 		self.0.get()

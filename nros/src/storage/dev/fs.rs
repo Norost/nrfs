@@ -1,11 +1,11 @@
 use {
 	super::{Allocator, Buf, Dev},
 	crate::BlockSize,
+	alloc::sync::Arc,
 	core::{cell::RefCell, fmt, future},
 	std::{
 		fs::File,
 		io::{Read, Seek, SeekFrom, Write},
-		rc::Rc,
 	},
 };
 
@@ -70,7 +70,7 @@ impl Dev for FileDev {
 
 	fn read<'a>(&self, lba: u64, len: usize) -> Self::ReadTask<'_> {
 		future::ready(self.seek(lba, len).and_then(|()| {
-			let mut buf = vec![0; len].into_boxed_slice();
+			let mut buf = vec![0; len];
 			self.file
 				.borrow_mut()
 				.read_exact(&mut buf)
@@ -79,7 +79,7 @@ impl Dev for FileDev {
 		}))
 	}
 
-	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_> {
+	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf) -> Self::WriteTask<'_> {
 		future::ready(self.seek(lba, buf.0.len()).and_then(|()| {
 			self.file
 				.borrow_mut()
@@ -89,7 +89,7 @@ impl Dev for FileDev {
 	}
 
 	fn fence(&self) -> Self::FenceTask<'_> {
-		future::ready(Ok(()))
+		future::ready(self.file.borrow_mut().sync_all().map_err(FileDevError::Io))
 	}
 
 	fn allocator(&self) -> &Self::Allocator {
@@ -98,6 +98,7 @@ impl Dev for FileDev {
 }
 
 impl fmt::Debug for FileDev {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(MemDev))
 			.field("buf", &format_args!("[...]"))
@@ -112,12 +113,10 @@ pub struct FileAllocator;
 
 impl Allocator for FileAllocator {
 	type Error = FileDevError;
-	type AllocTask<'a> = future::Ready<Result<Self::Buf<'a>, Self::Error>>
+	type AllocTask<'a> = future::Ready<Result<Self::Buf, Self::Error>>
 	where
 		Self: 'a;
-	type Buf<'a> = FileBuf
-	where
-		Self: 'a;
+	type Buf = FileBuf;
 
 	fn alloc(&self, size: usize) -> Self::AllocTask<'_> {
 		future::ready(Ok(FileBuf(vec![0; size].into())))
@@ -125,7 +124,7 @@ impl Allocator for FileAllocator {
 }
 
 #[derive(Clone)]
-pub struct FileBuf(Rc<[u8]>);
+pub struct FileBuf(Arc<Vec<u8>>);
 
 impl Buf for FileBuf {
 	type Error = FileDevError;
@@ -135,11 +134,13 @@ impl Buf for FileBuf {
 	}
 
 	fn get_mut(&mut self) -> &mut [u8] {
-		Rc::get_mut(&mut self.0).expect("buffer was cloned")
+		Arc::get_mut(&mut self.0).expect("buffer was cloned")
 	}
 
 	fn shrink(&mut self, len: usize) {
 		assert!(len <= self.0.len(), "new len is larger than old len");
-		self.0 = self.0.iter().copied().take(len).collect()
+		Arc::get_mut(&mut self.0)
+			.expect("buffer was cloned")
+			.resize(len, 0);
 	}
 }

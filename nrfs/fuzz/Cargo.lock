@@ -72,6 +72,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-channel"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52ba265a92256105f45b719605a571ffe2d1f0fea3807304b522c1d778f79eed"
+dependencies = [
+ "futures-core",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -188,6 +197,7 @@ dependencies = [
  "arena",
  "arrayvec",
  "async-recursion",
+ "futures-channel",
  "futures-util",
  "lz4_flex",
  "nora_endian 0.1.2 (git+https://github.com/Demindiro/nora_endian)",

@@ -23,7 +23,7 @@ macro_rules! t {
 				let mut b = vec![0; data.len() * 2];
 				let r = Record::pack(&data, &mut b, Compression::$comp, BlockSize::B512);
 				let mut d = vec![0; data.len()];
-				r.unpack(&b[..u32::from(r.length) as _], &mut d, MaxRecordSize::K1)
+				r.unpack::<StdResource>(&b[..u32::from(r.length) as _], &mut d, MaxRecordSize::K1)
 					.unwrap();
 				assert_eq!(&data, &*d);
 			}

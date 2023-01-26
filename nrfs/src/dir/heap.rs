@@ -5,27 +5,29 @@ use {
 	rangemap::RangeSet,
 };
 
-impl<'a, D: Dev> Dir<'a, D> {
+impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 	/// Read a heap value.
 	pub(crate) async fn read_heap(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
 		trace!("read_heap {:?} (len: {})", offset, buf.len());
-		self.fs.read_exact(self.id + HEAP_OFFT, offset, buf).await
+		let obj = self.fs.storage.get(self.bg, self.id + HEAP_OFFT).await?;
+		crate::read_exact(&obj, offset, buf).await
 	}
 
 	/// Write a heap value.
 	pub(crate) async fn write_heap(&self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
 		trace!("write_heap {:?} (len: {})", offset, data.len());
-		self.fs.write_all(self.id + HEAP_OFFT, offset, data).await
+		let obj = self.fs.storage.get(self.bg, self.id + HEAP_OFFT).await?;
+		crate::write_all(&obj, offset, data).await
 	}
 
 	/// Zero out heap region.
 	pub(crate) async fn zero_heap(&self, offset: u64, len: u64) -> Result<(), Error<D>> {
 		trace!("zero_heap {:?} (len: {})", offset, len);
-		// TODO add zero function to nros::Tree.
+		// TODO make use of write_zeros
+		// We need to properly test the former first though.
+		let obj = self.fs.storage.get(self.bg, self.id + HEAP_OFFT).await?;
 		let len = usize::try_from(len).unwrap();
-		self.fs
-			.write_all(self.id + HEAP_OFFT, offset, &vec![0; len])
-			.await
+		crate::write_all(&obj, offset, &vec![0; len]).await
 	}
 
 	/// Write a full, minimized heap allocation log.
@@ -59,7 +61,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 				drop(log);
 
 				// Resize heap
-				let heap = self.fs.storage.get(self.id + HEAP_OFFT).await?;
+				let heap = self.fs.storage.get(self.bg, self.id + HEAP_OFFT).await?;
 				let len = heap.len().await?;
 				heap.resize(len.max(end)).await?;
 				drop(heap);

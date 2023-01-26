@@ -4,13 +4,20 @@ version = "0.2.0"
 edition = "2021"
 
 [features]
+default = ["std"]
+std = []
+parallel = ["rayon"]
 # Disallow writing over records allocated & freed in the same transacion.
 #
 # This option is useful for detecting use-after-frees.
 # It should not be enabled in production as it greatly increases the space
 # usage of each transaction.
-never-overwrite-in-transaction = []
+never-overwrite = []
 trace = []
+# Track allocations
+#
+# This saves the stack trace for each allocation.
+debug-trace-alloc = []
 
 [dependencies.arena]
 git = "https://git.sr.ht/~demindiro/arena"
@@ -54,8 +61,15 @@ version = "1.1"
 version = "0.8"
 features = ["xxh3"]
 
+[dependencies.futures-channel]
+version = "0.3"
+
 [dependencies.futures-util]
 version = "0.3"
+
+[dependencies.rayon]
+version = "1.6"
+optional = true
 
 [dev-dependencies.arbitrary]
 version = "1.2"

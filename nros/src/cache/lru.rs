@@ -1,6 +1,256 @@
-pub type Idx = arena::Handle<u8>;
+use {
+	super::{Busy, Key, RefCount, ID_PSEUDO, OBJECT_LIST_ID},
+	alloc::rc::Rc,
+	core::cell::RefCell,
+};
 
+#[cfg(debug_assertions)]
+pub type Gen = u8;
+#[cfg(not(debug_assertions))]
+pub type Gen = ();
+
+pub type Idx = arena::Handle<Gen>;
+
+#[cfg(debug_assertions)]
 const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
+#[cfg(not(debug_assertions))]
+const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
+
+/// Estimated fixed cost for every cached entry.
+///
+/// This is in addition to the amount of data stored by the entry.
+const CACHE_ENTRY_FIXED_COST: usize = 32;
+
+const CACHE_OBJECT_FIXED_COST: usize = 128;
+
+/// Cache LRU queue, with tracking per byte used.
+#[derive(Debug)]
+pub(super) struct Lru {
+	/// Linked list for LRU entries
+	lru: LruList<Key>,
+	/// The maximum amount of total bytes to keep cached.
+	cache_max: usize,
+	/// The amount of cached bytes.
+	cache_size: usize,
+}
+
+impl Lru {
+	pub fn new(max_size: usize) -> Self {
+		Self { lru: Default::default(), cache_max: max_size, cache_size: 0 }
+	}
+
+	fn add(&mut self, key: Key, len: usize) -> Idx {
+		self.cache_size += len;
+		self.lru.insert(key)
+	}
+
+	fn remove(&mut self, index: Idx, len: usize) -> Key {
+		self.cache_size -= len;
+		self.lru.remove(index)
+	}
+
+	/// Decrease reference count.
+	///
+	/// Inserts a new entry if it reaches 0.
+	///
+	/// # Panics
+	///
+	/// If the reference count is [`RefCount::NoRef`].
+	fn decrease_refcount(&mut self, refcount: &mut RefCount, key: Key, len: usize, amount: usize) {
+		debug_assert!(
+			key.flags() & Key::FLAG_OBJECT == 0
+				|| key.id() == OBJECT_LIST_ID
+				|| key.id() & ID_PSEUDO == 0,
+			"pseudo-object don't belong in the LRU (id: {:#x})",
+			key.id(),
+		);
+		let RefCount::Ref { busy } = refcount else { panic!("NoRef") };
+		let mut busy_ref = busy.borrow_mut();
+		busy_ref.refcount -= amount;
+		if busy_ref.refcount == 0 {
+			drop(busy_ref);
+			let lru_index = self.add(key, len);
+			*refcount = RefCount::NoRef { lru_index };
+		}
+	}
+
+	/// Increase reference count.
+	///
+	/// Removes entry if it was 0.
+	///
+	/// # Panics
+	///
+	/// If the reference count overflows.
+	fn increase_refcount(&mut self, refcount: &mut RefCount, len: usize) {
+		match refcount {
+			RefCount::Ref { busy } => busy.borrow_mut().refcount += 1,
+			RefCount::NoRef { lru_index } => {
+				let key = self.remove(*lru_index, len);
+				let busy = Busy::with_refcount(key, 1);
+				*refcount = RefCount::Ref { busy };
+			}
+		}
+	}
+
+	/// Decrease reference count for an entry.
+	pub fn entry_decrease_refcount(&mut self, key: Key, refcount: &mut RefCount, len: usize) {
+		self.decrease_refcount(refcount, key, CACHE_ENTRY_FIXED_COST + len, 1);
+	}
+
+	/// Decrease reference count for an object.
+	///
+	/// If the reference count reaches zero, either
+	/// - for regular objects: a new entry is added.
+	/// - for pseudo-objects: `true` is returned to indicate the object should be destroyed.
+	///
+	/// In all other cases `false` is returned.
+	pub fn object_decrease_refcount(
+		&mut self,
+		id: u64,
+		refcount: &mut RefCount,
+		amount: usize,
+	) -> bool {
+		// Dereference the corresponding object.
+		let flags = Key::FLAG_OBJECT;
+		if id == OBJECT_LIST_ID || id & ID_PSEUDO == 0 {
+			// Regular object.
+			self.decrease_refcount(
+				refcount,
+				Key::new(flags, id, 0, 0),
+				CACHE_OBJECT_FIXED_COST,
+				amount,
+			);
+			false
+		} else {
+			// Pseudo-object.
+			let RefCount::Ref { busy } = refcount else { panic!("dangling pseudo object") };
+			let mut busy_ref = busy.borrow_mut();
+			busy_ref.refcount -= 1;
+			busy_ref.refcount == 0
+		}
+	}
+
+	/// Increase reference count for an object.
+	pub fn object_increase_refcount(&mut self, refcount: &mut RefCount) {
+		self.increase_refcount(refcount, CACHE_OBJECT_FIXED_COST)
+	}
+
+	/// Add an entry with no references.
+	pub fn entry_add_noref(&mut self, key: Key, len: usize) -> RefCount {
+		RefCount::NoRef { lru_index: self.add(key, len + CACHE_ENTRY_FIXED_COST) }
+	}
+
+	/// Add an entry, depending on `busy.refcount`.
+	pub fn entry_add(&mut self, key: Key, busy: Rc<RefCell<Busy>>, len: usize) -> RefCount {
+		if busy.borrow_mut().refcount == 0 {
+			self.entry_add_noref(key, len)
+		} else {
+			RefCount::Ref { busy }
+		}
+	}
+
+	/// Add an object with no references.
+	pub fn object_add_noref(&mut self, id: u64) -> RefCount {
+		RefCount::NoRef {
+			lru_index: self.add(
+				Key::new(Key::FLAG_OBJECT, id, 0, 0),
+				CACHE_OBJECT_FIXED_COST,
+			),
+		}
+	}
+
+	/// Add an object, depending on `busy.refcount`.
+	pub fn object_add(&mut self, id: u64, busy: Rc<RefCell<Busy>>) -> RefCount {
+		if busy.borrow_mut().refcount == 0 {
+			self.object_add_noref(id)
+		} else {
+			RefCount::Ref { busy }
+		}
+	}
+
+	/// Remove an entry.
+	pub fn entry_remove(&mut self, index: Idx, len: usize) {
+		self.remove(index, len + CACHE_ENTRY_FIXED_COST);
+	}
+
+	/// Remove an object.
+	pub fn object_remove(&mut self, index: Idx) {
+		self.remove(index, CACHE_OBJECT_FIXED_COST);
+	}
+
+	/// Get the amount of bytes cached.
+	pub fn size(&self) -> usize {
+		self.cache_size
+	}
+
+	/// Whether there is an excess of cached data.
+	pub fn has_excess(&self) -> bool {
+		self.cache_size > self.cache_max
+	}
+
+	/// Set the maximum amount of cached data the LRU should keep
+	/// before `Self::has_excess` returns `true`.
+	pub fn set_cache_max(&mut self, size: usize) {
+		self.cache_max = size
+	}
+
+	/// Get the key of the last entry.
+	pub fn last(&self) -> Option<Key> {
+		self.lru.last().copied()
+	}
+
+	/// Adjust the data usage of an entry.
+	pub fn entry_adjust(&mut self, refcount: &RefCount, old_size: usize, new_size: usize) {
+		if let RefCount::NoRef { .. } = *refcount {
+			self.cache_size += new_size;
+			self.cache_size -= old_size;
+		}
+	}
+
+	/// Move an entry to the back of the queue.
+	pub fn touch(&mut self, refcount: &RefCount) {
+		if let RefCount::NoRef { lru_index } = *refcount {
+			self.lru.promote(lru_index);
+		}
+	}
+
+	/// Get a mutable reference to the key of an entry.
+	pub fn get_mut(&mut self, index: Idx) -> Option<&mut Key> {
+		self.lru.get_mut(index)
+	}
+}
+
+impl<D: super::Dev, R: super::Resource> super::Cache<D, R> {
+	/// Check if cache size matches real usage
+	#[cfg(test)]
+	#[track_caller]
+	pub(crate) fn verify_cache_usage(&self) {
+		use super::{Buf, Present, Slot};
+		let data = self.data.borrow();
+		let real_usage = data.objects.values().fold(0, |x, s| {
+			let mut y = 0;
+			if let Slot::Present(slot) = s {
+				if matches!(slot.refcount, RefCount::NoRef { .. }) {
+					y += CACHE_OBJECT_FIXED_COST;
+				}
+				y += slot
+					.data
+					.data
+					.iter()
+					.flat_map(|m| m.slots.values())
+					.flat_map(|s| match s {
+						Slot::Present(Present { data, refcount: RefCount::NoRef { .. } }) => {
+							Some(data)
+						}
+						_ => None,
+					})
+					.fold(0, |x, v| x + v.len() + CACHE_ENTRY_FIXED_COST);
+			}
+			x + y
+		});
+		assert_eq!(real_usage, data.lru.size(), "cache size mismatch");
+	}
+}
 
 #[derive(Debug)]
 struct Node<V> {
@@ -15,7 +265,7 @@ struct Node<V> {
 /// It only keeps track of nodes and their ordering based on usage.
 /// Insertions and removals need to be done manually.
 #[derive(Debug)]
-pub struct LruList<V> {
+struct LruList<V> {
 	/// The most recently used node, if any.
 	head: Idx,
 	/// The least recently used node, if any.
@@ -24,7 +274,7 @@ pub struct LruList<V> {
 	///
 	/// An arena is used to reduce memory fragmentation and allow the use of smaller indices
 	/// compared to pointers.
-	nodes: arena::Arena<Node<V>, u8>,
+	nodes: arena::Arena<Node<V>, Gen>,
 }
 
 impl<V> Default for LruList<V> {
@@ -70,17 +320,6 @@ impl<V> LruList<V> {
 		val
 	}
 
-	/// Remove the last node from the list.
-	pub fn remove_last(&mut self) -> Option<V> {
-		(!self.nodes.is_empty()).then(|| {
-			let idx = self.pop_last();
-			let val = self.nodes.remove(idx).unwrap().value;
-			#[cfg(test)]
-			self.assert_valid();
-			val
-		})
-	}
-
 	/// Get the last node from the list.
 	pub fn last(&self) -> Option<&V> {
 		(!self.nodes.is_empty()).then(|| &self.nodes.get(self.tail).unwrap().value)
@@ -112,17 +351,6 @@ impl<V> LruList<V> {
 			self.nodes[index].next = IDX_NONE;
 		}
 		self.head = index;
-	}
-
-	/// Remove the last value from the list.
-	///
-	/// # Panics
-	///
-	/// If there are no nodes.
-	fn pop_last(&mut self) -> Idx {
-		let tail = self.tail;
-		self.remove_list(tail);
-		tail
 	}
 
 	/// Remove a node from the list without removing it from the arena.

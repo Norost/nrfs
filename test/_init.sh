@@ -14,7 +14,7 @@ cd $(dirname $(dirname "$script"))
 # Build
 if test "$MODE" = "release"
 then
-	cargo b --release $CARGO_FLAGS
+	cargo b --release --features parallel $CARGO_FLAGS
 else
 	cargo b $CARGO_FLAGS
 fi

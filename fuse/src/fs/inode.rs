@@ -4,7 +4,8 @@ use {
 	nrfs::{
 		dev::FileDev,
 		dir::{ext, ItemRef},
-		DirRef, FileRef, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef, SymRef, TmpRef,
+		Background, DirRef, FileRef, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef, SymRef,
+		TmpRef,
 	},
 	std::collections::HashMap,
 };
@@ -41,40 +42,37 @@ struct InodeData<T> {
 	reference_count: u64,
 }
 
+macro_rules! impl_ty {
+	($ty:ident $val:ident $val_rev:ident $ino:ident | $add:ident $get:ident) => {
+		pub fn $add<'a, 'b>(
+			&mut self,
+			$val: $ty<'a, 'b, FileDev>,
+			incr: bool,
+		) -> (u64, Option<$ty<'a, 'b, FileDev>>) {
+			let (ino, e) = Self::add(&mut self.$val, &mut self.$val_rev, $val, incr);
+			(ino | $ino, e)
+		}
+
+		pub fn $get<'s, 'a, 'b>(
+			&'s self,
+			fs: &'a Nrfs<FileDev>,
+			bg: &'b Background<'a, FileDev>,
+			ino: u64,
+		) -> TmpRef<'s, $ty<'a, 'b, FileDev>> {
+			self.$val[Handle::from_raw((ino ^ $ino) as usize - 1, ())]
+				.value
+				.into_tmp(fs, bg)
+		}
+	};
+}
+
 impl InodeStore {
 	/// Create a new inode store with the given uid and gid as defaults.
 	pub fn new(uid: u32, gid: u32) -> Self {
 		Self { unix_default: ext::unix::Entry::new(0o700, uid, gid), ..Default::default() }
 	}
 
-	pub fn add_dir<'f>(
-		&mut self,
-		dir: DirRef<'f, FileDev>,
-		incr: bool,
-	) -> (u64, Option<DirRef<'f, FileDev>>) {
-		let (ino, e) = Self::add(&mut self.dir, &mut self.dir_rev, dir, incr);
-		(ino | INO_TY_DIR, e)
-	}
-
-	pub fn add_file<'f>(
-		&mut self,
-		file: FileRef<'f, FileDev>,
-		incr: bool,
-	) -> (u64, Option<FileRef<'f, FileDev>>) {
-		let (ino, e) = Self::add(&mut self.file, &mut self.file_rev, file, incr);
-		(ino | INO_TY_FILE, e)
-	}
-
-	pub fn add_sym<'f>(
-		&mut self,
-		sym: SymRef<'f, FileDev>,
-		incr: bool,
-	) -> (u64, Option<SymRef<'f, FileDev>>) {
-		let (ino, e) = Self::add(&mut self.sym, &mut self.sym_rev, sym, incr);
-		(ino | INO_TY_SYM, e)
-	}
-
-	fn add<'f, T: RawRef<'f, FileDev>>(
+	fn add<'a, 'b, T: RawRef<'a, 'b, FileDev>>(
 		m: &mut Arena<InodeData<T::Raw>, ()>,
 		rev_m: &mut HashMap<T::Raw, Handle<()>>,
 		t: T,
@@ -95,59 +93,35 @@ impl InodeStore {
 		(h.into_raw().0 as u64 + 1, t)
 	}
 
-	pub fn get<'s, 'f>(
+	pub fn get<'s, 'a, 'b>(
 		&'s self,
-		fs: &'f Nrfs<FileDev>,
+		fs: &'a Nrfs<FileDev>,
+		bg: &'b Background<'a, FileDev>,
 		ino: u64,
-	) -> TmpRef<'s, ItemRef<'f, FileDev>> {
+	) -> TmpRef<'s, ItemRef<'a, 'b, FileDev>> {
 		let h = Handle::from_raw((ino & !INO_TY_MASK) as usize - 1, ());
 		match ino & INO_TY_MASK {
-			INO_TY_DIR => self.dir[h].value.into_tmp(fs).into(),
-			INO_TY_FILE => self.file[h].value.into_tmp(fs).into(),
-			INO_TY_SYM => self.sym[h].value.into_tmp(fs).into(),
+			INO_TY_DIR => self.dir[h].value.into_tmp(fs, bg).into(),
+			INO_TY_FILE => self.file[h].value.into_tmp(fs, bg).into(),
+			INO_TY_SYM => self.sym[h].value.into_tmp(fs, bg).into(),
 			_ => unreachable!(),
 		}
 	}
 
-	pub fn get_dir<'s, 'f>(
-		&'s self,
-		fs: &'f Nrfs<FileDev>,
-		ino: u64,
-	) -> TmpRef<'s, DirRef<'f, FileDev>> {
-		self.dir[Handle::from_raw((ino ^ INO_TY_DIR) as usize - 1, ())]
-			.value
-			.into_tmp(fs)
-	}
-
-	pub fn get_file<'s, 'f>(
-		&'s self,
-		fs: &'f Nrfs<FileDev>,
-		ino: u64,
-	) -> TmpRef<'s, FileRef<'f, FileDev>> {
-		self.file[Handle::from_raw((ino ^ INO_TY_FILE) as usize - 1, ())]
-			.value
-			.into_tmp(fs)
-	}
-
-	pub fn get_sym<'s, 'f>(
-		&'s self,
-		fs: &'f Nrfs<FileDev>,
-		ino: u64,
-	) -> TmpRef<'s, SymRef<'f, FileDev>> {
-		self.sym[Handle::from_raw((ino ^ INO_TY_SYM) as usize - 1, ())]
-			.value
-			.into_tmp(fs)
-	}
+	impl_ty!(DirRef  dir  dir_rev  INO_TY_DIR  | add_dir  get_dir );
+	impl_ty!(FileRef file file_rev INO_TY_FILE | add_file get_file);
+	impl_ty!(SymRef  sym  sym_rev  INO_TY_SYM  | add_sym  get_sym );
 
 	/// Forget an entry.
 	///
 	/// Returns an [`ItemRef`] if it needs to be dropped.
-	pub fn forget<'f>(
+	pub fn forget<'a, 'b>(
 		&mut self,
-		fs: &'f Nrfs<FileDev>,
+		fs: &'a Nrfs<FileDev>,
+		bg: &'b Background<'a, FileDev>,
 		ino: u64,
 		nlookup: u64,
-	) -> Option<ItemRef<'f, FileDev>> {
+	) -> Option<ItemRef<'a, 'b, FileDev>> {
 		let h = Handle::from_raw((ino & !INO_TY_MASK) as usize - 1, ());
 		match ino & INO_TY_MASK {
 			INO_TY_DIR => {
@@ -156,7 +130,7 @@ impl InodeStore {
 				if *c == 0 {
 					let d = self.dir.remove(h).unwrap();
 					self.dir_rev.remove(&d.value);
-					return Some(DirRef::from_raw(fs, d.value).into());
+					return Some(DirRef::from_raw(fs, bg, d.value).into());
 				}
 			}
 			INO_TY_FILE => {
@@ -165,7 +139,7 @@ impl InodeStore {
 				if *c == 0 {
 					let f = self.file.remove(h).unwrap();
 					self.file_rev.remove(&f.value);
-					return Some(FileRef::from_raw(fs, f.value).into());
+					return Some(FileRef::from_raw(fs, bg, f.value).into());
 				}
 			}
 			INO_TY_SYM => {
@@ -174,7 +148,7 @@ impl InodeStore {
 				if *c == 0 {
 					let f = self.sym.remove(h).unwrap();
 					self.sym_rev.remove(&f.value);
-					return Some(SymRef::from_raw(fs, f.value).into());
+					return Some(SymRef::from_raw(fs, bg, f.value).into());
 				}
 			}
 			_ => unreachable!(),
@@ -183,15 +157,19 @@ impl InodeStore {
 	}
 
 	/// Drop all references and inodes.
-	pub async fn remove_all(&mut self, fs: &Nrfs<FileDev>) {
+	pub async fn remove_all<'a, 'b>(
+		&mut self,
+		fs: &'a Nrfs<FileDev>,
+		bg: &'b Background<'a, FileDev>,
+	) {
 		for (_, r) in self.dir.drain() {
-			DirRef::from_raw(fs, r.value).drop().await.unwrap();
+			DirRef::from_raw(fs, bg, r.value).drop().await.unwrap();
 		}
 		for (_, r) in self.file.drain() {
-			FileRef::from_raw(fs, r.value).drop().await.unwrap();
+			FileRef::from_raw(fs, bg, r.value).drop().await.unwrap();
 		}
 		for (_, r) in self.sym.drain() {
-			SymRef::from_raw(fs, r.value).drop().await.unwrap();
+			SymRef::from_raw(fs, bg, r.value).drop().await.unwrap();
 		}
 
 		self.dir_rev.clear();

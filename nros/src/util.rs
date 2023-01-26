@@ -1,26 +1,42 @@
-use {crate::Record, core::mem};
+use {
+	crate::{resource::Buf, Record},
+	core::{future::Future, mem, pin::Pin},
+};
 
 /// Get a record from a slice of raw data.
-pub fn get_record(data: &[u8], index: usize) -> Record {
+///
+/// Returns `None` if the index is completely out of range,
+/// i.e. a zeroed record would be returned.
+pub fn get_record(data: &[u8], index: usize) -> Option<Record> {
 	let offt = index * mem::size_of::<Record>();
+	if offt >= data.len() {
+		return None;
+	}
 
 	let (start, end) = (offt, offt + mem::size_of::<Record>());
 	let (start, end) = (start.min(data.len()), end.min(data.len()));
 
 	let mut record = Record::default();
 	record.as_mut()[..end - start].copy_from_slice(&data[start..end]);
-	record
+	Some(record)
 }
 
-/// Cut off trailing zeroes from [`Vec`].
-pub fn trim_zeros_end(vec: &mut Vec<u8>) {
-	if let Some(i) = vec.iter().rev().position(|&x| x != 0) {
-		vec.resize(vec.len() - i, 0);
-	} else {
-		vec.clear();
-	}
+/// Cut off trailing zeroes from [`Buf`].
+pub fn trim_zeros_end(vec: &mut impl Buf) {
+	let i = vec
+		.get()
+		.iter()
+		.rev()
+		.position(|&x| x != 0)
+		.unwrap_or(vec.len());
+	vec.resize(vec.len() - i, 0);
 	// TODO find a proper heuristic for freeing memory.
 	if vec.capacity() / 2 <= vec.len() {
-		vec.shrink_to_fit()
+		vec.shrink()
 	}
+}
+
+/// Box a future and erase its type.
+pub fn box_fut<'a, T: Future + 'a>(fut: T) -> Pin<Box<dyn Future<Output = T::Output> + 'a>> {
+	Box::pin(fut)
 }

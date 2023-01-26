@@ -13,25 +13,29 @@ mod mem;
 mod set;
 
 #[cfg(not(feature = "no-std"))]
-pub use fs::{FileDev, FileDevError};
-pub use mem::{MemDev, MemDevError};
+pub use fs::{FileAllocator, FileDev, FileDevError};
+pub use {
+	alloc::sync::Arc,
+	mem::{MemAllocator, MemDev, MemDevError},
+};
 
 pub(crate) use set::{DevSet, Set256};
 
 use {crate::BlockSize, core::future::Future};
 
-pub trait Dev {
+// FIXME what the hell is the 'static bound necessary for??
+pub trait Dev: 'static {
 	/// Error that may be returned by the device.
 	///
 	/// This should only be used for fatal errors.
 	/// The device will be taken out of service as soon as an error is returned.
-	type Error;
+	type Error: 'static;
 	/// The type of the memory allocator used by this device.
 	///
 	/// This allocator is used by [`Nros`] for write buffers and by [`Dev`]ices for read buffers.
-	type Allocator: Allocator<Error = Self::Error>;
+	type Allocator: Allocator<Error = Self::Error> + 'static;
 	/// Task that represents a pending read operation.
-	type ReadTask<'a>: Future<Output = Result<<Self::Allocator as Allocator>::Buf<'a>, Self::Error>>
+	type ReadTask<'a>: Future<Output = Result<<Self::Allocator as Allocator>::Buf, Self::Error>>
 	where
 		Self: 'a;
 	/// Task that represents a pending write operation.
@@ -64,7 +68,7 @@ pub trait Dev {
 	/// If `len > buf.len()`.
 	///
 	/// If a fence is in progress.
-	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_>;
+	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf) -> Self::WriteTask<'_>;
 
 	/// Execute a fence.
 	///
@@ -83,13 +87,11 @@ pub trait Dev {
 
 /// Interface for allocators which manage memory buffers [`Dev`] can read from & write to.
 pub trait Allocator {
-	type Buf<'a>: Buf
-	where
-		Self: 'a;
+	type Buf: Buf + 'static;
 	type Error;
 
 	/// Task that represents a pending allocation.
-	type AllocTask<'a>: Future<Output = Result<Self::Buf<'a>, Self::Error>>
+	type AllocTask<'a>: Future<Output = Result<Self::Buf, Self::Error>>
 	where
 		Self: 'a;
 
@@ -101,7 +103,7 @@ pub trait Allocator {
 }
 
 /// A memory buffer for use with [`Dev`].
-pub trait Buf: Clone {
+pub trait Buf: Clone + Send {
 	/// Error that may occur when implicitly cloning.
 	type Error;
 

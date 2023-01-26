@@ -15,3 +15,10 @@ version = "0.4"
 
 [dependencies.nrfs]
 path = "../nrfs"
+#features = ["parallel"]
+
+[dependencies.futures-executor]
+version = "0.3"
+
+[dependencies.futures-util]
+version = "0.3"

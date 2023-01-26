@@ -8,6 +8,9 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+never-overwrite = ["nros/never-overwrite"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 

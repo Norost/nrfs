@@ -1,15 +1,15 @@
 use {
-	super::{run, Set256},
+	super::{block_on, Set256},
 	crate::{
 		storage::dev::{Allocator, Buf, Dev, DevSet, MemDev},
-		BlockSize, Compression, MaxRecordSize,
+		BlockSize, Compression, MaxRecordSize, StdResource,
 	},
 };
 
 /// Write to & read from a [`MemDev`].
 #[test]
 fn memdev_read_write() {
-	run(async {
+	block_on(async {
 		let dev = MemDev::new(16, BlockSize::B512);
 
 		let mut buf1k = dev.allocator().alloc(2 * 512).await.unwrap();
@@ -35,9 +35,10 @@ fn memdev_read_write() {
 /// Create [`DevSet`] with one device.
 #[test]
 fn devset_1_create() {
-	run(async {
+	block_on(async {
 		let dev = MemDev::new(16, BlockSize::B512);
 		let _ = DevSet::new(
+			StdResource::new(),
 			[[dev]],
 			BlockSize::B512,
 			MaxRecordSize::B512,
@@ -51,9 +52,10 @@ fn devset_1_create() {
 /// Write to & read from a [`DevSet`] with one device.
 #[test]
 fn devset_1_read_write() {
-	run(async {
+	block_on(async {
 		let dev = MemDev::new(16, BlockSize::B512);
 		let set = DevSet::new(
+			StdResource::new(),
 			[[dev]],
 			BlockSize::B512,
 			MaxRecordSize::B512,

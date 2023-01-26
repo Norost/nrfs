@@ -5,21 +5,17 @@ pub mod fuzz;
 use {
 	crate::{
 		dir::{ext, EnableExtensions, Extensions},
-		*,
+		Background, *,
 	},
 	core::{
 		future::Future,
-		pin::pin,
 		task::{Context, Poll},
 	},
 	nros::dev::MemDev,
 };
 
-fn run<F, R>(fut: F) -> R
-where
-	F: Future<Output = R>,
-{
-	let mut fut = pin!(fut);
+fn block_on<R>(fut: impl Future<Output = R>) -> R {
+	let mut fut = core::pin::pin!(fut);
 	let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
 	loop {
 		if let Poll::Ready(r) = fut.as_mut().poll(&mut cx) {
@@ -28,31 +24,32 @@ where
 	}
 }
 
-async fn new() -> Nrfs<MemDev> {
-	new_cap(1 << 10, BlockSize::K1, MaxRecordSize::K1).await
+fn run2<'a, 'b, F>(bg: &'b Background<'a, MemDev>, f: F)
+where
+	F: Future<Output = ()>,
+{
+	block_on(bg.run(async { Ok::<_, Error<_>>(f.await) })).unwrap()
 }
 
-async fn new_cap(
-	size: usize,
-	block_size: BlockSize,
-	max_record_size: MaxRecordSize,
-) -> Nrfs<MemDev> {
-	Nrfs::new(
+fn new() -> Nrfs<MemDev> {
+	new_cap(1 << 10, BlockSize::K1, MaxRecordSize::K1)
+}
+
+fn new_cap(size: usize, block_size: BlockSize, max_record_size: MaxRecordSize) -> Nrfs<MemDev> {
+	block_on(Nrfs::new(
 		[[MemDev::new(size, block_size)]],
 		block_size,
 		max_record_size,
 		&DirOptions::new(&[0; 16]),
 		Compression::None,
 		1 << 12,
-		1 << 12,
-	)
-	.await
+	))
 	.unwrap()
 }
 
 /// New filesystem with extensions.
-async fn new_ext() -> Nrfs<MemDev> {
-	Nrfs::new(
+fn new_ext() -> Nrfs<MemDev> {
+	block_on(Nrfs::new(
 		[[MemDev::new(1 << 10, BlockSize::K1)]],
 		BlockSize::K1,
 		MaxRecordSize::K1,
@@ -62,23 +59,22 @@ async fn new_ext() -> Nrfs<MemDev> {
 		},
 		Compression::None,
 		4096,
-		4096,
-	)
-	.await
+	))
 	.unwrap()
 }
 
 #[test]
 fn create_fs() {
-	run(new());
+	new();
 }
 
 /// BorrowMutErrors in Drop impls are annoying as hell
 #[test]
 fn drop_borrow() {
-	run(async {
-		let fs = new().await;
-		let dir = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let dir = fs.root_dir(&bg).await.unwrap();
 		dir.create_file(b"test.txt".into(), &Default::default())
 			.await
 			.unwrap()
@@ -87,15 +83,16 @@ fn drop_borrow() {
 			.await
 			.unwrap();
 		dir.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn create_file() {
-	run(async {
-		let fs = new().await;
-
-		let d = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let d = fs.root_dir(&bg).await.unwrap();
 		let f = d
 			.create_file(b"test.txt".into(), &Default::default())
 			.await
@@ -118,20 +115,21 @@ fn create_file() {
 		f.drop().await.unwrap();
 		file.drop().await.unwrap();
 		d.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn create_many_files() {
-	run(async {
-		let fs = new().await;
-
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
 		// Create & read
 		for i in 0..100 {
 			let name = format!("{}.txt", i);
 			let contents = format!("This is file #{}", i);
 
-			let d = fs.root_dir().await.unwrap();
+			let d = fs.root_dir(&bg).await.unwrap();
 			let f = d
 				.create_file((&*name).try_into().unwrap(), &Default::default())
 				.await
@@ -146,7 +144,7 @@ fn create_many_files() {
 			let l = file.read(0, &mut buf).await.unwrap();
 			assert_eq!(core::str::from_utf8(&buf[..l]), Ok(&*contents),);
 
-			fs.finish_transaction().await.unwrap();
+			fs.finish_transaction(&bg).await.unwrap();
 
 			file.drop().await.unwrap();
 			f.drop().await.unwrap();
@@ -154,7 +152,7 @@ fn create_many_files() {
 		}
 
 		// Test iteration
-		let d = fs.root_dir().await.unwrap();
+		let d = fs.root_dir(&bg).await.unwrap();
 		let mut i = 0;
 		let mut count = 0;
 		while let Some((e, ni)) = d.next_from(i).await.unwrap() {
@@ -169,7 +167,7 @@ fn create_many_files() {
 			let name = format!("{}.txt", i);
 			let contents = format!("This is file #{}", i);
 
-			let d = fs.root_dir().await.unwrap();
+			let d = fs.root_dir(&bg).await.unwrap();
 
 			let file = d.find((&*name).try_into().unwrap()).await.unwrap().unwrap();
 
@@ -188,15 +186,16 @@ fn create_many_files() {
 		}
 
 		d.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn create_file_ext() {
-	run(async {
-		let fs = new_ext().await;
-
-		let d = fs.root_dir().await.unwrap();
+	let fs = new_ext();
+	let bg = Background::default();
+	run2(&bg, async {
+		let d = fs.root_dir(&bg).await.unwrap();
 		let f = d
 			.create_file(
 				b"test.txt".into(),
@@ -227,15 +226,16 @@ fn create_file_ext() {
 		file.drop().await.unwrap();
 		f.drop().await.unwrap();
 		d.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn remove_file() {
-	run(async {
-		let fs = new().await;
-
-		let d = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let d = fs.root_dir(&bg).await.unwrap();
 		assert_eq!(d.len().await.unwrap(), 0);
 
 		d.create_file(b"hello".into(), &Default::default())
@@ -279,14 +279,16 @@ fn remove_file() {
 		}
 
 		d.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn shrink() {
-	run(async {
-		let fs = new().await;
-		let d = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let d = fs.root_dir(&bg).await.unwrap();
 		assert_eq!(d.len().await.unwrap(), 0);
 		d.create_file(b"hello".into(), &Default::default())
 			.await
@@ -328,15 +330,17 @@ fn shrink() {
 		}
 
 		d.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 /// Attempt to find all files even with collisions.
 #[test]
 fn find_colllision() {
-	run(async {
-		let fs = new().await;
-		let d = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let d = fs.root_dir(&bg).await.unwrap();
 		// NOTE: hash must be SipHash13 and key must be 0
 		// Insert files to avoid shrinking below 8
 		for i in 0..5 {
@@ -414,14 +418,16 @@ fn find_colllision() {
 			.unwrap();
 
 		d.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn remove_collision() {
-	run(async {
-		let fs = new().await;
-		let d = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let d = fs.root_dir(&bg).await.unwrap();
 		// NOTE: hash must be SipHash13 and key must be 0
 		// Insert files to avoid shrinking below 8
 		for i in 0..5 {
@@ -453,14 +459,16 @@ fn remove_collision() {
 		d.remove(b"g".into()).await.unwrap().unwrap();
 
 		d.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }
 
 #[test]
 fn real_case_find_000_minified() {
-	run(async {
-		let fs = new().await;
-		let d = fs.root_dir().await.unwrap();
+	let fs = new();
+	let bg = Background::default();
+	run2(&bg, async {
+		let d = fs.root_dir(&bg).await.unwrap();
 		d.create_dir(b"d".into(), &DirOptions::new(&[0; 16]), &Default::default())
 			.await
 			.unwrap()
@@ -489,7 +497,7 @@ fn real_case_find_000_minified() {
 			.drop()
 			.await
 			.unwrap();
-		let e = fs.root_dir().await.unwrap();
+		let e = fs.root_dir(&bg).await.unwrap();
 		assert_eq!(d.len().await.unwrap(), e.len().await.unwrap());
 		e.find(b".rustc_info.json".into())
 			.await
@@ -501,5 +509,6 @@ fn real_case_find_000_minified() {
 
 		e.drop().await.unwrap();
 		d.drop().await.unwrap();
-	})
+	});
+	block_on(bg.drop()).unwrap();
 }

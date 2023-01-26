@@ -2,8 +2,7 @@ pub mod allocator;
 pub mod dev;
 
 use {
-	crate::{BlockSize, Compression, Error, MaxRecordSize, Record},
-	alloc::vec::Vec,
+	crate::{resource::Buf, BlockSize, Compression, Error, MaxRecordSize, Record, Resource},
 	allocator::Allocator,
 	core::cell::{Cell, RefCell},
 	dev::Set256,
@@ -22,11 +21,8 @@ pub use dev::Dev;
 /// It does *not* handle caching.
 /// Records are read and written as a single unit.
 #[derive(Debug)]
-pub struct Store<D>
-where
-	D: Dev,
-{
-	devices: DevSet<D>,
+pub struct Store<D: Dev, R: Resource> {
+	devices: DevSet<D, R>,
 	allocator: RefCell<Allocator>,
 
 	/// Packed bytes read.
@@ -48,11 +44,8 @@ where
 	allow_repair: bool,
 }
 
-impl<D> Store<D>
-where
-	D: Dev,
-{
-	pub async fn new(devices: DevSet<D>, allow_repair: bool) -> Result<Self, Error<D>> {
+impl<D: Dev, R: Resource> Store<D, R> {
+	pub async fn new(devices: DevSet<D, R>, allow_repair: bool) -> Result<Self, Error<D>> {
 		let mut slf = Self {
 			allocator: Default::default(),
 			devices,
@@ -70,9 +63,9 @@ where
 	}
 
 	/// Read a record.
-	pub async fn read(&self, record: &Record) -> Result<Vec<u8>, Error<D>> {
+	pub async fn read(&self, record: &Record) -> Result<R::Buf, Error<D>> {
 		if record.length == 0 {
-			return Ok(Vec::new());
+			return Ok(self.devices.resource.alloc());
 		}
 
 		let lba = u64::from(record.lba);
@@ -91,7 +84,7 @@ where
 		// If one of the chains fail, try another until we run out.
 		// If we run out of chains, return the last error.
 		// If we find a successful chain, copy the record to the other chains and log an error.
-		let mut v = Vec::new();
+		let mut v = self.devices.resource.alloc();
 		let mut blacklist = Set256::default();
 		let mut last_err = None;
 		let data = loop {
@@ -108,7 +101,7 @@ where
 					continue;
 				}
 			};
-			match record.unpack(&data.get()[..len as _], &mut v, self.max_record_size()) {
+			match record.unpack::<R>(&data.get()[..len as _], &mut v, self.max_record_size()) {
 				Ok(()) => break data,
 				Err(e) => {
 					self.record_unpack_failures.update(|x| x + 1);
@@ -131,7 +124,7 @@ where
 	}
 
 	/// Write a record.
-	pub async fn write(&self, data: &[u8]) -> Result<Record, Error<D>> {
+	pub async fn write(&self, data: R::Buf) -> Result<(Record, R::Buf), Error<D>> {
 		// Calculate minimum size of buffer necessary for the compression algorithm
 		// to work.
 		let len = self.compression().max_output_size(data.len());
@@ -143,14 +136,25 @@ where
 			.devices
 			.alloc(max_blks << self.block_size().to_raw())
 			.await?;
-		let mut rec = Record::pack(&data, buf.get_mut(), self.compression(), self.block_size());
+		let compression = self.compression();
+		let block_size = self.block_size();
+		let data_len = data.len();
+
+		if data_len == 0 {
+			// Return empty record.
+			return Ok((Record::default(), data));
+		}
+
+		let (mut rec, mut buf, data) = self
+			.resource()
+			.run(move || {
+				let rec = Record::pack(data.get(), buf.get_mut(), compression, block_size);
+				(rec, buf, data)
+			})
+			.await;
 
 		// Strip unused blocks from the buffer
 		let blks = self.calc_block_count(rec.length.into());
-		if blks == 0 {
-			// Return empty record.
-			return Ok(Record::default());
-		}
 		buf.shrink(blks << self.block_size().to_raw());
 
 		// Allocate storage space.
@@ -169,10 +173,10 @@ where
 		self.packed_bytes_written
 			.update(|x| x + u64::from(u32::from(rec.length)));
 		self.unpacked_bytes_written
-			.update(|x| x + u64::try_from(data.len()).unwrap());
+			.update(|x| x + u64::try_from(data_len).unwrap());
 
 		// Presto!
-		Ok(rec)
+		Ok((rec, data))
 	}
 
 	/// Destroy a record.
@@ -197,7 +201,7 @@ where
 	/// Unmount the object store.
 	///
 	/// The current transaction is finished before returning the [`DevSet`].
-	pub async fn unmount(self) -> Result<DevSet<D>, Error<D>> {
+	pub async fn unmount(self) -> Result<DevSet<D, R>, Error<D>> {
 		self.finish_transaction().await?;
 		Ok(self.devices)
 	}
@@ -253,6 +257,26 @@ where
 			device_read_failures
 			record_unpack_failures
 		}
+	}
+
+	/// Ensure all blocks in a range are allocated.
+	///
+	/// Used to detect use-after-frees.
+	#[cfg(debug_assertions)]
+	pub fn assert_alloc(&self, record: &Record) {
+		if record.length > 0 {
+			let blocks = self
+				.calc_block_count(record.length.into())
+				.try_into()
+				.unwrap();
+			self.allocator
+				.borrow_mut()
+				.assert_alloc(record.lba.into(), blocks)
+		}
+	}
+
+	pub fn resource(&self) -> &R {
+		&self.devices.resource
 	}
 }
 

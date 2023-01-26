@@ -9,7 +9,7 @@ use {
 /// The size of a single hashmap entry.
 const ENTRY_SIZE: u16 = 32;
 
-pub(super) struct HashMap<'a, D: Dev> {
+pub(super) struct HashMap<'a, 'b, D: Dev> {
 	/// The filesystem containing the hashmap's data.
 	fs: &'a Nrfs<D>,
 	/// The ID of the directory.
@@ -20,23 +20,31 @@ pub(super) struct HashMap<'a, D: Dev> {
 	///
 	/// The ID of this tree may be different from `Self::dir_id` if this hashmap is a new map
 	/// created in a resize.
-	pub(super) map: Tree<'a, D>,
+	pub(super) map: Tree<'a, 'b, D, nros::StdResource>,
 	/// Size of this hashmap
 	size: DirSize,
 	/// The [`Hasher`] used to index this hashmap.
 	hasher: Hasher,
 }
 
-impl<'a, D: Dev> HashMap<'a, D> {
+impl<'a, 'b, D: Dev> HashMap<'a, 'b, D> {
 	/// Create a [`HashMap`] helper structure.
-	pub fn new(dir: &Dir<'a, D>, data: &DirData, map: Tree<'a, D>, size: DirSize) -> Self {
+	pub fn new(
+		dir: &Dir<'a, 'b, D>,
+		data: &DirData,
+		map: Tree<'a, 'b, D, nros::StdResource>,
+		size: DirSize,
+	) -> Self {
 		Self { fs: dir.fs, dir_id: dir.id, map, size, hasher: data.hasher }
 	}
 
 	/// Initialize a new hashmap structure.
 	///
 	/// This will create a new object.
-	pub async fn create(dir: &Dir<'a, D>, size: DirSize) -> Result<HashMap<'a, D>, Error<D>> {
+	pub async fn create(
+		dir: &Dir<'a, 'b, D>,
+		size: DirSize,
+	) -> Result<HashMap<'a, 'b, D>, Error<D>> {
 		trace!("hashmap::create {:?}", size);
 		// Get entry size and current alloc log.
 		let data = dir.fs.dir_data(dir.id);
@@ -45,7 +53,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		let log = dir.heap_alloc_log().await?.clone();
 
 		// Create object.
-		let map = dir.fs.storage.create().await?;
+		let map = dir.fs.storage.create(dir.bg).await?;
 		map.resize((1u64 << size) * u64::from(ENTRY_SIZE)).await?;
 
 		// Save allocation log.
@@ -105,7 +113,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		trace!("find_index {:?}", name);
 		let hash = self.hasher.hash(name);
 		let mut index = hash as u32 & self.mask();
-		let dir = Dir::new(self.fs, self.dir_id);
+		let dir = Dir::new(self.map.background_runner(), self.fs, self.dir_id);
 
 		match self.hasher {
 			Hasher::SipHasher13(_) => loop {
@@ -205,13 +213,13 @@ impl<'a, D: Dev> HashMap<'a, D> {
 		entry.index = hash as u32 & self.mask();
 
 		/// Set the key & insert the entry.
-		async fn insert_entry<'a, D: Dev>(
-			slf: &HashMap<'a, D>,
+		async fn insert_entry<'a, 'b, D: Dev>(
+			slf: &HashMap<'a, 'b, D>,
 			name: Option<(&Name, u64)>,
 			mut entry: RawEntry,
 		) -> Result<Key, Error<D>> {
 			trace!("insert::insert_entry {:?} {:?}", name, &entry);
-			let dir = Dir::new(slf.fs, slf.dir_id);
+			let dir = Dir::new(slf.map.background_runner(), slf.fs, slf.dir_id);
 
 			// Store name if necessary.
 			if let Some((name, hash)) = name {
@@ -234,7 +242,7 @@ impl<'a, D: Dev> HashMap<'a, D> {
 				.map(|()| entry.key.expect("expected key on non-empty entry"))
 		}
 
-		let dir = Dir::new(self.fs, self.dir_id);
+		let dir = Dir::new(self.map.background_runner(), self.fs, self.dir_id);
 
 		// Start with default PSL ("poorness")
 		let mut entry_psl = 0u32;

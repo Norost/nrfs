@@ -1,8 +1,7 @@
 mod compression;
 
 use {
-	crate::BlockSize,
-	alloc::vec::Vec,
+	crate::{resource::Buf, BlockSize, Resource},
 	core::fmt,
 	endian::{u16le, u32le, u64le},
 	xxhash_rust::xxh3::xxh3_64,
@@ -46,10 +45,10 @@ impl Record {
 		}
 	}
 
-	pub fn unpack(
+	pub fn unpack<R: Resource>(
 		&self,
 		data: &[u8],
-		buf: &mut Vec<u8>,
+		buf: &mut R::Buf,
 		max_record_size: MaxRecordSize,
 	) -> Result<(), UnpackError> {
 		debug_assert_eq!(data.len() as u32, self.length);
@@ -59,16 +58,17 @@ impl Record {
 		if !data.is_empty() && xxh3_64(data) != self.xxh3 {
 			return Err(UnpackError::Xxh3Mismatch);
 		}
-		buf.clear();
+		buf.resize(0, 0);
 		Compression::from_raw(self.compression)
 			.ok_or(UnpackError::UnknownCompressionAlgorithm)?
-			.decompress(data, buf, 1 << max_record_size.to_raw())
+			.decompress::<R>(data, buf, 1 << max_record_size.to_raw())
 			.then_some(())
 			.ok_or(UnpackError::ExceedsRecordSize)
 	}
 }
 
 impl fmt::Debug for Record {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let mut f = f.debug_struct(stringify!(Record));
 		f.field("lba", &self.lba);

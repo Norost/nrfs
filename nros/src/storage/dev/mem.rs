@@ -1,11 +1,11 @@
 use {
 	super::{Allocator, Buf, Dev},
 	crate::BlockSize,
+	alloc::sync::Arc,
 	core::{
 		cell::{RefCell, RefMut},
 		fmt, future,
 	},
-	std::rc::Rc,
 };
 
 /// A pseudo-device entirely in memory. Useful for testing.
@@ -30,7 +30,7 @@ impl MemDev {
 		}
 	}
 
-	fn get_mut(&self, lba: u64, len: usize) -> Result<RefMut<[u8]>, MemDevError> {
+	fn get_mut(&self, lba: u64, len: usize) -> Result<RefMut<'_, [u8]>, MemDevError> {
 		let lba = usize::try_from(lba).map_err(|_| MemDevError::OutOfRange)?;
 		let s = lba
 			.checked_shl(self.block_size.to_raw().into())
@@ -65,11 +65,11 @@ impl Dev for MemDev {
 	fn read<'a>(&self, lba: u64, len: usize) -> Self::ReadTask<'_> {
 		future::ready(
 			self.get_mut(lba, len)
-				.map(|b| MemBuf(b.iter().copied().collect())),
+				.map(|b| MemBuf(Arc::new(b.iter().copied().collect()))),
 		)
 	}
 
-	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf<'_>) -> Self::WriteTask<'_> {
+	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf) -> Self::WriteTask<'_> {
 		let res = self
 			.get_mut(lba, buf.0.len())
 			.map(|mut b| b.copy_from_slice(buf.get()));
@@ -86,6 +86,7 @@ impl Dev for MemDev {
 }
 
 impl fmt::Debug for MemDev {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(MemDev))
 			.field("buf", &format_args!("[...]"))
@@ -100,12 +101,10 @@ pub struct MemAllocator;
 
 impl Allocator for MemAllocator {
 	type Error = MemDevError;
-	type AllocTask<'a> = future::Ready<Result<Self::Buf<'a>, Self::Error>>
+	type AllocTask<'a> = future::Ready<Result<Self::Buf, Self::Error>>
 	where
 		Self: 'a;
-	type Buf<'a> = MemBuf
-	where
-		Self: 'a;
+	type Buf = MemBuf;
 
 	fn alloc(&self, size: usize) -> Self::AllocTask<'_> {
 		future::ready(Ok(MemBuf(vec![0; size].into())))
@@ -113,7 +112,7 @@ impl Allocator for MemAllocator {
 }
 
 #[derive(Clone)]
-pub struct MemBuf(Rc<[u8]>);
+pub struct MemBuf(Arc<Vec<u8>>);
 
 impl Buf for MemBuf {
 	type Error = MemDevError;
@@ -123,11 +122,13 @@ impl Buf for MemBuf {
 	}
 
 	fn get_mut(&mut self) -> &mut [u8] {
-		Rc::get_mut(&mut self.0).expect("buffer was cloned")
+		Arc::get_mut(&mut self.0).expect("buffer was cloned")
 	}
 
 	fn shrink(&mut self, len: usize) {
 		assert!(len <= self.0.len(), "new len is larger than old len");
-		self.0 = self.0.iter().copied().take(len).collect()
+		Arc::get_mut(&mut self.0)
+			.expect("buffer was cloned")
+			.resize(len, 0);
 	}
 }
