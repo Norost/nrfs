@@ -24,6 +24,8 @@ enum RawItemRef {
 	},
 }
 
+type Refs<'a> = arena::Arena<(RawItemRef, Box<[&'a Name]>), ()>;
+
 #[derive(Debug)]
 pub struct Test<'a> {
 	/// Filesystem to operate on.
@@ -78,6 +80,21 @@ impl<'a> State<'a> {
 		match self {
 			Self::File { ext_mtime, .. } | Self::Dir { ext_mtime, .. } => ext_mtime,
 		}
+	}
+
+	/// Change the path of this node and descendants, if any.
+	fn transfer(&mut self, refs: &mut Refs<'a>, path: &[&'a Name]) {
+		fn rec<'a>(state: &mut State<'a>, refs: &mut Refs<'a>, path: &[&'a Name], depth: usize) {
+			for idx in state.indices_mut() {
+				let l = &refs[*idx].1;
+				refs[*idx].1 = path.iter().chain(&l[l.len() - depth..]).copied().collect();
+			}
+			let State::Dir { children, .. } = state else { return };
+			for (_, child) in children {
+				rec(child, refs, path, depth + 1);
+			}
+		}
+		rec(self, refs, path, 0)
 	}
 }
 
@@ -159,7 +176,7 @@ impl<'a> Test<'a> {
 			fn get<'a, 'b, 'c, 'd, 'e>(
 				bg: &'e Background<'b, MemDev>,
 				fs: &'b Nrfs<MemDev>,
-				refs: &'c arena::Arena<(RawItemRef, Box<[&'a Name]>), ()>,
+				refs: &'c Refs<'a>,
 				state: &'d mut State<'a>,
 				file_idx: u16,
 			) -> Option<(
@@ -183,7 +200,7 @@ impl<'a> Test<'a> {
 			fn get_dir<'a, 'b, 'c, 'd, 'e>(
 				bg: &'e Background<'b, MemDev>,
 				fs: &'b Nrfs<MemDev>,
-				refs: &'c arena::Arena<(RawItemRef, Box<[&'a Name]>), ()>,
+				refs: &'c Refs<'a>,
 				state: &'d mut State<'a>,
 				dir_idx: u16,
 			) -> Option<(
@@ -204,7 +221,7 @@ impl<'a> Test<'a> {
 			fn get_file<'a, 'b, 'c, 'd, 'e>(
 				bg: &'e Background<'b, MemDev>,
 				fs: &'b Nrfs<MemDev>,
-				refs: &'c arena::Arena<(RawItemRef, Box<[&'a Name]>), ()>,
+				refs: &'c Refs<'a>,
 				state: &'d mut State<'a>,
 				file_idx: u16,
 			) -> Option<(
@@ -408,7 +425,7 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::Rename { dir_idx, from, to } => {
-						let Some((dir, _, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
+						let Some((dir, dir_path, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
 						let Some(d) = d else {
 							// Entry was already removed.
 							continue
@@ -417,13 +434,9 @@ impl<'a> Test<'a> {
 							Ok(()) => {
 								// Rename succeeded
 								let mut e = d.remove(from).unwrap();
-
-								for &idx in e.indices_mut().iter() {
-									let l = &refs[idx].1;
-									refs[idx].1 =
-										l[..l.len() - 1].iter().copied().chain([to]).collect();
-								}
-
+								let path =
+									dir_path.iter().chain(&[to]).copied().collect::<Vec<_>>();
+								e.transfer(&mut refs, &path);
 								assert!(d.insert(to, e).is_none());
 							}
 							Err(RenameError::NotFound) => {
@@ -446,18 +459,13 @@ impl<'a> Test<'a> {
 						match from_dir.transfer(from, &to_dir, to).await.unwrap() {
 							Ok(()) => {
 								// Transfer succeeded
-
 								let mut e = d.remove(from).unwrap();
 								let d = state_mut(&mut state, to_path.iter().copied()).unwrap();
 
-								let to_path =
-									to_path.iter().copied().chain([to]).collect::<Box<_>>();
-								for &idx in e.indices_mut().iter() {
-									refs[idx].1 = to_path.clone();
-								}
+								let path = to_path.iter().chain(&[to]).copied().collect::<Vec<_>>();
+								e.transfer(&mut refs, &path);
 
-								let r = d.dir_mut().insert(to, e);
-								assert!(r.is_none());
+								assert!(d.dir_mut().insert(to, e).is_none());
 							}
 							Err(TransferError::NotFound) => {
 								assert!(!d.contains_key(from));
@@ -1157,6 +1165,33 @@ fn unzeroed_deallocation_long_name() {
 			Resize { file_idx: 1, len: 0 },
 			Resize { file_idx: 1, len: 255 },
 			Read { file_idx: 1, offset: 18409113286005899008, amount: 255 },
+		],
+	)
+	.run()
+}
+
+/// The fuzzer didn't edit the paths of descendants when renaming a directory.
+#[test]
+fn fuzz_rename_dir_edit_descendant_paths() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateDir {
+				dir_idx: 0,
+				name: b"\0".into(),
+				options: DirOptions::new(&[0; 16]),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Get { dir_idx: 0, name: b"\0".into() },
+			CreateFile {
+				dir_idx: 1,
+				name: b"\0".into(),
+				ext: Extensions { unix: None, mtime: None },
+			},
+			Get { dir_idx: 1, name: b"\0".into() },
+			Rename { dir_idx: 0, from: b"\0".into(), to: b"\xFF".into() },
+			GetExt { idx: 2 },
 		],
 	)
 	.run()
