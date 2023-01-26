@@ -20,6 +20,7 @@ pub(in super::super) struct TreeData<R: Resource> {
 }
 
 impl<R: Resource> fmt::Debug for TreeData<R> {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(TreeData))
 			.field("root", &self.root)
@@ -48,6 +49,7 @@ impl<R: Resource> Default for Level<R> {
 }
 
 impl<R: Resource> fmt::Debug for Level<R> {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		struct FmtSlot<'a, R: Resource>(&'a Slot<R::Buf>);
 

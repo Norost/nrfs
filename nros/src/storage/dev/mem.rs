@@ -86,6 +86,7 @@ impl Dev for MemDev {
 }
 
 impl fmt::Debug for MemDev {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(MemDev))
 			.field("buf", &format_args!("[...]"))

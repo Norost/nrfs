@@ -55,6 +55,7 @@ impl Key {
 }
 
 impl fmt::Debug for Key {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Key))
 			.field("flags", &self.flags())

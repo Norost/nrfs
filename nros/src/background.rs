@@ -134,6 +134,7 @@ impl<T> Default for Background<'_, T> {
 }
 
 impl<T> fmt::Debug for Background<'_, T> {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let bg = self.inner.borrow_mut();
 		f.debug_struct(stringify!(Background))

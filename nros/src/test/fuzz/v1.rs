@@ -52,6 +52,7 @@ pub enum Op {
 }
 
 impl fmt::Debug for Op {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		macro_rules! hex {
 			($([$name:ident $($field:ident)*])*) => {

@@ -1,6 +1,8 @@
 //#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
 #![deny(rust_2018_idioms)]
+#![feature(stmt_expr_attributes)]
+#![feature(no_coverage)]
 #![feature(map_many_mut)]
 #![feature(is_some_and)]
 #![feature(async_closure)]
@@ -78,19 +80,22 @@ macro_rules! n2e {
 /// Tracing in debug mode only.
 macro_rules! trace {
 	(info $($arg:tt)*) => {
-		if cfg!(feature = "trace") {
+		let f = #[no_coverage]|| if cfg!(feature = "trace") {
 			$crate::trace::print_debug("--> ", &format_args!($($arg)*));
-		}
+		};
+		f();
 	};
 	(final $($arg:tt)*) => {
-		if cfg!(feature = "trace") {
+		let f = #[no_coverage]|| if cfg!(feature = "trace") {
 			$crate::trace::print_debug("==> ", &format_args!($($arg)*));
-		}
+		};
+		f();
 	};
 	($($arg:tt)*) => {
-		if cfg!(feature = "trace") {
+		let f = #[no_coverage]|| if cfg!(feature = "trace") {
 			$crate::trace::print_debug("", &format_args!($($arg)*));
-		}
+		};
+		f();
 		let _t = $crate::trace::Trace::new();
 	};
 }
@@ -103,10 +108,12 @@ mod trace {
 
 	impl Trace {
 		#[inline(always)]
+		#[no_coverage]
 		pub fn new() {}
 	}
 
 	#[inline(always)]
+	#[no_coverage]
 	pub fn print_debug(_prefix: &str, _args: &Arguments<'_>) {}
 }
 
@@ -129,6 +136,7 @@ mod trace {
 		TRACKER.with(|t| f(&mut t.borrow_mut()))
 	}
 
+	#[no_coverage]
 	pub fn print_debug(prefix: &str, args: &Arguments<'_>) {
 		with(|t| {
 			let id = *t.task_stack.last().unwrap_or(&0);
@@ -147,6 +155,7 @@ mod trace {
 	pub struct Trace(u64);
 
 	impl Trace {
+		#[no_coverage]
 		pub fn new() -> Self {
 			with(|t| {
 				let id = *t.task_stack.last().unwrap_or(&0);
@@ -157,6 +166,7 @@ mod trace {
 	}
 
 	impl Drop for Trace {
+		#[no_coverage]
 		fn drop(&mut self) {
 			with(|t| {
 				let depth = t.task_depth.get_mut(&self.0).unwrap();
@@ -168,6 +178,7 @@ mod trace {
 		}
 	}
 
+	#[no_coverage]
 	pub fn gen_taskid() -> u64 {
 		with(|t| {
 			t.id_counter += 1;
@@ -178,6 +189,7 @@ mod trace {
 	pub struct TraceTask;
 
 	impl TraceTask {
+		#[no_coverage]
 		pub fn new(id: u64) -> Self {
 			with(|t| t.task_stack.push(id));
 			Self
@@ -185,6 +197,7 @@ mod trace {
 	}
 
 	impl Drop for TraceTask {
+		#[no_coverage]
 		fn drop(&mut self) {
 			with(|t| t.task_stack.pop());
 		}
@@ -354,6 +367,7 @@ impl<D: Dev> fmt::Debug for NewError<D>
 where
 	D::Error: fmt::Debug,
 {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::BlockTooSmall => f.debug_tuple("BlockTooSmall").finish(),
@@ -366,6 +380,7 @@ impl<D: Dev> fmt::Debug for Error<D>
 where
 	D::Error: fmt::Debug,
 {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::Dev(e) => f.debug_tuple("Dev").field(&e).finish(),

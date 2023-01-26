@@ -68,6 +68,7 @@ impl Record {
 }
 
 impl fmt::Debug for Record {
+	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let mut f = f.debug_struct(stringify!(Record));
 		f.field("lba", &self.lba);
