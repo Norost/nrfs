@@ -28,7 +28,7 @@ fn run2<'a, 'b, F>(bg: &'b Background<'a, MemDev>, f: F)
 where
 	F: Future<Output = ()>,
 {
-	block_on(bg.run(async { Ok(f.await) })).unwrap()
+	block_on(bg.run(async { Ok::<_, Error<_>>(f.await) })).unwrap()
 }
 
 fn new() -> Nrfs<MemDev> {
