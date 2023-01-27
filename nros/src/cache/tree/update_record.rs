@@ -31,7 +31,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 		// The object is guaranteed to exist.
 		// At least, if called by a task that holds an entry, which should be guaranteed.
-		let cur_root = cache.get_object(id).expect("no object").root();
+		let cur_root = cache.get_object(id).expect("no object").0.data.root();
 		let len = u64::from(cur_root.total_length);
 		let cur_depth = super::depth(cache.max_record_size(), len);
 		let parent_depth = record_depth + 1;
@@ -44,10 +44,10 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		let replace_root = |id| {
 			debug_assert_eq!(offset, 0, "root can only be at offset 0");
 
-			let mut obj = cache.get_object(id).expect("no object");
+			let (mut obj, _) = cache.get_object(id).expect("no object");
 			#[cfg(debug_assertions)]
-			obj.check_integrity();
-			let root = obj.root();
+			obj.data.check_integrity();
+			let root = obj.data.root();
 
 			// Ensure the record is actually supposed to be stored at the root.
 			let root_depth = super::depth(cache.max_record_size(), root.total_length.into());
@@ -73,7 +73,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// Store new root
 			// The object is guaranteed to be in the cache as update_record is only called
 			// during flush or evict.
-			obj.set_root(&new_root);
+			obj.data.set_root(&new_root);
 
 			true
 		};

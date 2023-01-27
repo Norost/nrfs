@@ -58,4 +58,18 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		})
 		.await
 	}
+
+	/// Try to get an object directly.
+	pub(super) fn get_object(
+		&self,
+		id: u64,
+	) -> Option<(RefMut<'_, Present<TreeData<R>>>, RefMut<'_, Lru>)> {
+		let data = self.data.borrow_mut();
+		let (objects, lru) = RefMut::map_split(data, |d| (&mut d.objects, &mut d.lru));
+		let object = RefMut::filter_map(objects, |o| match o.get_mut(&id) {
+			Some(Slot::Present(slot)) => Some(slot),
+			_ => None,
+		});
+		Some((object.ok()?, lru))
+	}
 }

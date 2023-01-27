@@ -10,7 +10,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	pub(super) async fn fetch(
 		&self,
 		record: &Record,
-		busy: &Rc<RefCell<Busy>>,
+		busy: Rc<RefCell<Busy>>,
 	) -> Result<EntryRef<'a, D, R>, Error<D>> {
 		trace!(
 			"fetch {:?} <- ({}, {})",
@@ -26,9 +26,9 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		let mut comp = self.cache.get_entryref_components(key).expect("no entry");
 
 		let entry = RefMut::map(comp.slot, |slot| {
-			let Slot::Busy(busy) = slot else { unreachable!("not busy") };
+			debug_assert!(matches!(slot, Slot::Busy(_)), "not busy");
 			busy.borrow_mut().wakers.drain(..).for_each(|w| w.wake());
-			let refcount = comp.lru.entry_add(key, busy.clone(), entry.len());
+			let refcount = comp.lru.entry_add(key, busy, entry.len());
 
 			*slot = Slot::Present(Present { data: entry, refcount });
 			let Slot::Present(e) = slot else { unreachable!() };

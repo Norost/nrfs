@@ -96,13 +96,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let mut used_objects_ids = RangeSet::new();
 		let len = u64::from(store.object_list().total_length);
 		if len > 0 {
-			let rec_size = u64::try_from(mem::size_of::<Record>()).unwrap();
 			assert_eq!(
-				len % rec_size,
+				len % (1 << RECORD_SIZE_P2),
 				0,
 				"todo: total length not a multiple of record size"
 			);
-			used_objects_ids.insert(0..len / rec_size);
+			used_objects_ids.insert(0..len >> RECORD_SIZE_P2);
 		}
 
 		Self {
@@ -294,15 +293,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		self.store.max_record_size()
 	}
 
-	/// Try to get an object directly.
-	fn get_object(&self, id: u64) -> Option<RefMut<'_, TreeData<R>>> {
-		RefMut::filter_map(self.data.borrow_mut(), |d| match d.objects.get_mut(&id) {
-			Some(Slot::Present(slot)) => Some(&mut slot.data),
-			_ => None,
-		})
-		.ok()
-	}
-
 	/// Fetch an object.
 	///
 	/// Specifically, fetch its root.
@@ -450,15 +440,19 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					else { unreachable!("no object") };
 
 				let offset = key.id() << RECORD_SIZE_P2;
+				debug_assert_eq!(offset >> RECORD_SIZE_P2, key.id());
 
 				Some(async move {
 					trace!("evict_entry::object {:#x}", key.id());
 
 					let bg = Background::default(); // TODO get rid of this sillyness
 					bg.run(async {
-						Tree::new(self, &bg, OBJECT_LIST_ID)
+						let l = Tree::new(self, &bg, OBJECT_LIST_ID)
 							.write(offset, root.as_ref())
 							.await?;
+						if root.references > 0 || root.length > 0 {
+							debug_assert_eq!(l, mem::size_of::<Record>(), "root not fully written");
+						}
 
 						let mut busy_ref = busy.borrow_mut();
 						debug_assert_eq!(
@@ -494,7 +488,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			} else {
 				// Just remove
 				trace!(info "not dirty");
-				data.objects.remove(&key.id());
+				let prev = data.objects.remove(&key.id());
+				debug_assert!(prev.is_some(), "no object");
 				None
 			};
 

@@ -1352,3 +1352,116 @@ fn create_many_busy_object() {
 	)
 	.run()
 }
+
+/// The issue that affected [`Tree::update_record`] and is tested for
+/// in [`grow_shrink_grow_chain_update_record_retry`] also affects [`Tree::get`].
+#[test]
+fn grow_shrink_grow_chain_get_retry() {
+	Test::new(
+		1 << 16,
+		255,
+		[
+			Create { size: 0xdead },
+			Create { size: 1 },
+			Create { size: 2 },
+			Create { size: 3 },
+			Create { size: 4 },
+			Create { size: 5 },
+			Create { size: 6 },
+			Create { size: 7 },
+			Create { size: 8 },
+			Create { size: 9 },
+			Move { from_idx: 7, to_idx: 1 },
+			Create { size: 0x8000 },
+			Create { size: 11 },
+			Create { size: 12 },
+			Create { size: 13 },
+			Create { size: 14 },
+			Create { size: 15 },
+			Create { size: 16 },
+			Create { size: 17 },
+			Create { size: 18 },
+			Create { size: 19 },
+			Create { size: 20 },
+			Create { size: 21 },
+			Create { size: 22 },
+			Remount { cache_size: [0x4, 0x0, 0x0] },
+			Create { size: 23 },
+			Create { size: 24 },
+			Create { size: 25 },
+			Create { size: 26 },
+			Create { size: 27 },
+			Create { size: 28 },
+			Create { size: 29 },
+			Create { size: 30 },
+			Create { size: 31 },
+			Create { size: 32 },
+			Destroy { idx: 0xd },
+			Create { size: 33 },
+			Create { size: 34 },
+			Destroy { idx: 0xff },
+			Create { size: 35 },
+			Destroy { idx: 0xff },
+			Destroy { idx: 0xff },
+			Write { idx: 0x47, offset: 0, amount: 0xd0d },
+			Create { size: 0 },
+			Destroy { idx: 0xff },
+			Destroy { idx: 0xd },
+			Create { size: 0 },
+			Create { size: 0 },
+			Destroy { idx: 0 },
+		],
+	)
+	.run()
+}
+
+/// [`Tree::get`] was rewritten from scratch, which reintroduced old bugs but in different ways.
+#[test]
+fn get_rewrite_0() {
+	Test::new(
+		1 << 16,
+		4,
+		[
+			Create { size: 0x293c000000003c00 },
+			Write { idx: 0, offset: 0x79c2b1d0023bd25, amount: 0xffff },
+			Resize { idx: 0, size: 0x1450000fef95520 },
+			Resize { idx: 0, size: 0xff2904293c2c00c5 },
+			Resize { idx: 0, size: 0x4293c2cc5c50429 },
+		],
+	)
+	.run()
+}
+
+/// [`Tree::get`] was rewritten from scratch, which reintroduced old bugs but in different ways.
+#[test]
+fn get_rewrite_1() {
+	Test::new(
+		1 << 16,
+		44,
+		[
+			Create { size: 0xc250060001003c00 },
+			Write { idx: 0x2b, offset: 0x7b2b2b2b2b, amount: 0x25ff },
+			Write { idx: 0x25, offset: 0xff0000002b252525, amount: 0x25f9 },
+			Resize { idx: 0x6, size: 0x1250000fef95520 },
+			Resize { idx: 0x2c, size: 0xa4ef01000004293c },
+			Resize { idx: 0xc5, size: 0xd525a2a2a2c5a2 },
+		],
+	)
+	.run()
+}
+
+/// [`Tree::get`] was rewritten from scratch, which reintroduced old bugs but in different ways.
+#[test]
+fn get_rewrite_2() {
+	Test::new(
+		1 << 16,
+		0,
+		[
+			Create { size: 0x10000000000000 },
+			Resize { idx: 0, size: 0x10000000000000 - 1 },
+			Resize { idx: 0, size: 0x1000000000000000 },
+			Resize { idx: 0, size: 1 },
+		],
+	)
+	.run()
+}

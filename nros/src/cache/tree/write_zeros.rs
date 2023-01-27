@@ -202,7 +202,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					e
 				} else {
 					let busy = self.mark_busy(k.depth(), k.offset());
-					self.fetch(&record, &busy).await?
+					self.fetch(&record, busy).await?
 				};
 			}
 			debug_assert!(offset <= end_root, "offset out of range");

@@ -54,8 +54,9 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 
 		// Update dirty counters if not already dirty.
 		drop((lru, entry, dirty_markers));
-		let mut obj = self.cache.get_object(key.id()).expect("no object");
-		obj.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
+		let (mut obj, _) = self.cache.get_object(key.id()).expect("no object");
+		obj.data
+			.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
 		drop(obj);
 
 		// Flush

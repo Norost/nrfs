@@ -149,6 +149,12 @@ struct Guard;
 #[cfg(debug_assertions)]
 impl Drop for Guard {
 	fn drop(&mut self) {
-		eprintln!("use Background::drop");
+		if cfg!(test) {
+			if !std::thread::panicking() {
+				panic!("use Background::drop");
+			}
+		} else {
+			eprintln!("use Background::drop");
+		}
 	}
 }

@@ -1,151 +1,157 @@
 use {
-	super::{EntryRef, Key, Tree, RECORD_SIZE_P2},
+	super::{Busy, EntryRef, Key, Slot, Tree},
 	crate::{resource::Buf, util, Dev, Error, Resource},
+	alloc::rc::Rc,
+	core::cell::RefCell,
 };
 
 impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// Get a cache entry of a tree node.
 	///
-	/// It may fetch up to [`MAX_DEPTH`] of parent entries.
+	/// It may fetch up to [`MAX_DEPTH`] of parent busy_entries.
 	///
 	/// Note that `offset` must already include appropriate shifting.
 	///
 	/// # Note
 	///
-	/// This accounts for entries being moved to pseudo-objects while fetching.
+	/// This accounts for busy_entries being moved to pseudo-objects while fetching.
 	///
 	/// The proper ID can be found in the returned entry's `key` field.
 	pub(super) async fn get(&self, depth: u8, offset: u64) -> Result<EntryRef<'a, D, R>, Error<D>> {
-		trace!("get {:?}", Key::new(0, self.id, depth, offset));
+		let key = Key::new(0, self.id, depth, offset);
+
+		trace!("get {:?}", key);
+
+		// This function is tricky since it has to account for any amount of grows and shrinks
+		// while it is fetching an entry.
+		//
+		// To deal with it, it checks for chain breaks,
+		// e.g. if an object (1) got moved to (2), shrunk (3), then grown the state of
+		// the task may be
+		//
+		//      |1|         |2|         |3|         |3| (|2|)      d2
+		//      /           /           /           /
+		//    |1|   ==>   |2|   ==>   |2|   ==>   |2|              d1
+		//    /           /           /           /
+		//  |1|         |2|         |2|         |2|                d0
+		//
+		// Note that in the last step the chain is still working from |3|d2, so it needs to go
+		// up to fetch |2|d2 which is the real parent of the target entry.
 
 		// Steps:
-		//
-		// 2. Find the record or the first ancestor that is present.
-		//    If found, extract the proper record from it.
-		//    If none are present, take the root record.
-		// 1. Check if the entry is present.
-		//    If so, just return it.
-		// 3. Fetch the data associated with the taken record.
-		//    Do this "recursively" until the target is reached.
+		// 1. Try to get the target entry directly.
+		// 2. On failure, insert a busy slot.
+		// 3. Find record of current entry to fetch.
+		// 3a. Take root of object if at top.
+		// 3b. Find first parent already in cache.
+		// 3bI. If key.id() of the child & parent differ (chain break),
+		//      get root of object of child,
+		//      repeat from 3.
+		// 3c. Insert a busy slot on failure, repeat from 3.
+		// 4. Go down to target entry.
+		// 4a. If target entry, return.
+		// 4b. If key.id() of the child & parent differ (chain break),
+		//     get root of object of child,
+		//     repeat from 3.
+		// 4c. Get record of child to fetch next.
 
-		let rec_size = self.max_record_size().to_raw();
-
-		let target_depth = depth;
-
-		let mut cur_depth = target_depth;
-		let depth_offset_shift = |d| (rec_size - RECORD_SIZE_P2) * (d - target_depth);
-
-		let len = self.len().await?;
-
-		// Find the first parent or leaf entry that is present starting from a leaf
-		// and work back downwards.
-
-		let obj_depth = super::depth(self.max_record_size(), len);
-
-		debug_assert!(
-			target_depth < obj_depth,
-			"target depth exceeds object depth"
-		);
-
-		let mut busy_entries = vec![];
-
-		// Go up and check if a parent entry is either present or being fetched.
-		let entry = 's: {
-			while cur_depth < obj_depth {
-				// Check if the entry is already present or being fetched.
-				let k = Key::new(
-					0,
-					self.id,
-					cur_depth,
-					offset >> depth_offset_shift(cur_depth),
-				);
-				if let Some(entry) = self.cache.wait_entry(k).await {
-					break 's Some(entry);
-				}
-
-				// Insert busy task to prevent races.
-				let busy = self.mark_busy(k.depth(), k.offset());
-				busy_entries.push(busy);
-
-				// Try the next level
-				cur_depth += 1;
-			}
-			None
-		};
-
-		// Get first record to fetch.
-		let mut record;
-		// Check if we found any cached record at all.
-		if let Some(entry) = entry {
-			if cur_depth == target_depth {
-				debug_assert!(busy_entries.is_empty());
-				// The entry we need is already present
-				return Ok(entry);
-			}
-
-			// Start from a parent record.
-			debug_assert!(cur_depth < obj_depth, "parent should be below root");
-			let offt = offset >> depth_offset_shift(cur_depth - 1);
-			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
-				.try_into()
-				.unwrap();
-			record = util::get_record(entry.get(), index).unwrap_or_default();
-		} else {
-			// Start from the root.
-			debug_assert_eq!(cur_depth, obj_depth, "root should be at obj_depth");
-			// We will fetch it below at the "hop", so just set to default value.
-			record = Default::default();
+		// 1. Try to get the target entry directly.
+		if let Some(entry) = self.cache.wait_entry(key).await {
+			return Ok(entry);
 		}
 
-		// Fetch records until we can lock the one we need.
-		debug_assert!(cur_depth >= target_depth);
-		let entry = loop {
-			trace!("get::read ({}, {})", record.lba, record.length);
+		// 2. On failure, insert a busy slot.
+		let (mut obj, mut lru) = self.cache.fetch_object(self.background, self.id).await?;
+		let busy = Busy::new(key);
+		obj.add_entry(&mut lru, depth, offset, Slot::Busy(busy.clone()));
 
-			// Get the key, which may also point to a new ID in case of shrink
-			let k = busy_entries.last().unwrap().borrow_mut().key;
+		let mut busy_entries = vec![busy];
+		let mut cur_depth = depth;
+		let mut root = obj.data.root();
+		let mut id = key.id();
 
-			// Check if we need to "hop" to a new object.
-			//
-			// e.g. after shrink the chain may look like this:
-			//
-			//     |1|            |2|
-			//     /              /
-			//   |1|      =>    |1|
-			//   /              /
-			// |1|            |1|
-			//
-			// Between |2| and |1| a hop is necessary,
-			// i.e. we need to get the new/real root of |1|.
-			let obj = self.cache.get_object(k.id()).unwrap();
-			#[cfg(debug_assertions)]
-			obj.check_integrity();
-			if super::depth(self.max_record_size(), obj.root().total_length.into()) == k.depth() + 1
-			{
-				record = obj.root();
-			}
-			drop(obj);
-
-			// Read record
-			let busy = busy_entries
-				.last()
-				.expect("out of busy slots before target depth");
-			let entry = self.fetch(&record, busy).await?;
-			busy_entries.pop();
-
-			// Check if we got the record we need.
-			if busy_entries.is_empty() {
-				break entry;
-			}
-
-			// Fetch the next record.
-			let offt = offset >> depth_offset_shift(k.depth() - 1);
-			let index = (offt % (1 << rec_size - RECORD_SIZE_P2))
-				.try_into()
-				.unwrap();
-			record = util::get_record(entry.get(), index).unwrap_or_default();
+		// Helper functions.
+		let shift = |d| (d - depth) * self.cache.entries_per_parent_p2();
+		let get_record = |entry: &[u8], cur_depth| {
+			let offt = offset >> shift(cur_depth);
+			let index = offt as usize % (1 << self.cache.entries_per_parent_p2());
+			util::get_record(entry, index).unwrap_or_default()
+		};
+		let check_chain_break = |busy_entries: &[Rc<RefCell<Busy>>], entry: EntryRef<'_, _, _>| {
+			let child_busy = busy_entries.last().unwrap();
+			let id = child_busy.borrow_mut().key.id();
+			// If the ID of the (supposed) parent and child differ,
+			// try fetching the child again.
+			// The root may have changed, so fetch it again too.
+			(entry.key.id() != id).then(|| {
+				trace!(info "chain break {:#x} >>> {:#x}", entry.key.id(), id);
+				drop(entry);
+				let (obj, _) = self.cache.get_object(id).expect("no object");
+				(id, obj.data.root())
+			})
 		};
 
-		Ok(entry)
+		drop((obj, lru));
+
+		loop {
+			// 3. Find record of current entry to fetch.
+			let mut record = loop {
+				let obj_depth = super::depth(self.max_record_size(), root.total_length.into());
+				// 3a. Take root of object if at top.
+				debug_assert!(cur_depth < obj_depth);
+				if obj_depth == cur_depth + 1 {
+					trace!(info "fetch root");
+					break root;
+				}
+
+				// 3b. Find first parent already in cache.
+				let k = Key::new(0, id, cur_depth + 1, offset >> shift(cur_depth + 1));
+				if let Some(entry) = self.cache.wait_entry(k).await {
+					trace!(info "fetch from parent {:?}", k);
+					let record = get_record(entry.get(), cur_depth);
+					// 3bI. If key.id() of the child & parent differ (chain break),
+					//      get root of object of child,
+					//      repeat from 3.
+					if let Some(new_param) = check_chain_break(&busy_entries, entry) {
+						(id, root) = new_param;
+						continue;
+					}
+					break record;
+				}
+
+				// 3c. Insert a busy slot on failure.
+				let (mut obj, mut lru) = self.cache.get_object(k.id()).expect("no object");
+				let busy = Busy::new(k);
+				obj.add_entry(&mut lru, k.depth(), k.offset(), Slot::Busy(busy.clone()));
+				busy_entries.push(busy);
+
+				cur_depth += 1;
+			};
+
+			// 4. Go down to target entry.
+			loop {
+				let busy = busy_entries.pop().expect("no busy entries");
+				let entry = self.fetch(&record, busy).await?;
+
+				// 4a. If target entry, return.
+				if busy_entries.is_empty() {
+					return Ok(entry);
+				}
+
+				// 4c. Get record of child to fetch next. (1)
+				record = get_record(entry.get(), cur_depth - 1);
+
+				// 4b. If key.id() of the child & parent differ,
+				//     get root of object of child,
+				//     repeat from 3.
+				if let Some(new_param) = check_chain_break(&busy_entries, entry) {
+					(id, root) = new_param;
+					break;
+				}
+
+				// 4c. Get record of child to fetch next. (2)
+				cur_depth -= 1;
+			}
+		}
 	}
 }
