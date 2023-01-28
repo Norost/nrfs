@@ -4,9 +4,17 @@ Object store
 Features
 --------
 
+* Maximum volume size of `2^64 - 1` blocks
+
+  * With a maximum block size of `2^24`, maximum volume size is `2^88 - 2^24`
+    bytes
+
+* Maximum object size of `2^64 - 1` bytes
+* Maximum object count of `2^58`
 * Error detection
 * Error correction (with mirrors only!)
 * Compression
+* Encryption
 * Transactional updates
 * Pooling with mirroring & chaining (RAID 1+0)
 * Defragmentation
@@ -27,14 +35,14 @@ Allocation
 ----------
 
 The allocation log keeps track of free space on the disk.
-Each entry indicates an allocation or deallocation. [#alloc_log]_
+Each entry indicates an allocation or deallocation. [#]_
 
 When allocating or freeing space a new entry is appended.
 The log is occasionaly rewritten to reduce space usage.
 
 When loading the object store this log is replayed to initialize the allocator.
 
-.. [#alloc_log] An allocation log is compact and gives great freedom in the
+.. [#] An allocation log is compact and gives great freedom in the
    type of allocator to be used.
    It can also be used as "append-only" to improve the performance of frequent
    allocations.
@@ -50,7 +58,7 @@ If data does not fit in a single record a record tree is made.
 In a record tree, all but the last record have the maximum size.
 
 To help protect against corruption that may occur during transmission, bad
-firmware or any other source a XXH3 hash is added to all records.
+firmware or any other source a hash is added to all records.
 
 Mirroring
 ~~~~~~~~~
@@ -82,74 +90,184 @@ A header is placed at the start and end of a volume.
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                                                       |
-  +------+            Magic string ("Nora Reliable FS")          |
-  |    8 |                                                       |
-  +------+------+------+------+------+------+------+-------------+
-  |   16 | MirI | MirC | RLen | BLen | CAlg | Ver  |             |
-  +------+------+------+------+------+------+------+-------------+
-  |   24 |                                                       |
+  |    0 |                Magic string ("NRFSNRFS")              |
+  +------+-----------------------------------------+------+------+
+  |    8 |                                         | KDrv | H+E  |
+  +------+-----------------------------------------+------+------+
+  |   16 |                                                       |
   +------+                          UID                          |
-  |   32 |                                                       |
+  |   24 |                                                       |
   +------+-------------------------------------------------------+
-  |   32 |                   Total block count                   |
+  |   32 |                         Nonce                         |
   +------+-------------------------------------------------------+
-  |   40 |                      LBA offset                       |
+  |   40 |                                                       |
   +------+-------------------------------------------------------+
-  |   48 |                      Block count                      |
+  |   48 |                                                       |
+  +------+                         Hash                          |
+  |   56 |                                                       |
   +------+-------------------------------------------------------+
-  |   64 |                                                       |
-  +------+                                                       |
-  |   72 |                                                       |
-  +------+                      Object list                      |
-  |   80 |                                                       |
-  +------+                                                       |
-  |   88 |                                                       |
+  |   64 |                     Configuration                     |
+  +------+-------------------------------------------------------+
+  |   72 |                   Total block count                   |
+  +------+-------------------------------------------------------+
+  |   80 |                      LBA offset                       |
+  +------+-------------------------------------------------------+
+  |   88 |                      Block count                      |
   +------+-------------------------------------------------------+
   |   96 |                                                       |
-  +------+                                                       |
+  +------+                          Key                          |
   |  104 |                                                       |
-  +------+                     Allocation log                    |
+  +------+-------------------------------------------------------+
   |  112 |                                                       |
   +------+                                                       |
   |  120 |                                                       |
   +------+-------------------------------------------------------+
-  |  128 |                         XXH3                          |
-  +------+-------------------------------------------------------+
+  |  128 |                                                       |
+  +------+                                                       |
   |  136 |                                                       |
+  +------+                   Object list root                    |
+  |  144 |                                                       |
   +------+                                                       |
-  |  ... |                       Reserved                        |
+  |  156 |                                                       |
+  +------+-------------------------------------------------------+
+  |  164 |                                                       |
   +------+                                                       |
-  |  248 |                                                       |
+  |  172 |                                                       |
+  +------+                  Object bitmap root                   |
+  |  180 |                                                       |
+  +------+                                                       |
+  |  188 |                                                       |
+  +------+-------------------------------------------------------+
+  |  196 |                                                       |
+  +------+                                                       |
+  |  204 |                                                       |
+  +------+                  Allocation log head                  |
+  |  212 |                                                       |
+  +------+                                                       |
+  |  220 |                                                       |
+  +------+-------------------------------------------------------+
+  |  228 |                                                       |
+  +------+                       Reserved                        |
+  |  ... |                                                       |
   +------+-------------------------------------------------------+
   |  256 |                                                       |
-  +------+                                                       |
-  |  ... |              Free for use by filesystem               |
-  +------+                                                       |
-  |  504 |                                                       |
+  +------+              Free for use by filesystem               |
+  |  ... |                                                       |
   +------+-------------------------------------------------------+
 
-* Magic string: Must always be "Nora reliable FS"
+* Magic string: Must always be "NRFSNRFS"
 
-* Vers: The version of the data storage format.
-  Must have the value 2 as of writing.
+* H+E: Hash and encryption algorithms to use to decrypt the header
+  and records.
 
-* CAlg: The default compression algorithm to use.
+  All header data from byte 64 to the end of the block is encrypted.
 
-* BLen: The length of a single block as a power of two.
-  Affects LBA addressing.
+.. table:: Hash and encryption algorithms
 
-* RLen: The maximum length of a record in bytes as a power of two.
+  +----+----------+------------+
+  | ID | Hash     | Encryption |
+  +====+==========+============+
+  |  0 | XXH3-128 | None       |
+  +----+----------+------------+
+  |  1 | Poly1305 | ChaCha8    |
+  +----+----------+------------+
 
-* MirC: The amount of mirror volumes.
-  Useful to determine how many mirrors should be waited for before allowing
-  writes.
+* KDrv: The key derivation function to use to get the key necessary to decrypt
+  the header.
 
-* MirI: The index of this chain in the mirror list.
-  It simplifies loading code & prevents devices from being shuffled between
-  chains on each mount.
+.. table:: Key derivation algorithms
+
+  +----+-------------+
+  | ID | Source      |
+  +====+=============+
+  |  0 | None        |
+  +----+-------------+
+  |  1 | Argon2id    |
+  +----+-------------+
 
 * UID: Unique filesystem identifier.
+
+* Nonce: Random integer used for encrypting the header [#]_.
+
+.. [#] It is *critical* the nonce is never reused to prevent breaking stream
+   ciphers, which are supposed to generate *one-time* pads.
+
+   To demonstrate, suppose we have a plaintext `T` and a key `K` which
+   generates one-time pad `P`.
+   To encrypt `T`, it is xored with `P`, i.e. `E = T xor P`.
+   Hence, if we have `T` and `E` we can derive P with `P = T xor E`.
+   If the nonce is reused to encrypt a plaintext `E' = T' xor P` we can decrypt
+   `E'` with `T' = E' xor P = E' xor (T xor E)`.
+
+   A 64-bit nonce should be sufficient to ensure it is never reused.
+   Even if the nonce is increased by 1 every nanosecond it would take
+   584 years for it to repeat a previously used nonce.
+
+* Hash: Hash of the header.
+  The hash is calculated from encrypted data from byte 64 to the end of the
+  header.
+
+* Configuration: configuration values for the filesystem.
+
+  * Version: The version of the data storage format.
+    Must have the value 0 as of writing.
+
+  * Mirr. count: The amount of mirror volumes.
+    Useful to determine how many mirrors should be waited for before allowing
+    writes.
+
+  * Mirr. index: The index of this chain in the mirror list.
+    It simplifies loading code & prevents devices from being shuffled between
+    chains on each mount.
+
+  * Block length: The length of a single block in bytes.
+    Affects LBA addressing.
+
+    The block length is calculated as `2^(x + 9)`.
+
+  * Record length: The maximum length of a record in bytes.
+
+    The record length is calculated as `2^(x + 9)`.
+
+  * Object list depth: The depth of the object list tree.
+
+  * Compression level: The compression level.
+    The exact meaning depends on the compression algorithm, but usually
+    higher means better but slower compression.
+
+  * Compression algorithm: The default compression algorithm to use.
+
+.. table:: Configuration
+
+  +------+------+------+------+------+------+------+------+------+
+  | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 | Mirr. index | Mirr. count |          Version          |
+  +------+-------------+-------------+---------------------------+
+  |    8 |       Record length       |       Block length        |
+  +------+---------------------------+---------------------------+
+  |   16 |     Compression level     |     Object list depth     |
+  +------+---------------------------+---------------------------+
+  |   24 |                 Compression algorithm                 |
+  +------+-------------------------------------------------------+
+  |   32 |                                                       |
+  +------+                                                       |
+  |   40 |                                                       |
+  +------+                                                       |
+  |   48 |                                                       |
+  +------+                                                       |
+  |   56 |                                                       |
+  +------+-------------------------------------------------------+
+
+.. table:: Compression algorithms
+
+  +----+-------------+
+  | ID | Compression |
+  +====+=============+
+  |  0 | None        |
+  +----+-------------+
+  |  1 | LZ4         |
+  +----+-------------+
 
 * Total block count:
   The total amount of blocks this pool consists of.
@@ -158,23 +276,42 @@ A header is placed at the start and end of a volume.
 
 * Block count: The amount of blocks in this pool.
 
-* Object list: Record tree containing a list of objects.
+* Key: The key to use when decrypting records [#]_.
 
-* Allocation log LBA: The start block of the allocation log.
-  There is one log per pool.
+.. [#] This key is different from the key used to encrypt the header so it is
+   feasible to replace the key in case of a leak without reencrypting the
+   entire filesystem.
 
-* Allocation log length: The length of the allocation log in bytes.
+* Bad block list head: List of block LBAs *on this device* that are known to be
+  bad.
 
-* XXH3: Hash of the header.
-  This field is zeroed before hashing.
+* Object list root: Record tree containing a list of objects.
+  The length of the tree depends on ObjD.
 
-* Generation: Counts updates. Wraps arounds.
+* Object bitmap root: Record tree indicating status of each object [#]_.
+  Two bits are allocated per object.
+
+  * Used: whether the object is allocated.
+
+  * Zero: whether the object is entirely zeroed or not.
+
+.. table:: Object bitmap field
+
+  +------+------+------+
+  | Bit  |    1 |    0 |
+  +======+======+======+
+  |    0 | Zero | Used |
+  +------+------+------+
+
+.. [#] The bitmap allows much faster initialization of the object ID allocator.
 
 * Reserved: unused space that is set aside for any potential updates to this
   specification.
   **Must** be zeroed.
 
-All bytes between 256 and 512 are free for use by the filesystem layer.
+* Free for use by filesystem: All space from byte 256 to the end of the block
+  are free for use by the filesystem layer.
+
 
   When updating the headers, ensure the updates *do not* happen concurrently.
   That is, update all the start headers first, then the end headers.
@@ -193,41 +330,44 @@ A record represents a single unit of data.
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
   |    0 |                          LBA                          |
-  +------+-------------+------+------+---------------------------+
-  |    8 | References  |      | CAlg |        Data length        |
-  +------+-------------+------+------+---------------------------+
-  |   16 |                         XXH3                          |
   +------+-------------------------------------------------------+
-  |   24 |                     Total length                      |
+  |    8 |                         Nonce                         |
+  +------+---------------------------+------+--------------------+
+  |   16 |        Hash (0-3)         | CAlg |    Data length     |
+  +------+---------------------------+------+--------------------+
+  |   24 |                      Hash (4-11)                      |
   +------+-------------------------------------------------------+
 
-* LBA: The address of starting address of the data.
+* LBA: The starting address of the data.
+
+* Nonce: Random integer used for encryption [#]_.
+
+.. [#] A nonce can be derived by incrementing the nonce value in the header and
+   using that value.
 
 * Data length: The length of the *compressed* data.
 
 * CAlg: The compression algorithm used on the data.
 
-.. table:: Compression algorithms
+* Hash: The hash to verify the integrity of the *encrypted* data.
+  If the data length is 0, the hash *must* have a value of 0 [#]_.
+  If the hash is larger than 96 bits, it is truncated.
 
-  +----+------+
-  | ID | Name |
-  +====+======+
-  |  0 | None |
-  +----+------+
-  |  1 | LZ4  |
-  +----+------+
+.. [#] Zeroing the hash is necessary to have effective zero-optimization.
 
-* References: The amount of pointers to this record.
-  Only used by record trees.
+When packign data for storage, the following operations must be performed in
+order:
 
-* XXH3: XXH3 hash of the *compressed* data.
-  Used to verify integrity.
-  If the data length is 0, the XXH3 shall have a value of 0 [#]_.
+1. Compression
 
-.. [#] Zeroing the XXH3 is necessary to have effective zero-optimization.
+2. Encryption
 
-* Total length: The total length of all data.
-  Only used by record trees.
+   When encrypting every block must be encrypted *in its entirety*.
+   This is to reduce/eliminate compression oracles.
+
+3. Hashing
+
+   Like encryption, every block must be included in its entirety.
 
 
 Record tree
@@ -235,34 +375,67 @@ Record tree
 
 A record tree respresents a group of data.
 If a tree has a depth greater than 0 it consists of multiple subtrees.
-These subtrees do *not* have a total length set.
-The depth is derived from the total length and the maximum record size.
-
-The depth of a record tree depends on the size of the data.
-
-::
-  
-  x = ceil(max(1, len), max_rec_size) / max_rec_size
-  depth = ceil(log(x, max_rec_size / 32), 1)
 
 Some records may not unpack to the expected length.
-The remaining length is all zeroes [#]_.
+The "missing" data is all zeroes [#]_.
 
 .. [#] This optimization is called "zero-optimization" and is essential for
    sparse objects.
 
 
+Object
+~~~~~~
+
+.. table:: Object
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                                                       |
+  +------+                                                       |
+  |    8 |                                                       |
+  +------+                      Root record                      |
+  |   16 |                                                       |
+  +------+                                                       |
+  |   24 |                                                       |
+  +------+-------------------------------------------------------+
+  |   32 |                     Total length                      |
+  +------+-------------------------------------------------------+
+  |   40 |                      Block count                      |
+  +------+-------------------------------------------------------+
+  |   48 |                    Reference count                    |
+  +------+-------------------------------------------------------+
+  |   56 |                                                       |
+  +------+-------------------------------------------------------+
+
+* Root record: record pointing to the top of the record tree.
+
+* Total length: The total length of all data.
+  The depth of the tree is derived from this total length.
+
+* Block count: The total amount of blocks used by this object.
+
+* Reference count: The amount of references to this object.
+  If zero, the object is not referenced by anything [#]_.
+
+.. [#] If an object with no references but with a non-zero record is
+   found, it may safely be cleared.
+
+
 Object list
 ~~~~~~~~~~~
 
-The object list keeps track of record trees (except for itself).
 Objects are indexed by ID.
+
 If the reference count of an object is greater than zero, it is in use.
 Otherwise it is free.
-Determining which slots are free is done by scanning the entire list [#]_.
 
-.. [#] This scanning can be done after the object store is mounted. If a new
-   object must be allocated before the scanning is done, append it to the list.
+Determining which slots are free is done by scanning the object bitmap [#]_.
+
+.. [#] While scanning the object list directly is also possible, it is much
+   faster to scan the bitmap.
 
 
 Allocation log
@@ -279,7 +452,7 @@ The allocation log keeps track of allocations and deallocations [#]_.
    The log can be rewritten at any points to compactify it.
 
 The log is kept track of as a linked list [#]_,
-where the first 32 bytes are a record pointing to the next element and all
+where the first 32 bytes are a record pointing to the next node and all
 bytes after it are log entries.
 The bottom of the stack denotes the start of the log.
 
