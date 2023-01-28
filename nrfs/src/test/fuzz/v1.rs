@@ -261,12 +261,12 @@ impl<'a> Test<'a> {
 					Op::CreateFile { dir_idx, name, mut ext } => {
 						let Some((dir, _, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
 						d.as_ref().map(|d| d.verify_state(&dir));
+						ext.mask(dir.enabled_extensions());
 
 						match dir.create_file(name, &ext).await.unwrap() {
 							Ok(file) => {
 								file.drop().await.unwrap();
 								let d = d.expect("dir should be empty");
-								ext.mask(dir.enabled_extensions());
 								let d = &mut d.children;
 								let r = d.insert(
 									name,
@@ -296,9 +296,10 @@ impl<'a> Test<'a> {
 							}
 						}
 					}
-					Op::CreateDir { dir_idx, name, options, ext } => {
+					Op::CreateDir { dir_idx, name, options, mut ext } => {
 						let Some((dir, _, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
 						d.as_ref().map(|d| d.verify_state(&dir));
+						ext.mask(dir.enabled_extensions());
 
 						match dir.create_dir(name, &options, &ext).await.unwrap() {
 							Ok(dir) => {
@@ -1232,7 +1233,7 @@ fn fuzz_rename_dir_edit_descendant_paths() {
 /// The fuzzer wrongly saved non-default extension data in directories
 /// with no extensions enabled.
 #[test]
-fn fuzz_ext_in_noext_dir() {
+fn fuzz_ext_in_noext_dir_0() {
 	Test::new(
 		1 << 16,
 		[
@@ -1255,6 +1256,42 @@ fn fuzz_ext_in_noext_dir() {
 			},
 			Get { dir_idx: 0, name: b"\0".into() },
 			Transfer { from_dir_idx: 0, from: b"\0".into(), to_dir_idx: 1, to: b"<".into() },
+			GetExt { idx: 2 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn fuzz_ext_in_noext_dir_1() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateDir {
+				dir_idx: 0,
+				name: b"\xff".into(),
+				options: DirOptions {
+					extensions: *EnableExtensions::default().add_unix().add_mtime(),
+					hasher: Hasher::SipHasher13([0; 16]),
+				},
+				ext: Extensions { unix: None, mtime: None },
+			},
+			CreateDir {
+				dir_idx: 0,
+				name: b"\0".into(),
+				options: DirOptions {
+					extensions: *EnableExtensions::default().add_unix().add_mtime(),
+					hasher: Hasher::SipHasher13([0; 16]),
+				},
+				ext: Extensions {
+					unix: Some(ext::unix::Entry::new(11261, 0x10000, 0xff40)),
+					mtime: None,
+				},
+			},
+			Get { dir_idx: 0, name: b"\xff".into() },
+			Get { dir_idx: 0, name: b"\0".into() },
+			Transfer { from_dir_idx: 0, from: b"\0".into(), to_dir_idx: 1, to: b"\0".into() },
 			GetExt { idx: 2 },
 		],
 	)
