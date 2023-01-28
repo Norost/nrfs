@@ -344,19 +344,18 @@ fn divmod_p2(offset: u64, pow2: u8) -> (u64, usize) {
 
 /// Calculate depth given record size and total length.
 pub(super) fn depth(max_record_size: MaxRecordSize, len: u64) -> u8 {
-	if len == 0 {
-		0
-	} else {
-		let mut depth = 0;
-		// max len = maximum amount of bytes record tree can hold at current depth minus 1
-		let mut max_len_mask = (1u64 << max_record_size) - 1;
-		let len_mask = len - 1;
-		while len_mask > max_len_mask {
-			depth += 1;
-			max_len_mask |= max_len_mask << max_record_size.to_raw() - RECORD_SIZE_P2;
-		}
-		depth + 1
+	let Some(mut end) = len.checked_sub(1) else { return 0 };
+
+	end >>= max_record_size.to_raw();
+
+	let entries_per_rec_p2 = max_record_size.to_raw() - RECORD_SIZE_P2;
+
+	let mut depth = 1;
+	while end > 0 {
+		depth += 1;
+		end >>= entries_per_rec_p2
 	}
+	depth
 }
 
 /// Calculate upper offset limit for cached entries for given depth and record size.

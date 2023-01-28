@@ -938,6 +938,17 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		Ok(Self { fs, bg, id })
 	}
 
+	/// Get a list of enabled extensions.
+	///
+	/// This only includes extensions that are understood by this library.
+	pub fn enabled_extensions(&self) -> EnableExtensions {
+		let data = self.fs.dir_data(self.id);
+		let mut ext = EnableExtensions::default();
+		data.mtime_offset.is_some().then(|| ext.add_mtime());
+		data.unix_offset.is_some().then(|| ext.add_unix());
+		ext
+	}
+
 	/// Create a new file.
 	///
 	/// This fails if an entry with the given name already exists.
@@ -1282,9 +1293,18 @@ impl EnableExtensions {
 
 #[derive(Default, Debug)]
 #[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
+#[non_exhaustive]
 pub struct Extensions {
 	pub unix: Option<ext::unix::Entry>,
 	pub mtime: Option<ext::mtime::Entry>,
+}
+
+impl Extensions {
+	/// Clear or initialize any extension data depending on state in [`EnableExtensions`].
+	pub fn mask(&mut self, enable: EnableExtensions) {
+		self.unix = enable.unix().then(|| self.unix.unwrap_or_default());
+		self.mtime = enable.mtime().then(|| self.mtime.unwrap_or_default());
+	}
 }
 
 /// An error that occured while trying to remove an entry.

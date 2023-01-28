@@ -45,12 +45,16 @@ enum State<'a> {
 		ext_mtime: ext::mtime::Entry,
 	},
 	/// The object is a directory.
-	Dir {
-		children: FxHashMap<&'a Name, State<'a>>,
-		indices: Vec<arena::Handle<()>>,
-		ext_unix: ext::unix::Entry,
-		ext_mtime: ext::mtime::Entry,
-	},
+	Dir(Dir<'a>),
+}
+
+#[derive(Debug)]
+struct Dir<'a> {
+	children: FxHashMap<&'a Name, State<'a>>,
+	indices: Vec<arena::Handle<()>>,
+	ext_unix: ext::unix::Entry,
+	ext_mtime: ext::mtime::Entry,
+	enabled_extensions: EnableExtensions,
 }
 
 impl<'a> State<'a> {
@@ -59,26 +63,26 @@ impl<'a> State<'a> {
 		contents
 	}
 
-	fn dir_mut(&mut self) -> &mut FxHashMap<&'a Name, State<'a>> {
-		let Self::Dir { children, .. } = self else { panic!("not a dir") };
-		children
+	fn dir_mut(&mut self) -> &mut Dir<'a> {
+		let Self::Dir(dir) = self else { panic!("not a dir") };
+		dir
 	}
 
 	fn indices_mut(&mut self) -> &mut Vec<arena::Handle<()>> {
 		match self {
-			Self::File { indices, .. } | Self::Dir { indices, .. } => indices,
+			Self::File { indices, .. } | Self::Dir(Dir { indices, .. }) => indices,
 		}
 	}
 
 	fn ext_unix_mut(&mut self) -> &mut ext::unix::Entry {
 		match self {
-			Self::File { ext_unix, .. } | Self::Dir { ext_unix, .. } => ext_unix,
+			Self::File { ext_unix, .. } | Self::Dir(Dir { ext_unix, .. }) => ext_unix,
 		}
 	}
 
 	fn ext_mtime_mut(&mut self) -> &mut ext::mtime::Entry {
 		match self {
-			Self::File { ext_mtime, .. } | Self::Dir { ext_mtime, .. } => ext_mtime,
+			Self::File { ext_mtime, .. } | Self::Dir(Dir { ext_mtime, .. }) => ext_mtime,
 		}
 	}
 
@@ -89,12 +93,20 @@ impl<'a> State<'a> {
 				let l = &refs[*idx].1;
 				refs[*idx].1 = path.iter().chain(&l[l.len() - depth..]).copied().collect();
 			}
-			let State::Dir { children, .. } = state else { return };
+			let State::Dir(Dir { children, .. }) = state else { return };
 			for (_, child) in children {
 				rec(child, refs, path, depth + 1);
 			}
 		}
 		rec(self, refs, path, 0)
+	}
+}
+
+impl<'a> Dir<'a> {
+	fn verify_state(&self, dir: &DirRef<'_, '_, impl Dev>) {
+		let ext = dir.enabled_extensions();
+		assert_eq!(self.enabled_extensions.mtime(), ext.mtime());
+		assert_eq!(self.enabled_extensions.unix(), ext.unix());
 	}
 }
 
@@ -108,7 +120,7 @@ where
 	for p in path {
 		match state {
 			State::File { .. } => return None,
-			State::Dir { children, .. } => state = children.get_mut(&p)?,
+			State::Dir(Dir { children, .. }) => state = children.get_mut(&p)?,
 		}
 	}
 	Some(state)
@@ -166,25 +178,26 @@ impl<'a> Test<'a> {
 			// References to entries.
 			let mut refs = arena::Arena::<(_, Box<[&Name]>), ()>::new();
 			// Expected contents of the filesystem,
-			let mut state = State::Dir {
+			let mut state = State::Dir(Dir {
 				children: Default::default(),
 				indices: Default::default(),
 				ext_unix: Default::default(),
 				ext_mtime: Default::default(),
-			};
+				enabled_extensions: Default::default(),
+			});
 
 			fn get<'a, 'b, 'c, 'd, 'e>(
 				bg: &'e Background<'b, MemDev>,
 				fs: &'b Nrfs<MemDev>,
 				refs: &'c Refs<'a>,
 				state: &'d mut State<'a>,
-				file_idx: u16,
+				idx: u16,
 			) -> Option<(
 				TmpRef<'c, ItemRef<'b, 'e, MemDev>>,
 				&'c [&'a Name],
 				Option<&'d mut State<'a>>,
 			)> {
-				match refs.get(arena::Handle::from_raw(file_idx.into(), ())) {
+				match refs.get(arena::Handle::from_raw(idx.into(), ())) {
 					Some((RawItemRef::File { file, removed }, path)) => {
 						let c = (!removed).then(|| state_mut(state, path.iter().copied()).unwrap());
 						Some((file.into_tmp(fs, bg).into(), path, c))
@@ -206,7 +219,7 @@ impl<'a> Test<'a> {
 			) -> Option<(
 				TmpRef<'c, DirRef<'b, 'e, MemDev>>,
 				&'c [&'a Name],
-				Option<&'d mut FxHashMap<&'a Name, State<'a>>>,
+				Option<&'d mut Dir<'a>>,
 			)> {
 				match refs.get(arena::Handle::from_raw(dir_idx.into(), ())) {
 					Some((RawItemRef::Dir { dir, removed }, path)) => {
@@ -245,13 +258,16 @@ impl<'a> Test<'a> {
 
 			for op in self.ops.into_vec() {
 				match op {
-					Op::CreateFile { dir_idx, name, ext } => {
+					Op::CreateFile { dir_idx, name, mut ext } => {
 						let Some((dir, _, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
+						d.as_ref().map(|d| d.verify_state(&dir));
 
 						match dir.create_file(name, &ext).await.unwrap() {
 							Ok(file) => {
 								file.drop().await.unwrap();
 								let d = d.expect("dir should be empty");
+								ext.mask(dir.enabled_extensions());
+								let d = &mut d.children;
 								let r = d.insert(
 									name,
 									State::File {
@@ -265,6 +281,7 @@ impl<'a> Test<'a> {
 							}
 							Err(InsertError::Duplicate) => {
 								let d = d.expect("dir should be empty");
+								let d = &mut d.children;
 								assert!(d.contains_key(name));
 							}
 							Err(InsertError::Full) => {
@@ -281,24 +298,28 @@ impl<'a> Test<'a> {
 					}
 					Op::CreateDir { dir_idx, name, options, ext } => {
 						let Some((dir, _, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
+						d.as_ref().map(|d| d.verify_state(&dir));
 
 						match dir.create_dir(name, &options, &ext).await.unwrap() {
 							Ok(dir) => {
 								dir.drop().await.unwrap();
 								let d = d.expect("dir should be empty");
+								let d = &mut d.children;
 								let r = d.insert(
 									name,
-									State::Dir {
+									State::Dir(Dir {
 										children: Default::default(),
 										indices: Default::default(),
 										ext_unix: ext.unix.unwrap_or_default(),
 										ext_mtime: ext.mtime.unwrap_or_default(),
-									},
+										enabled_extensions: options.extensions,
+									}),
 								);
 								assert!(r.is_none());
 							}
 							Err(InsertError::Duplicate) => {
 								let d = d.expect("dir should be empty");
+								let d = &mut d.children;
 								assert!(d.contains_key(name));
 							}
 							Err(InsertError::Full) => {
@@ -317,6 +338,7 @@ impl<'a> Test<'a> {
 						let Some((dir, path, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
 
 						// If the dir has been removed it should be empty.
+						let d = d.map(|d| &mut d.children);
 						let d_stub = &mut Default::default();
 						let d = d.unwrap_or(d_stub);
 
@@ -430,6 +452,7 @@ impl<'a> Test<'a> {
 							// Entry was already removed.
 							continue
 						};
+						let d = &mut d.children;
 						match dir.rename(from, to).await.unwrap() {
 							Ok(()) => {
 								// Rename succeeded
@@ -455,6 +478,7 @@ impl<'a> Test<'a> {
 							// Entry was already removed.
 							continue
 						};
+						let d = &mut d.children;
 
 						match from_dir.transfer(from, &to_dir, to).await.unwrap() {
 							Ok(()) => {
@@ -465,7 +489,14 @@ impl<'a> Test<'a> {
 								let path = to_path.iter().chain(&[to]).copied().collect::<Vec<_>>();
 								e.transfer(&mut refs, &path);
 
-								assert!(d.dir_mut().insert(to, e).is_none());
+								let d = d.dir_mut();
+								assert!(d.children.insert(to, e).is_none());
+
+								// Apply mask to item extensions.
+								let child = d.children.get_mut(&to).unwrap();
+								let ext = d.enabled_extensions;
+								(!ext.unix()).then(|| *child.ext_unix_mut() = Default::default());
+								(!ext.mtime()).then(|| *child.ext_mtime_mut() = Default::default());
 							}
 							Err(TransferError::NotFound) => {
 								assert!(!d.contains_key(from));
@@ -497,6 +528,7 @@ impl<'a> Test<'a> {
 							// Entry was already removed.
 							continue
 						};
+						let d = &mut d.children;
 
 						match dir.remove(name).await.unwrap() {
 							// Remove succeeded:
@@ -504,7 +536,7 @@ impl<'a> Test<'a> {
 							Ok(()) => {
 								let indices = match d.remove(name).unwrap() {
 									State::File { indices, .. } => indices,
-									State::Dir { children, indices, .. } => {
+									State::Dir(Dir { children, indices, .. }) => {
 										assert!(children.is_empty());
 										indices
 									}
@@ -521,7 +553,7 @@ impl<'a> Test<'a> {
 							Err(RemoveError::NotFound) => assert!(d.get(name).is_none()),
 							// - the entry is a non-empty directory.
 							Err(RemoveError::NotEmpty) => {
-								let State::Dir { children, .. } = d.get(name).unwrap() else {
+								let State::Dir(Dir { children, .. }) = d.get(name).unwrap() else {
 									panic!()
 								};
 								assert!(!children.is_empty());
@@ -1191,6 +1223,38 @@ fn fuzz_rename_dir_edit_descendant_paths() {
 			},
 			Get { dir_idx: 1, name: b"\0".into() },
 			Rename { dir_idx: 0, from: b"\0".into(), to: b"\xFF".into() },
+			GetExt { idx: 2 },
+		],
+	)
+	.run()
+}
+
+/// The fuzzer wrongly saved non-default extension data in directories
+/// with no extensions enabled.
+#[test]
+fn fuzz_ext_in_noext_dir() {
+	Test::new(
+		1 << 16,
+		[
+			Root,
+			CreateDir {
+				dir_idx: 0,
+				name: b"\0".into(),
+				options: DirOptions {
+					extensions: *EnableExtensions::default().add_mtime().add_unix(),
+					hasher: Hasher::SipHasher13([0; 16]),
+				},
+				ext: Extensions { unix: None, mtime: Some(ext::mtime::Entry { mtime: 1 }) },
+			},
+			Get { dir_idx: 0, name: b"\x00".into() },
+			Rename { dir_idx: 0, from: b"\x00".into(), to: b"\x07".into() },
+			CreateFile {
+				dir_idx: 0,
+				name: b"\0".into(),
+				ext: Extensions { unix: None, mtime: Some(ext::mtime::Entry { mtime: 2 }) },
+			},
+			Get { dir_idx: 0, name: b"\0".into() },
+			Transfer { from_dir_idx: 0, from: b"\0".into(), to_dir_idx: 1, to: b"<".into() },
 			GetExt { idx: 2 },
 		],
 	)
