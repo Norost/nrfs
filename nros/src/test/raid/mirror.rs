@@ -6,16 +6,7 @@ fn create_save_2() {
 	block_on(async {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
-		let s = Nros::new(
-			StdResource::new(),
-			[[dev_a], [dev_b]],
-			BlockSize::K1,
-			MaxRecordSize::K16,
-			Compression::None,
-			1 << 14,
-		)
-		.await
-		.unwrap();
+		let s = new(vec![vec![dev_a], vec![dev_b]]).await;
 		s.unmount().await.unwrap();
 	});
 }
@@ -25,16 +16,7 @@ fn write_read_2() {
 	block_on(async {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
-		let s = Nros::new(
-			StdResource::new(),
-			[[dev_a], [dev_b]],
-			BlockSize::K1,
-			MaxRecordSize::K16,
-			Compression::None,
-			1 << 14,
-		)
-		.await
-		.unwrap();
+		let s = new(vec![vec![dev_a], vec![dev_b]]).await;
 		let bg = Background::default();
 
 		let obj = s.create(&bg).await.unwrap();
@@ -45,9 +27,7 @@ fn write_read_2() {
 		bg.drop().await.unwrap();
 		let devs = s.unmount().await.unwrap();
 
-		let s = Nros::load(StdResource::new(), devs, 1 << 14, true)
-			.await
-			.unwrap();
+		let s = load(devs).await;
 		let bg = Background::default();
 		let obj = s.get(&bg, 0).await.unwrap();
 		let buf = &mut [0; 1 << 12];
@@ -63,16 +43,7 @@ fn write_corrupt_read_2() {
 	block_on(async {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
-		let mut s = Nros::new(
-			StdResource::new(),
-			[[dev_a], [dev_b]],
-			BlockSize::K1,
-			MaxRecordSize::K16,
-			Compression::None,
-			1 << 14,
-		)
-		.await
-		.unwrap();
+		let mut s = new(vec![vec![dev_a], vec![dev_b]]).await;
 		let bg = Background::default();
 
 		let obj = s.create(&bg).await.unwrap();
@@ -95,9 +66,7 @@ fn write_corrupt_read_2() {
 			devs[i].write(1, buf).await.unwrap();
 
 			// Remount & test
-			s = Nros::load(StdResource::new(), devs, 1 << 14, true)
-				.await
-				.unwrap();
+			s = load(devs).await;
 			let bg = Background::default();
 			let obj = s.get(&bg, 0).await.unwrap();
 			let buf = &mut [0; 1 << 12];
@@ -116,16 +85,7 @@ fn corrupt_headers_2() {
 	block_on(async {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
-		let mut s = Nros::new(
-			StdResource::new(),
-			[[dev_a], [dev_b]],
-			BlockSize::K1,
-			MaxRecordSize::K16,
-			Compression::None,
-			1 << 14,
-		)
-		.await
-		.unwrap();
+		let mut s = new(vec![vec![dev_a], vec![dev_b]]).await;
 
 		for i in 0..2 {
 			for write_end in [false, true] {
@@ -139,7 +99,7 @@ fn corrupt_headers_2() {
 				header.as_mut().copy_from_slice(&buf.get()[..header_len]);
 
 				// Make the hash of the header invalid.
-				header.xxh3 = !header.xxh3;
+				header.hash.iter_mut().for_each(|x| *x = !*x);
 
 				// Corrupt the header.
 				buf.get_mut()[..header_len].copy_from_slice(header.as_ref());
@@ -147,9 +107,7 @@ fn corrupt_headers_2() {
 
 				// Try to remount
 				// The filesystem should be automatically repaired.
-				s = Nros::load(StdResource::new(), devs, 1 << 14, true)
-					.await
-					.unwrap();
+				s = load(devs).await;
 			}
 		}
 	})

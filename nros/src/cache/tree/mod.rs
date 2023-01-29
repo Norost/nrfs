@@ -5,10 +5,13 @@ mod grow;
 mod set;
 mod shrink;
 mod update_record;
+mod view;
 mod write_zeros;
 
 use {
-	super::{Busy, Cache, EntryRef, Key, Present, RefCount, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2},
+	super::{
+		Busy, Cache, EntryRef, Key, Object, Present, RefCount, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2,
+	},
 	crate::{resource::Buf, Background, Dev, Error, MaxRecordSize, Record, Resource},
 	core::ops::RangeInclusive,
 };
@@ -49,13 +52,13 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			data.len()
 		);
 
-		let root_len = self.len().await?;
+		let object_len = self.len().await?;
 
 		// Ensure all data fits.
-		let data = if offset >= root_len {
+		let data = if offset >= object_len {
 			return Ok(0);
-		} else if offset.saturating_add(u64::try_from(data.len()).unwrap()) >= root_len {
-			&data[..usize::try_from(root_len - offset).unwrap()]
+		} else if offset.saturating_add(u64::try_from(data.len()).unwrap()) >= object_len {
+			&data[..usize::try_from(object_len - offset).unwrap()]
 		} else {
 			data
 		};
@@ -87,7 +90,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// Copy to first record |----xxxx|
 			{
 				let d;
-				(d, data) = data.split_at((1usize << self.max_record_size()) - first_offset);
+				(d, data) = data.split_at((1 << self.max_record_size().to_raw()) - first_offset);
 
 				let entry = self.get(0, first_key).await?;
 				entry.modify(self.background, |b| {
@@ -99,7 +102,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// Copy middle records |xxxxxxxx|
 			for offset in range {
 				let d;
-				(d, data) = data.split_at(1usize << self.max_record_size());
+				(d, data) = data.split_at(1 << self.max_record_size().to_raw());
 
 				let end = d.len() - d.iter().rev().position(|&b| b != 0).unwrap_or(d.len());
 				let mut buf = self.cache.resource().alloc();
@@ -136,13 +139,13 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			buf.len()
 		);
 
-		let root_len = self.len().await?;
+		let object_len = self.len().await?;
 
 		// Ensure all data fits in buffer.
-		let buf = if root_len <= offset {
+		let buf = if object_len <= offset {
 			return Ok(0);
-		} else if offset.saturating_add(u64::try_from(buf.len()).unwrap()) >= root_len {
-			&mut buf[..usize::try_from(root_len - offset).unwrap()]
+		} else if offset.saturating_add(u64::try_from(buf.len()).unwrap()) >= object_len {
+			&mut buf[..usize::try_from(object_len - offset).unwrap()]
 		} else {
 			buf
 		};
@@ -181,7 +184,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// Copy to first record |----xxxx|
 			{
 				let b;
-				(b, buf) = buf.split_at_mut((1usize << self.max_record_size()) - first_offset);
+				(b, buf) = buf.split_at_mut((1 << self.max_record_size().to_raw()) - first_offset);
 				let d = self.get(0, first_key).await?;
 				copy(b, d.get().get(first_offset..).unwrap_or(&[]));
 			}
@@ -189,7 +192,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			// Copy middle records |xxxxxxxx|
 			for key in range {
 				let b;
-				(b, buf) = buf.split_at_mut(1usize << self.max_record_size());
+				(b, buf) = buf.split_at_mut(1 << self.max_record_size().to_raw());
 				let d = self.get(0, key).await?;
 				copy(b, d.get());
 			}
@@ -210,11 +213,11 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// Resize record tree.
 	pub async fn resize(&self, new_len: u64) -> Result<(), Error<D>> {
 		trace!("resize id {:#x} new_len {}", self.id, new_len);
-		let (root, len) = self.root().await?;
+		let (object, len) = self.object().await?;
 		if new_len < len {
-			self.shrink(new_len, &root).await
+			self.shrink(new_len, &object).await
 		} else if new_len > len {
-			self.grow(new_len, &root).await
+			self.grow(new_len, &object).await
 		} else {
 			trace!(info "len is {}, nothing to do", len);
 			Ok(())
@@ -224,7 +227,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// The length of the record tree in bytes.
 	pub async fn len(&self) -> Result<u64, Error<D>> {
 		trace!("len id {:#x}", self.id);
-		self.root().await.map(|(_, len)| len)
+		self.object().await.map(|(_, len)| len)
 	}
 
 	/// Replace the data of this object with the data of another object.
@@ -244,22 +247,22 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 	/// Increase the reference count of an object.
 	///
-	/// This may fail if the reference count is already [`u16::MAX`].
+	/// This may fail if the reference count is already [`u64::MAX`].
 	/// On failure, the returned value is `false`, otherwise `true`.
 	pub async fn increase_reference_count(&self) -> Result<bool, Error<D>> {
-		debug_assert_ne!(
-			self.id, OBJECT_LIST_ID,
-			"object list isn't reference counted"
+		debug_assert!(
+			self.id & OBJECT_LIST_ID == 0,
+			"object list & bitmap aren't reference counted"
 		);
 
 		let (mut obj, _) = self.cache.fetch_object(self.background, self.id).await?;
-		let mut root = obj.data.root();
-		debug_assert!(root.references != 0, "invalid object");
-		if root.references == u16::MAX {
+		let mut object = obj.data.object();
+		debug_assert!(object.reference_count != 0, "invalid object");
+		if object.reference_count == u64::MAX {
 			return Ok(false);
 		}
-		root.references += 1;
-		obj.data.set_root(&root);
+		object.reference_count += 1;
+		obj.data.set_object(&object);
 
 		Ok(true)
 	}
@@ -270,21 +273,22 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// and the tree should not be used anymore.
 	pub async fn decrease_reference_count(&self) -> Result<(), Error<D>> {
 		trace!("decrease_reference_count {:#x}", self.id);
-		debug_assert_ne!(
-			self.id, OBJECT_LIST_ID,
-			"object list isn't reference counted"
+		debug_assert!(
+			self.id & OBJECT_LIST_ID == 0,
+			"object list & bitmap aren't reference counted"
 		);
 
 		let (mut obj, _) = self.cache.fetch_object(self.background, self.id).await?;
-		let mut root = obj.data.root();
-		debug_assert!(root.references != 0, "invalid object");
-		root.references -= 1;
-		obj.data.set_root(&root);
+		let mut object = obj.data.object();
+		debug_assert!(object.reference_count != 0, "invalid object");
+		object.reference_count -= 1;
+		obj.data.set_object(&object);
 
-		if root.references == 0 {
+		if object.reference_count == 0 {
 			drop(obj);
 			// Free space.
 			self.resize(0).await?;
+			self.background.try_run_all().await?;
 			self.cache.data.borrow_mut().dealloc_id(self.id);
 		}
 
@@ -301,12 +305,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		self.id
 	}
 
-	/// Get the root and length of this tree.
-	async fn root(&self) -> Result<(Record, u64), Error<D>> {
+	/// Get the object field of this tree.
+	async fn object(&self) -> Result<(Object, u64), Error<D>> {
 		let (obj, _) = self.cache.fetch_object(self.background, self.id).await?;
 		#[cfg(debug_assertions)]
 		obj.data.check_integrity();
-		Ok((obj.data.root(), u64::from(obj.data.root().total_length)))
+		Ok((obj.data.object(), u64::from(obj.data.object().total_length)))
 	}
 
 	/// Get a reference to the background task runner.
@@ -319,27 +323,17 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 ///
 /// Ranges are used for efficient iteration.
 fn calc_range(record_size: MaxRecordSize, offset: u64, length: usize) -> RangeInclusive<u64> {
-	let start_key = offset >> record_size;
-	let end_key = (offset + u64::try_from(length).unwrap()) >> record_size;
+	let start_key = offset >> record_size.to_raw();
+	let end_key = (offset + u64::try_from(length).unwrap()) >> record_size.to_raw();
 	start_key..=end_key
 }
 
 /// Determine start & end offsets inside records.
 fn calc_record_offsets(record_size: MaxRecordSize, offset: u64, length: usize) -> (usize, usize) {
-	let mask = (1u64 << record_size) - 1;
+	let mask = (1 << record_size.to_raw()) - 1;
 	let start = offset & mask;
 	let end = (offset + u64::try_from(length).unwrap()) & mask;
 	(start.try_into().unwrap(), end.try_into().unwrap())
-}
-
-/// Calculate divmod with a power of two.
-fn divmod_p2(offset: u64, pow2: u8) -> (u64, usize) {
-	let mask = (1u64 << pow2) - 1;
-
-	let index = offset & mask;
-	let offt = offset >> pow2;
-
-	(offt, index.try_into().unwrap())
 }
 
 /// Calculate depth given record size and total length.
@@ -359,7 +353,9 @@ pub(super) fn depth(max_record_size: MaxRecordSize, len: u64) -> u8 {
 }
 
 /// Calculate upper offset limit for cached entries for given depth and record size.
-pub(super) fn max_offset(max_record_size: MaxRecordSize, depth: u8) -> u128 {
+///
+/// The offset is *exclusive*, i.e. `[0; max_offset)`.
+pub(super) fn max_offset(max_record_size: MaxRecordSize, depth: u8) -> u64 {
 	if depth == 0 {
 		0
 	} else {

@@ -9,8 +9,8 @@ pub use tree::Tree;
 
 use {
 	crate::{
-		resource::Buf, storage, util::box_fut, Background, BlockSize, Dev, Error, MaxRecordSize,
-		Record, Resource, Store,
+		object::Object, resource::Buf, storage, util::box_fut, Background, BlockSize, Dev, Error,
+		MaxRecordSize, Record, Resource, Store,
 	},
 	core::{
 		cell::{RefCell, RefMut},
@@ -31,10 +31,28 @@ use {
 };
 
 /// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
-const OBJECT_LIST_ID: u64 = 1 << 59; // 2**64 / 2**5 = 2**59, ergo 2**59 is just out of range.
+const OBJECT_LIST_ID: u64 = 1 << 58 | 0; // 2**64 / 2**6 = 2**58, ergo 2**58 is just out of range.
+
+/// Fixed ID for the object list so it can use the same caching mechanisms as regular objects.
+const OBJECT_BITMAP_ID: u64 = 1 << 58 | 1; // Ditto
+
+/// Bit indicating an object is referenced, i.e. in use by upper layers.
+pub const OBJECT_BITMAP_INUSE: u8 = 1 << 0;
+
+/// Bit indicating an object is non-zero, i.e. block count and root are not zero.
+pub const OBJECT_BITMAP_NONZERO: u8 = 1 << 1;
+
+/// Ratio of object vs bitmap field size.
+const OBJECT_BITMAP_FIELD_RATIO: u64 = 4 << OBJECT_SIZE_P2;
+
+/// Ratio of object vs bitmap field size as a power of 2.
+const OBJECT_BITMAP_FIELD_RATIO_P2: u8 = 2 + OBJECT_SIZE_P2;
 
 /// Record size as a power-of-two.
 const RECORD_SIZE_P2: u8 = mem::size_of::<Record>().ilog2() as _;
+
+/// Object size as a power-of-two.
+const OBJECT_SIZE_P2: u8 = mem::size_of::<Object>().ilog2() as _;
 
 /// The ID refers to a pseudo-object or an entry of a pseudo-object.
 pub const ID_PSEUDO: u64 = 1 << 59;
@@ -85,34 +103,56 @@ pub(crate) struct Cache<D: Dev, R: Resource> {
 
 impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Initialize a cache layer.
-	///
-	/// # Panics
-	///
-	/// If `global_cache_max` is smaller than `dirty_cache_max`.
-	///
-	/// If `dirty_cache_max` is smaller than the maximum record size.
-	pub fn new(store: Store<D, R>, global_cache_max: usize) -> Self {
-		// TODO iterate over object list to find free slots.
-		let mut used_objects_ids = RangeSet::new();
-		let len = u64::from(store.object_list().total_length);
-		if len > 0 {
-			assert_eq!(
-				len % (1 << RECORD_SIZE_P2),
-				0,
-				"todo: total length not a multiple of record size"
-			);
-			used_objects_ids.insert(0..len >> RECORD_SIZE_P2);
-		}
-
-		Self {
+	pub async fn new(store: Store<D, R>, cache_size: usize) -> Result<Self, Error<D>> {
+		trace!("new {}", cache_size);
+		let mut s = Self {
 			store,
 			data: RefCell::new(CacheData {
 				objects: Default::default(),
-				lru: Lru::new(global_cache_max),
-				used_objects_ids,
+				lru: Lru::new(cache_size),
+				used_objects_ids: Default::default(),
 				pseudo_id_counter: NonZeroU64::MIN,
 			}),
-		}
+		};
+
+		// Scan bitmap for empty slots.
+		let bg = Background::default();
+		let mut used_objects_ids = RangeSet::new();
+		let bitmap = Tree::new(&s, &bg, OBJECT_BITMAP_ID);
+		let entries_per_leaf = 4 << s.max_record_size().to_raw();
+		bg.run(async {
+			for offset in 0.. {
+				let Some(entry) = bitmap.view(offset).await? else { break };
+				let mut id = offset * entries_per_leaf;
+				for &byte in entry.get() {
+					for k in 0..4 {
+						let bits = (byte >> k * 2) & 0b11;
+						match bits {
+							// Free slot
+							0b00 => {}
+							// Free but non-zero slot
+							0b10 => todo!("write zeros to free non-zero slot"),
+							// Used slot
+							0b01 | 0b11 => {
+								trace!(info "id {:#x} in use", id);
+								used_objects_ids.insert(id..id + 1);
+							}
+							_ => unreachable!(),
+						}
+						id += 1;
+					}
+				}
+			}
+			Ok(())
+		})
+		.await?;
+		bg.drop().await?;
+
+		trace!(final "used object ids: {:#x?}", &used_objects_ids);
+
+		s.data.get_mut().used_objects_ids = used_objects_ids;
+
+		Ok(s)
 	}
 
 	/// Allocate an arbitrary amount of object IDs.
@@ -149,32 +189,29 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		trace!(info "{}", id);
 
 		// Resize if necessary
-		let len = self
-			.data
-			.borrow_mut()
-			.used_objects_ids
-			.iter()
-			.last()
-			.map_or(0, |r| r.end);
-		Tree::new(self, bg, OBJECT_LIST_ID)
-			.resize(len << RECORD_SIZE_P2)
-			.await?;
+		if id + amount > self.object_list_len() {
+			self.grow_object_list(bg).await?;
+		}
 
 		// Create objects
 		for id in id..id + amount {
-			let new_root = Record { references: 1.into(), ..Default::default() };
+			let new_object = Object { reference_count: 1.into(), ..Default::default() };
 			if let Some((mut obj, _)) = self.wait_object(id).await {
-				debug_assert_eq!(obj.data.root().length, 0, "new object is not empty");
 				debug_assert_eq!(
-					obj.data.root().references,
+					obj.data.object().root.length(),
+					0,
+					"new object is not empty"
+				);
+				debug_assert_eq!(
+					obj.data.object().reference_count,
 					0,
 					"new object has non-zero refcount"
 				);
-				obj.data.set_root(&new_root);
+				obj.data.set_object(&new_object);
 			} else {
 				let mut data = self.data.borrow_mut();
-				let mut tree = TreeData::new(new_root, self.max_record_size());
-				tree.set_root(&new_root); // mark as dirty.
+				let mut tree = TreeData::new(new_object, self.max_record_size());
+				tree.set_object(&new_object); // mark as dirty.
 				let tree = Present { data: tree, refcount: data.lru.object_add_noref(id) };
 				data.objects.insert(id, Slot::Present(tree));
 			}
@@ -247,7 +284,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			}
 
 			// Mark root as dirty since it moved.
-			obj.data.set_root(&obj.data.root());
+			obj.data.set_object(&obj.data.object());
 		};
 
 		transfer(from_obj, to);
@@ -257,7 +294,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// 4. Set reference count of 'from' object to 0.
 		from_obj
 			.data
-			.set_root(&Record { references: 0.into(), ..from_obj.data.root() });
+			.set_object(&Object { reference_count: 0.into(), ..from_obj.data.object() });
 
 		// 5. Dereference 'from'.
 		data.lru
@@ -325,15 +362,28 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		drop(data);
 
 		// Fetch the object root.
-		let mut root = Record::default();
-		if id < OBJECT_LIST_ID {
-			let tree = Tree::new(self, bg, OBJECT_LIST_ID);
-			let fut = box_fut(tree.read(id << RECORD_SIZE_P2, root.as_mut()));
-			let len = fut.await?;
-			assert_eq!(len, 1 << RECORD_SIZE_P2, "read partial root");
-		} else {
-			root = self.store.object_list();
-		}
+		let object = match id {
+			OBJECT_LIST_ID => Object {
+				root: self.store.object_list_root(),
+				total_length: self.object_list_bytelen().into(),
+				reference_count: u64::MAX.into(),
+				..Default::default()
+			},
+			OBJECT_BITMAP_ID => Object {
+				root: self.store.object_bitmap_root(),
+				total_length: self.object_bitmap_bytelen().into(),
+				reference_count: u64::MAX.into(),
+				..Default::default()
+			},
+			id => {
+				let mut obj = Object::default();
+				let tree = Tree::new(self, bg, OBJECT_LIST_ID);
+				let fut = box_fut(tree.read(id << OBJECT_SIZE_P2, obj.as_mut()));
+				let len = fut.await?;
+				assert_eq!(len, 1 << OBJECT_SIZE_P2, "read partial root");
+				obj
+			}
+		};
 
 		// Insert the object.
 		let obj = RefMut::map_split(self.data.borrow_mut(), |data| {
@@ -346,7 +396,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			let hash_map::Entry::Occupied(mut slot) = data.objects.entry(id)
 				else { unreachable!("not busy") };
 			*slot.get_mut() = Slot::Present(Present {
-				data: TreeData::new(root, self.max_record_size()),
+				data: TreeData::new(object, self.max_record_size()),
 				refcount,
 			});
 
@@ -413,8 +463,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		if key.test_flag(Key::FLAG_OBJECT) {
 			// Evict object
 
-			// Take root
-			let root = obj.data.root();
+			// Take object field
+			let object = obj.data.object();
 
 			// Remove from LRU
 			let RefCount::NoRef { lru_index } = obj.refcount
@@ -424,7 +474,13 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			let fut = if key.id() == OBJECT_LIST_ID {
 				// Just copy
 				trace!(info "object list");
-				self.store.set_object_list(root);
+				self.store.set_object_list_root(object.root);
+				data.objects.remove(&key.id());
+				None
+			} else if key.id() == OBJECT_BITMAP_ID {
+				// Just copy
+				trace!(info "object bitmap");
+				self.store.set_object_bitmap_root(object.root);
 				data.objects.remove(&key.id());
 				None
 			} else if obj.data.is_dirty() {
@@ -439,20 +495,15 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				let Some(Slot::Present(mut obj)) = data.objects.insert(key.id(), Slot::Busy(busy.clone()))
 					else { unreachable!("no object") };
 
-				let offset = key.id() << RECORD_SIZE_P2;
-				debug_assert_eq!(offset >> RECORD_SIZE_P2, key.id());
+				let offset = key.id() << OBJECT_SIZE_P2;
+				debug_assert_eq!(offset >> OBJECT_SIZE_P2, key.id());
 
 				Some(async move {
 					trace!("evict_entry::object {:#x}", key.id());
 
 					let bg = Background::default(); // TODO get rid of this sillyness
 					bg.run(async {
-						let l = Tree::new(self, &bg, OBJECT_LIST_ID)
-							.write(offset, root.as_ref())
-							.await?;
-						if root.references > 0 || root.length > 0 {
-							debug_assert_eq!(l, mem::size_of::<Record>(), "root not fully written");
-						}
+						self.save_object(&bg, key.id(), &object).await?;
 
 						let mut busy_ref = busy.borrow_mut();
 						debug_assert_eq!(
@@ -587,15 +638,19 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					}
 
 					// Remove dirty marker
-					let _r =
+					let r =
 						obj.data
 							.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
-					debug_assert!(_r, "not marked");
+					debug_assert!(r, "not marked");
 
 					if do_remove {
 						trace!(info "remove {:#x}", key.id());
 						// Forget the object, which should be all zeroes.
-						debug_assert_eq!(obj.data.root().length, 0, "pseudo object leaks entries");
+						debug_assert_eq!(
+							obj.data.object().root.length(),
+							0,
+							"pseudo object leaks entries"
+						);
 						data.objects.remove(&key.id());
 					}
 
@@ -735,7 +790,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			.iter()
 			.filter(|&(&id, obj)| {
 				let Slot::Present(obj) = obj else { unreachable!() };
-				id & ID_PSEUDO == 0 && obj.data.is_dirty()
+				id & (3 << 58) == 0 && obj.data.is_dirty()
 			})
 			.map(|(id, _)| *id)
 			.collect::<Vec<_>>();
@@ -745,13 +800,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		for id in ids {
 			let Some(Slot::Present(obj)) = data.objects.get_mut(&id) else { continue };
 			debug_assert!(!is_pseudo_id(id), "can't flush pseudo ID");
-			let root = obj.data.root();
+			let object = obj.data.object();
 			obj.data.clear_dirty();
 			drop(data);
-			let offset = id << RECORD_SIZE_P2;
-			Tree::new(self, bg, OBJECT_LIST_ID)
-				.write(offset, root.as_ref())
-				.await?;
+			self.save_object(&bg, id, &object).await?;
 			data = self.data.borrow_mut();
 		}
 
@@ -759,30 +811,37 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		bg.try_run_all().await?;
 		data = self.data.borrow_mut();
 
-		// Now flush the object list.
-		for depth in 0..16 {
-			let Some(tree) = data.objects.get_mut(&OBJECT_LIST_ID) else { continue };
-			let Slot::Present(tree) = tree else { unreachable!() };
-			let Some(level) = tree.data.data.get_mut(usize::from(depth)) else { continue };
-			let offsets = level.dirty_markers.keys().copied().collect::<Vec<_>>();
-			drop(data);
+		// Now flush the object list and bitmap.
+		for id in [OBJECT_LIST_ID, OBJECT_BITMAP_ID] {
+			for depth in 0..16 {
+				let Some(tree) = data.objects.get_mut(&id) else { continue };
+				let Slot::Present(tree) = tree else { unreachable!() };
+				let Some(level) = tree.data.data.get_mut(usize::from(depth)) else { continue };
+				let offsets = level.dirty_markers.keys().copied().collect::<Vec<_>>();
+				drop(data);
 
-			// Flush in parallel.
-			for offt in offsets {
-				let key = Key::new(0, OBJECT_LIST_ID, depth, offt);
-				queue.push(self.flush_entry(bg, key));
+				// Flush in parallel.
+				for offt in offsets {
+					let key = Key::new(0, id, depth, offt);
+					queue.push(self.flush_entry(bg, key));
+				}
+				while queue.try_next().await?.is_some() {}
+
+				// Wait for background tasks in case higher records got flushed.
+				bg.try_run_all().await?;
+
+				data = self.data.borrow_mut();
 			}
-			while queue.try_next().await?.is_some() {}
-
-			// Wait for background tasks in case higher records got flushed.
-			bg.try_run_all().await?;
-
-			data = self.data.borrow_mut();
 		}
 
 		// Write object list root.
 		if let Some(Slot::Present(obj)) = data.objects.get(&OBJECT_LIST_ID) {
-			self.store.set_object_list(obj.data.root());
+			self.store.set_object_list_root(obj.data.object().root);
+		}
+
+		// Write object bitmap root.
+		if let Some(Slot::Present(obj)) = data.objects.get(&OBJECT_BITMAP_ID) {
+			self.store.set_object_bitmap_root(obj.data.object().root);
 		}
 
 		// Tadha!
@@ -795,8 +854,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 					debug_assert!(level.dirty_markers.is_empty(), "flush_all didn't flush all");
 				}
 
-				if id != OBJECT_LIST_ID && id & ID_PSEUDO != 0 {
-					debug_assert_eq!(tree.data.root().length, 0, "pseudo object is not zero");
+				if is_pseudo_id(id) {
+					debug_assert_eq!(
+						tree.data.object().root.length(),
+						0,
+						"pseudo object is not zero"
+					);
 				}
 			}
 		}
@@ -830,6 +893,25 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 	fn resource(&self) -> &R {
 		self.store.resource()
+	}
+
+	/// The maximum amount of entries the object list can contain with its current depth.
+	fn object_list_len(&self) -> u64 {
+		let rec_size = self.max_record_size();
+		let depth = self.store.object_list_depth();
+		(1 << rec_size.to_raw() - OBJECT_SIZE_P2) * tree::max_offset(rec_size, depth)
+	}
+
+	/// The length of the object list in bytes.
+	fn object_list_bytelen(&self) -> u64 {
+		let rec_size = self.max_record_size();
+		let depth = self.store.object_list_depth();
+		(1 << rec_size.to_raw()) * tree::max_offset(rec_size, depth)
+	}
+
+	/// The length of the object bitmap in bytes.
+	fn object_bitmap_bytelen(&self) -> u64 {
+		self.object_list_bytelen() / OBJECT_BITMAP_FIELD_RATIO
 	}
 }
 

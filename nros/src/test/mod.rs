@@ -5,6 +5,7 @@ mod background;
 mod cache;
 mod concurrency;
 mod dev;
+mod encryption;
 mod raid;
 mod record;
 
@@ -32,14 +33,17 @@ fn new_cap(
 	cache_size: usize,
 ) -> Nros<MemDev, StdResource> {
 	let s = MemDev::new(blocks, BlockSize::K1);
-	let s = Nros::new(
-		StdResource::new(),
-		[[s]],
-		BlockSize::K1,
+	let s = Nros::new(NewConfig {
+		magic: *b"TESTTEST",
+		resource: StdResource::new(),
+		mirrors: vec![vec![s]],
+		block_size: BlockSize::K1,
 		max_record_size,
-		Compression::None,
+		compression: Compression::None,
+		cipher: CipherType::NoneXxh3,
+		key_deriver: KeyDeriver::None { key: &[0; 32] },
 		cache_size,
-	);
+	});
 	block_on(s).unwrap()
 }
 

@@ -1,10 +1,27 @@
 use {
 	super::{block_on, Set256},
 	crate::{
+		dev,
 		storage::dev::{Allocator, Buf, Dev, DevSet, MemDev},
-		BlockSize, Compression, MaxRecordSize, StdResource,
+		BlockSize, CipherType, Compression, KeyDeriver, MaxRecordSize, NewConfig, StdResource,
 	},
 };
+
+async fn new(mirrors: Vec<Vec<dev::MemDev>>) -> DevSet<dev::MemDev, StdResource> {
+	DevSet::new(NewConfig {
+		magic: *b"TESTTEST",
+		resource: StdResource::new(),
+		mirrors,
+		block_size: BlockSize::B512,
+		max_record_size: MaxRecordSize::B512,
+		compression: Compression::None,
+		cipher: CipherType::NoneXxh3,
+		key_deriver: KeyDeriver::None { key: &[0; 32] },
+		cache_size: 1 << 14,
+	})
+	.await
+	.unwrap()
+}
 
 /// Write to & read from a [`MemDev`].
 #[test]
@@ -37,15 +54,7 @@ fn memdev_read_write() {
 fn devset_1_create() {
 	block_on(async {
 		let dev = MemDev::new(16, BlockSize::B512);
-		let _ = DevSet::new(
-			StdResource::new(),
-			[[dev]],
-			BlockSize::B512,
-			MaxRecordSize::B512,
-			Compression::None,
-		)
-		.await
-		.unwrap();
+		let _ = new(vec![vec![dev]]).await;
 	})
 }
 
@@ -54,15 +63,7 @@ fn devset_1_create() {
 fn devset_1_read_write() {
 	block_on(async {
 		let dev = MemDev::new(16, BlockSize::B512);
-		let set = DevSet::new(
-			StdResource::new(),
-			[[dev]],
-			BlockSize::B512,
-			MaxRecordSize::B512,
-			Compression::None,
-		)
-		.await
-		.unwrap();
+		let set = new(vec![vec![dev]]).await;
 
 		let mut buf1k = set.alloc(2 * 512).await.unwrap();
 		assert_eq!(buf1k.get().len(), 2 * 512);

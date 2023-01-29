@@ -1,4 +1,18 @@
-use super::*;
+use {super::*, crate::dev};
+
+async fn load(devices: Vec<dev::MemDev>) -> Nros<dev::MemDev, StdResource> {
+	Nros::load(LoadConfig {
+		magic: *b"TESTTEST",
+		resource: StdResource::new(),
+		devices,
+		cache_size: 1 << 12,
+		key_password: KeyPassword::Key(&[0; 32]),
+		retrieve_key: &mut |_| unreachable!(),
+		allow_repair: true,
+	})
+	.await
+	.unwrap()
+}
 
 /// Check if an object store is correctly saved before unmounting.
 /// And also whether loading works.
@@ -17,9 +31,7 @@ fn write_remount_read() {
 
 	let s = block_on(async {
 		let devs = s.unmount().await.unwrap();
-		Nros::load(StdResource::new(), devs, 1 << 12, true)
-			.await
-			.unwrap()
+		load(devs).await
 	});
 
 	let bg = Background::default();
@@ -50,9 +62,7 @@ fn write_remount_write_read() {
 
 	let s = block_on(async {
 		let devs = s.unmount().await.unwrap();
-		Nros::load(StdResource::new(), devs, 1 << 12, true)
-			.await
-			.unwrap()
+		load(devs).await
 	});
 
 	let bg = Background::default();

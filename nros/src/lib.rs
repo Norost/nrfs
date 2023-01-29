@@ -37,22 +37,13 @@ macro_rules! raw {
 }
 
 macro_rules! n2e {
-	(@INTERNAL $op:ident :: $fn:ident $int:ident $name:ident) => {
-		impl core::ops::$op<$name> for $int {
-			type Output = $int;
-
-			fn $fn(self, rhs: $name) -> Self::Output {
-				self.$fn(rhs.to_raw())
-			}
-		}
-	};
 	{
 		$(#[doc = $doc:literal])*
 		[$name:ident]
 		$($v:literal $k:ident)*
 	} => {
 		$(#[doc = $doc])*
-		#[derive(Clone, Copy, Debug)]
+		#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 		pub enum $name {
 			$($k = $v,)*
 		}
@@ -69,28 +60,23 @@ macro_rules! n2e {
 				self as _
 			}
 		}
-
-		n2e!(@INTERNAL Shl::shl u64 $name);
-		n2e!(@INTERNAL Shr::shr u64 $name);
-		n2e!(@INTERNAL Shl::shl usize $name);
-		n2e!(@INTERNAL Shr::shr usize $name);
 	};
 }
 
 /// Tracing in debug mode only.
 macro_rules! trace {
-	(info $($arg:tt)*) => {
+	(info $($arg:tt)*) => {{
 		let f = #[no_coverage]|| if cfg!(feature = "trace") {
 			$crate::trace::print_debug("--> ", &format_args!($($arg)*));
 		};
 		f();
-	};
-	(final $($arg:tt)*) => {
+	}};
+	(final $($arg:tt)*) => {{
 		let f = #[no_coverage]|| if cfg!(feature = "trace") {
 			$crate::trace::print_debug("==> ", &format_args!($($arg)*));
 		};
 		f();
-	};
+	}};
 	($($arg:tt)*) => {
 		let f = #[no_coverage]|| if cfg!(feature = "trace") {
 			$crate::trace::print_debug("", &format_args!($($arg)*));
@@ -205,8 +191,13 @@ mod trace {
 }
 
 mod background;
+mod block_size;
 mod cache;
+mod cipher;
+mod config;
 mod header;
+mod key_derivation;
+mod object;
 mod record;
 pub mod resource;
 mod storage;
@@ -217,13 +208,23 @@ mod util;
 #[cfg(not(no_std))]
 pub use resource::StdResource;
 pub use {
+	block_size::BlockSize,
 	cache::{Statistics, Tree},
+	cipher::CipherType,
+	config::{KeyDeriver, KeyPassword, LoadConfig, NewConfig},
 	record::{Compression, MaxRecordSize},
 	resource::Resource,
-	storage::{dev, Dev, Store},
+	storage::{dev, Dev},
 };
 
-use {cache::Cache, core::fmt, record::Record, storage::DevSet};
+use {
+	cache::Cache,
+	cipher::{Cipher, HeaderCipher, RecordCipher},
+	core::fmt,
+	key_derivation::KeyDerivation,
+	record::Record,
+	storage::{DevSet, Store},
+};
 
 pub type Background<'a, D> = background::Background<'a, Result<(), Error<D>>>;
 
@@ -235,41 +236,28 @@ pub struct Nros<D: Dev, R: Resource> {
 
 impl<D: Dev, R: Resource> Nros<D, R> {
 	/// Create a new object store.
-	pub async fn new<M, C>(
-		resource: R,
-		mirrors: M,
-		block_size: BlockSize,
-		max_record_size: MaxRecordSize,
-		compression: Compression,
-		read_cache_size: usize,
-	) -> Result<Self, Error<D>>
-	where
-		M: IntoIterator<Item = C>,
-		C: IntoIterator<Item = D>,
-	{
-		let devs = DevSet::new(resource, mirrors, block_size, max_record_size, compression).await?;
-		Self::load_inner(devs, read_cache_size, true).await
+	pub async fn new(config: NewConfig<'_, D, R>) -> Result<Self, Error<D>> {
+		let cache_size = config.cache_size;
+		let devs = DevSet::new(config).await?;
+		Self::load_inner(devs, cache_size, true).await
 	}
 
 	/// Load an existing object store.
-	pub async fn load(
-		resource: R,
-		devices: Vec<D>,
-		read_cache_size: usize,
-		allow_repair: bool,
-	) -> Result<Self, Error<D>> {
-		let devs = DevSet::load(resource, devices, allow_repair).await?;
-		Self::load_inner(devs, read_cache_size, allow_repair).await
+	pub async fn load(config: LoadConfig<'_, D, R>) -> Result<Self, Error<D>> {
+		let cache_size = config.cache_size;
+		let allow_repair = config.allow_repair;
+		let devs = DevSet::load(config).await?;
+		Self::load_inner(devs, cache_size, allow_repair).await
 	}
 
 	/// Load an object store.
-	pub async fn load_inner(
+	async fn load_inner(
 		devices: DevSet<D, R>,
-		read_cache_size: usize,
+		cache_size: usize,
 		allow_repair: bool,
 	) -> Result<Self, Error<D>> {
 		let store = Store::new(devices, allow_repair).await?;
-		let store = Cache::new(store, read_cache_size);
+		let store = Cache::new(store, cache_size).await?;
 		Ok(Self { store })
 	}
 
@@ -387,38 +375,5 @@ where
 			Self::RecordUnpack(e) => f.debug_tuple("RecordUnpack").field(&e).finish(),
 			Self::NotEnoughSpace => f.debug_tuple("NotEnoughSpace").finish(),
 		}
-	}
-}
-
-n2e! {
-	[BlockSize]
-	9 B512
-	10 K1
-	11 K2
-	12 K4
-	13 K8
-	14 K16
-	15 K32
-	16 K64
-	17 K128
-	18 K256
-	19 K512
-	20 M1
-	21 M2
-	22 M4
-	23 M8
-	24 M16
-	25 M32
-	26 M64
-	27 M128
-	28 M256
-	29 M512
-	30 G1
-	31 G2
-}
-
-impl<D: Dev> From<!> for Error<D> {
-	fn from(x: !) -> Self {
-		x
 	}
 }

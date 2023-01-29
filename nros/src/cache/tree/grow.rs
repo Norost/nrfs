@@ -1,12 +1,12 @@
 use {
-	super::{Buf, Dev, Error, Key, Present, Record, Resource, Slot, Tree},
+	super::{Buf, Dev, Error, Key, Object, Present, Record, Resource, Slot, Tree},
 	crate::util,
 	core::mem,
 };
 
 impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// Grow record tree.
-	pub(super) async fn grow(&self, new_len: u64, &cur_root: &Record) -> Result<(), Error<D>> {
+	pub(super) async fn grow(&self, new_len: u64, &cur_object: &Object) -> Result<(), Error<D>> {
 		trace!("grow id {:#x}, new_len {}", self.id, new_len);
 		// There are two cases to consider when growing a record tree:
 		//
@@ -14,19 +14,19 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		//   Nothing to do then.
 		//
 		// * The depth changes.
-		//   *Move* the root record to a new record and zero out the root record entry.
-		//   The dirty new record will bubble up and eventually a new root entry is created.
+		//   *Move* the object record to a new record and zero out the object record entry.
+		//   The dirty new record will bubble up and eventually a new object entry is created.
 		//
 		// Steps:
 		// 1. Adjust levels array size to new_depth.
 		// 2. Propagate dirty counters up.
-		// 3. Insert parent right above current root record if depth changes.
+		// 3. Insert parent right above current object record if depth changes.
 		//    Do this without await!
-		// 4. Update root record.
+		// 4. Update object record.
 		//    If depth changes, make it a zero record.
-		//    Otherwise, copy cur_root.
+		//    Otherwise, copy cur_object.
 
-		let cur_len = u64::from(cur_root.total_length);
+		let cur_len = u64::from(cur_object.total_length);
 
 		debug_assert!(
 			cur_len < new_len,
@@ -36,7 +36,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		let cur_depth = super::depth(self.max_record_size(), cur_len);
 		let new_depth = super::depth(self.max_record_size(), new_len);
 
-		// The object is guaranteed to be in the cache since we have cur_root.
+		// The object is guaranteed to be in the cache since we have cur_object.
 		let mut data_ref = self.cache.data.borrow_mut();
 		let data = &mut *data_ref;
 		let Some(Slot::Present(obj)) = data.objects.get_mut(&self.id)
@@ -49,7 +49,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		obj.data.data = v.into();
 
 		// Check if the depth changed.
-		// If so we need to move the current root.
+		// If so we need to move the current object.
 		if cur_depth < new_depth && cur_depth > 0 {
 			// 2. Propagate dirty counters up.
 			// This simply involves inserting counters at 0 offsets.
@@ -71,25 +71,23 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				lvl.dirty_markers.entry(0).or_default().children.insert(0);
 			}
 
-			// 3. Insert parent right above current root record if depth changes.
+			// 3. Insert parent right above current object record if depth changes.
 			//    Do this without await!
 			let key = Key::new(0, self.id, cur_depth, 0);
 			let mut d = self.cache.resource().alloc();
 			d.resize(core::mem::size_of::<Record>(), 0);
-			d.get_mut().copy_from_slice(
-				Record { total_length: 0.into(), references: 0.into(), ..cur_root }.as_ref(),
-			);
+			d.get_mut().copy_from_slice(cur_object.root.as_ref());
 			util::trim_zeros_end(&mut d);
 			let refcount = data.lru.entry_add_noref(key, d.len());
 			let entry = Slot::Present(Present { data: d, refcount });
 			obj.add_entry(&mut data.lru, key.depth(), key.offset(), entry);
 
-			// 4. Update root record.
+			// 4. Update object record.
 			//    If depth changes, make it a zero record.
-			obj.data.set_root(&Record {
+			obj.data.set_object(&Object {
+				root: Default::default(),
 				total_length: new_len.into(),
-				references: cur_root.references,
-				..Default::default()
+				..cur_object
 			});
 
 			// We just added a record, so evict excess.
@@ -98,7 +96,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		} else {
 			// Just adjust length and presto
 			obj.data
-				.set_root(&Record { total_length: new_len.into(), ..obj.data.root() });
+				.set_object(&Object { total_length: new_len.into(), ..obj.data.object() });
 		}
 
 		Ok(())

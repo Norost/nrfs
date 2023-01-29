@@ -37,7 +37,7 @@ impl FileDev {
 		} else if end > self.block_count {
 			Err(FileDevError::OutOfRange)
 		} else {
-			let offset = lba << self.block_size;
+			let offset = lba << self.block_size.to_raw();
 			self.file
 				.borrow_mut()
 				.seek(SeekFrom::Start(offset))

@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = ["std"]
-std = []
+std = ["rand", "argon2/parallel"]
 parallel = ["rayon"]
 # Disallow writing over records allocated & freed in the same transacion.
 #
@@ -60,6 +60,22 @@ version = "1.1"
 [dependencies.xxhash-rust]
 version = "0.8"
 features = ["xxh3"]
+
+[dependencies.chacha20]
+version = "0.9"
+
+[dependencies.poly1305]
+version = "0.8"
+
+[dependencies.generic-array]
+version = "*"
+
+[dependencies.argon2]
+version = "0.4"
+
+[dependencies.rand]
+version = "0.8"
+optional = true
 
 [dependencies.futures-channel]
 version = "0.3"

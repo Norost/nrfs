@@ -16,7 +16,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			"fetch {:?} <- ({}, {})",
 			busy.borrow_mut().key,
 			record.lba,
-			record.length
+			record.length()
 		);
 
 		let entry = self.cache.store.read(record).await?;

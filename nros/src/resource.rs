@@ -24,6 +24,9 @@ pub trait Resource {
 	where
 		F: (FnOnce() -> R) + Send + 'static,
 		R: Send + 'static;
+
+	/// Get data from a cryptographically secure random source.
+	fn crng_fill(&self, buf: &mut [u8]);
 }
 
 /// Type representing a region of memory.
@@ -63,6 +66,7 @@ mod std {
 			pin::Pin,
 			task::{Context, Poll},
 		},
+		rand::RngCore,
 	};
 
 	/// [`Resource`] for use with `std` applications.
@@ -104,6 +108,15 @@ mod std {
 			#[cfg(not(feature = "parallel"))]
 			{
 				RunTask { result: core::future::ready(f()) }
+			}
+		}
+
+		fn crng_fill(&self, buf: &mut [u8]) {
+			if cfg!(any(test, fuzzing)) {
+				// For determinism when testing.
+				buf.fill(0);
+			} else {
+				rand::thread_rng().fill_bytes(buf);
 			}
 		}
 	}

@@ -91,15 +91,15 @@ A header is placed at the start and end of a volume.
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
   |    0 |                Magic string ("NRFSNRFS")              |
-  +------+-----------------------------------------+------+------+
-  |    8 |                                         | KDrv | H+E  |
-  +------+-----------------------------------------+------+------+
-  |   16 |                                                       |
+  +------+------------------------------------------------+------+
+  |    8 |                    Key derivation              | Ciph |
+  +------+------------------------------------------------+------+
+  |   16 |                    Key derivation                     |
+  +------+-------------------------------------------------------+
+  |   24 |                         Nonce                         |
+  +------+-------------------------------------------------------+
+  |   32 |                                                       |
   +------+                          UID                          |
-  |   24 |                                                       |
-  +------+-------------------------------------------------------+
-  |   32 |                         Nonce                         |
-  +------+-------------------------------------------------------+
   |   40 |                                                       |
   +------+-------------------------------------------------------+
   |   48 |                                                       |
@@ -115,9 +115,9 @@ A header is placed at the start and end of a volume.
   |   88 |                      Block count                      |
   +------+-------------------------------------------------------+
   |   96 |                                                       |
-  +------+                          Key                          |
+  +------+                                                       |
   |  104 |                                                       |
-  +------+-------------------------------------------------------+
+  +------+                          Key                          |
   |  112 |                                                       |
   +------+                                                       |
   |  120 |                                                       |
@@ -157,12 +157,11 @@ A header is placed at the start and end of a volume.
 
 * Magic string: Must always be "NRFSNRFS"
 
-* H+E: Hash and encryption algorithms to use to decrypt the header
-  and records.
+* Ciph: Cipher algorithm to use to decrypt the header and records.
 
   All header data from byte 64 to the end of the block is encrypted.
 
-.. table:: Hash and encryption algorithms
+.. table:: Cipher algorithms
 
   +----+----------+------------+
   | ID | Hash     | Encryption |
@@ -172,18 +171,39 @@ A header is placed at the start and end of a volume.
   |  1 | Poly1305 | ChaCha8    |
   +----+----------+------------+
 
-* KDrv: The key derivation function to use to get the key necessary to decrypt
-  the header.
+* Key derivation: The key derivation function to use to get the key necessary
+  to decrypt the header.
 
-.. table:: Key derivation algorithms
+  Assuming the byte range is between 1 and 15, then byte 1 is the ID.
 
-  +----+-------------+
-  | ID | Source      |
-  +====+=============+
-  |  0 | None        |
-  +----+-------------+
-  |  1 | Argon2id    |
-  +----+-------------+
+    .. table:: None
+
+      +------+------+------+------+------+------+------+------+------+
+      | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+      +======+======+======+======+======+======+======+======+======+
+      |    8 |                                         |  ID  | ...  |
+      +------+-----------------------------------------+------+------+
+      |   16 |                                                       |
+      +------+-------------------------------------------------------+
+
+    * ID: is 0
+
+    .. table:: Argon2id
+
+      +------+------+------+------+------+------+------+------+------+
+      | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+      +======+======+======+======+======+======+======+======+======+
+      |    8 |             M             | Par. |      |  ID  | ...  |
+      +------+---------------------------+------+------+------+------+
+      |   16 |                           |             T             |
+      +------+-------------------------------------------------------+
+
+    * ID: is 1
+    * P: Parallelism
+    * M: Memory
+    * T: Iterations
+
+    UID is used as the salt.
 
 * UID: Unique filesystem identifier.
 
@@ -220,14 +240,14 @@ A header is placed at the start and end of a volume.
     It simplifies loading code & prevents devices from being shuffled between
     chains on each mount.
 
-  * Block length: The length of a single block in bytes.
+  * Block size: The length of a single block in bytes.
     Affects LBA addressing.
 
-    The block length is calculated as `2^(x + 9)`.
+    The block size is calculated as `2^(x + 9)`.
 
-  * Record length: The maximum length of a record in bytes.
+  * Maximum record size: The maximum length of a record in bytes.
 
-    The record length is calculated as `2^(x + 9)`.
+    The maximum record size is calculated as `2^(x + 9)`.
 
   * Object list depth: The depth of the object list tree.
 
@@ -244,7 +264,7 @@ A header is placed at the start and end of a volume.
   +======+======+======+======+======+======+======+======+======+
   |    0 | Mirr. index | Mirr. count |          Version          |
   +------+-------------+-------------+---------------------------+
-  |    8 |       Record length       |       Block length        |
+  |    8 |    Maximum record size    |        Block size         |
   +------+---------------------------+---------------------------+
   |   16 |     Compression level     |     Object list depth     |
   +------+---------------------------+---------------------------+
@@ -367,7 +387,14 @@ order:
 
 3. Hashing
 
-   Like encryption, every block must be included in its entirety.
+   Like encryption, every block must be included in its entirety
+   *except* when using XXH3, as it is not meant for cryptographic purposes.
+
+   In the case of XXH3, the data length is rounded up to the nearest multiple
+   of 64 bytes [#]_.
+
+   .. [#] This should allow the compiler to elide the code path to handle
+   the trailing, sub-64-byte block.
 
 
 Record tree

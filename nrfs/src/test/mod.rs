@@ -36,30 +36,34 @@ fn new() -> Nrfs<MemDev> {
 }
 
 fn new_cap(size: usize, block_size: BlockSize, max_record_size: MaxRecordSize) -> Nrfs<MemDev> {
-	block_on(Nrfs::new(
-		[[MemDev::new(size, block_size)]],
+	block_on(Nrfs::new(NewConfig {
+		key_deriver: KeyDeriver::None { key: &[0; 32] },
+		cipher: CipherType::NoneXxh3,
+		mirrors: vec![vec![MemDev::new(size, block_size)]],
 		block_size,
 		max_record_size,
-		&DirOptions::new(&[0; 16]),
-		Compression::None,
-		1 << 12,
-	))
+		compression: Compression::None,
+		cache_size: 4096,
+		dir: DirOptions::new(&[0; 16]),
+	}))
 	.unwrap()
 }
 
 /// New filesystem with extensions.
 fn new_ext() -> Nrfs<MemDev> {
-	block_on(Nrfs::new(
-		[[MemDev::new(1 << 10, BlockSize::K1)]],
-		BlockSize::K1,
-		MaxRecordSize::K1,
-		&DirOptions {
+	block_on(Nrfs::new(NewConfig {
+		key_deriver: KeyDeriver::None { key: &[0; 32] },
+		cipher: CipherType::NoneXxh3,
+		mirrors: vec![vec![MemDev::new(1 << 10, BlockSize::K1)]],
+		block_size: BlockSize::K1,
+		max_record_size: MaxRecordSize::K1,
+		dir: DirOptions {
 			extensions: *EnableExtensions::default().add_unix().add_mtime(),
 			..DirOptions::new(&[0; 16])
 		},
-		Compression::None,
-		4096,
-	))
+		compression: Compression::None,
+		cache_size: 4096,
+	}))
 	.unwrap()
 }
 

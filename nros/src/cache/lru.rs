@@ -58,9 +58,7 @@ impl Lru {
 	/// If the reference count is [`RefCount::NoRef`].
 	fn decrease_refcount(&mut self, refcount: &mut RefCount, key: Key, len: usize, amount: usize) {
 		debug_assert!(
-			key.flags() & Key::FLAG_OBJECT == 0
-				|| key.id() == OBJECT_LIST_ID
-				|| key.id() & ID_PSEUDO == 0,
+			key.flags() & Key::FLAG_OBJECT == 0 || key.id() & ID_PSEUDO == 0,
 			"pseudo-object don't belong in the LRU (id: {:#x})",
 			key.id(),
 		);

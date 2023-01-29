@@ -1,9 +1,14 @@
 use {
 	super::{Allocator, Buf, Dev},
-	crate::{header::Header, BlockSize, Compression, Error, MaxRecordSize, Record, Resource},
+	crate::{
+		cipher::{Cipher, HeaderCipher},
+		header::{Configuration, Header, MirrorCount, MirrorIndex},
+		key_derivation, BlockSize, CipherType, Compression, Error, KeyDerivation, KeyDeriver,
+		LoadConfig, MaxRecordSize, NewConfig, Record, Resource,
+	},
 	alloc::sync::Arc,
-	core::{cell::Cell, future, mem},
-	futures_util::stream::{FuturesUnordered, StreamExt, TryStreamExt},
+	core::{cell::Cell, fmt, future, mem},
+	futures_util::stream::{FuturesOrdered, FuturesUnordered, StreamExt, TryStreamExt},
 };
 
 /// A single device with some extra information.
@@ -18,8 +23,7 @@ struct Node<D> {
 }
 
 /// Wrapper around a set of devices.
-#[derive(Debug)]
-pub struct DevSet<D: Dev, R: Resource> {
+pub(crate) struct DevSet<D: Dev, R: Resource> {
 	/// The devices and their respective block counts.
 	///
 	/// It is an array of mirrors, which in turns represents a chain of devices.
@@ -35,11 +39,26 @@ pub struct DevSet<D: Dev, R: Resource> {
 	/// The unique identifier of this filesystem.
 	uid: [u8; 16],
 
-	pub allocation_log: Cell<Record>,
-	pub object_list: Cell<Record>,
+	pub allocation_log_head: Cell<Record>,
+
+	pub object_list_root: Cell<Record>,
+	pub object_bitmap_root: Cell<Record>,
+	pub object_list_depth: Cell<u8>,
 
 	/// Resources for allocation & parallel processing.
 	pub resource: Arc<R>,
+
+	/// Magic value to copy to the header.
+	magic: [u8; 8],
+
+	/// Key to encrypt the header with.
+	header_key: Cell<[u8; 32]>,
+	key_derivation: Cell<KeyDerivation>,
+
+	cipher: CipherType,
+	nonce: Cell<u64>,
+
+	key: [u8; 32],
 }
 
 impl<D: Dev, R: Resource> DevSet<D, R> {
@@ -56,19 +75,10 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 	/// If any chain is empty.
 	///
 	/// If any device has no blocks.
-	pub async fn new<M, C>(
-		resource: R,
-		mirrors: M,
-		block_size: BlockSize,
-		max_record_size: MaxRecordSize,
-		compression: Compression,
-	) -> Result<Self, Error<D>>
-	where
-		M: IntoIterator<Item = C>,
-		C: IntoIterator<Item = D>,
-	{
+	pub async fn new(config: NewConfig<'_, D, R>) -> Result<Self, Error<D>> {
 		// Collect devices into a convenient format.
-		let mut devices = mirrors
+		let mut devices = config
+			.mirrors
 			.into_iter()
 			.map(|chain| {
 				chain
@@ -78,6 +88,9 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			})
 			.collect::<Box<_>>();
 
+		let block_size = config.block_size.to_raw();
+		let max_record_size = config.max_record_size.to_raw();
+
 		assert!(devices.iter().all(|c| !c.is_empty()), "empty chain");
 		// Require that devices can contain a full-sized record to simplify
 		// read & write operations as well as ensure some sanity in general.
@@ -85,8 +98,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			devices
 				.iter()
 				.flat_map(|c| c.iter())
-				.all(|d| d.dev.block_count()
-					>= 2 + (1 << (max_record_size.to_raw() - block_size.to_raw()))),
+				.all(|d| d.dev.block_count() >= 2 + (1 << (max_record_size - block_size))),
 			"device cannot contain maximum size record & headers"
 		);
 
@@ -95,7 +107,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			devices
 				.iter()
 				.flat_map(|c| c.iter())
-				.all(|d| d.dev.block_size().to_raw() == block_size.to_raw()),
+				.all(|d| d.dev.block_size().to_raw() == block_size),
 			"todo: support mismatched block sizes"
 		);
 
@@ -115,23 +127,54 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			}
 		}
 
+		// Generate key & UID.
+		let mut buf = [0; 48];
+		config.resource.crng_fill(&mut buf);
+		let (mut key, mut uid) = ([0; 32], [0; 16]);
+		key.copy_from_slice(&buf[..32]);
+		uid.copy_from_slice(&buf[32..]);
+
+		// Get or derive key for header.
+		let (header_key, key_derivation) = match config.key_deriver {
+			KeyDeriver::None { key } => (*key, KeyDerivation::None),
+			KeyDeriver::Argon2id { password, m, t, p } => {
+				let kdf = KeyDerivation::Argon2id { m, t, p };
+				(key_derivation::argon2id(password, &uid, m, t, p), kdf)
+			}
+		};
+
 		Ok(Self {
 			devices,
-			block_size,
-			max_record_size,
-			compression,
+			block_size: config.block_size,
+			max_record_size: config.max_record_size,
+			compression: config.compression,
 			block_count,
-			uid: *b" TODO TODO TODO ",
-			allocation_log: Default::default(),
-			object_list: Default::default(),
-			resource: resource.into(),
+
+			magic: config.magic,
+			uid,
+
+			allocation_log_head: Default::default(),
+
+			object_list_root: Default::default(),
+			object_bitmap_root: Default::default(),
+			object_list_depth: Default::default(),
+
+			cipher: config.cipher,
+
+			header_key: header_key.into(),
+			key_derivation: key_derivation.into(),
+
+			key,
+			nonce: Default::default(),
+
+			resource: config.resource.into(),
 		})
 	}
 
 	/// Load an existing device set.
 	///
 	/// `read_only` prevents fixing any headers that may be broken.
-	pub async fn load(resource: R, devices: Vec<D>, read_only: bool) -> Result<Self, Error<D>> {
+	pub async fn load(config: LoadConfig<'_, D, R>) -> Result<Self, Error<D>> {
 		// We're looking to retrieve two types of data from the devices:
 		//
 		// 1. Global info that is shared among all devices.
@@ -140,84 +183,77 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		// For global info any valid header from any device will do.
 		// For per-device info we need any valid header per device.
 
+		let mut header_key = None;
+
 		// Collect both start & end headers.
-		let headers = devices
+		let headers = config
+			.devices
 			.iter()
-			.map(|d| {
+			.flat_map(|d| {
 				let end = d.block_count() - 1;
-				let block_size = 1usize << d.block_size();
-				futures_util::future::join(d.read(0, block_size), d.read(end, block_size))
+				let block_size = 1 << d.block_size().to_raw();
+				[d.read(0, block_size), d.read(end, block_size)]
 			})
-			.collect::<FuturesUnordered<_>>()
+			.collect::<FuturesOrdered<_>>()
+			.map(|buf| {
+				// Try to decrypt header
+				let Ok(mut buf) = buf else { return None };
+				let cipher = Header::get_cipher(buf.get()).ok()?;
+				let kdf = Header::get_key_derivation(buf.get()).ok()?;
+				let header_key = header_key.get_or_insert_with(|| match (kdf, cipher) {
+					(_, CipherType::NoneXxh3) => [0; 32],
+					(KeyDerivation::None, _) => (config.retrieve_key)(false)
+						.try_into()
+						.expect("key is not 16 bytes"),
+					(KeyDerivation::Argon2id { p, t, m }, _) => {
+						let pwd = (config.retrieve_key)(true);
+						key_derivation::argon2id(&pwd, &Header::get_uid(buf.get()), m, t, p)
+					}
+				});
+				let cipher = HeaderCipher {
+					cipher: Cipher {
+						key: *header_key,
+						nonce: Header::get_nonce(buf.get()),
+						ty: Header::get_cipher(buf.get()).ok()?,
+					},
+				};
+				Header::decrypt(buf.get_mut(), cipher).ok()?;
+				Some(buf)
+			})
 			.collect::<Vec<_>>()
 			.await;
 
-		let has_broken_headers = Cell::new(false);
-		let mut uid = None;
-		let mut uid_mismatch = false;
+		let has_broken_headers = headers.iter().any(|b| b.is_none());
+		let mut header = None;
 
-		// 1. Global info that is shared among all devices.
-		//
-		// Prefer start headers as those are more likely to be up to date than end headers.
-		let header = headers
-			.iter()
-			.map(|(h, _)| h)
-			.chain(headers.iter().map(|(_, h)| h))
-			.flat_map(|buf| {
-				has_broken_headers.update(|x| x | buf.as_ref().is_err());
-				buf.as_ref().ok()
-			})
-			.find_map(|buf| {
-				let mut header = Header::default();
-				header
-					.as_mut()
-					.copy_from_slice(&buf.get()[..mem::size_of::<Header>()]);
-
-				let valid = header.verify_xxh3();
-				has_broken_headers.update(|x| x | !valid);
-
-				uid_mismatch |= *uid.get_or_insert(header.uid) != header.uid;
-
-				valid.then_some(header)
-			})
-			.unwrap_or_else(|| todo!("no valid headers"));
-
-		if uid_mismatch {
-			todo!("return error when dealing with mismatched UIDs");
-		}
+		// FIXME check UIDs
 
 		// Build mirrors
-		let mut mirrors = (0..u8::from(header.mirror_count))
-			.map(|_| Vec::new())
-			.collect::<Vec<_>>();
-		for (i, bufs) in headers.iter().enumerate() {
-			// Use any valid header.
-			let get = |buf: &[u8]| {
-				let mut header = Header::default();
-				header
-					.as_mut()
-					.copy_from_slice(&buf[..mem::size_of::<Header>()]);
-				header
-			};
-			let header = match bufs {
-				(Ok(buf), _) if get(buf.get()).verify_xxh3() => get(buf.get()),
-				(_, Ok(buf)) if get(buf.get()).verify_xxh3() => get(buf.get()),
-				(Ok(_), _) | (_, Ok(_)) => todo!("no header with valid xxh3"),
-				(Err(_), Err(_)) => todo!("one device failed, continue with other chains"),
-			};
+		let mut mirrors = vec![vec![]; 4];
+		for (i, bufs) in headers.chunks(2).enumerate() {
+			let [buf_a, buf_b] = bufs else { unreachable!() };
+			let buf = buf_a.as_ref().or(buf_b.as_ref()).expect("no valid header");
+
+			let mut hdr = Header::default();
+			hdr.as_mut()
+				.copy_from_slice(&buf.get()[..mem::size_of::<Header>()]);
 
 			// Add to mirror.
 			mirrors
-				.get_mut(usize::from(u8::from(header.mirror_index)))
+				.get_mut(usize::from(hdr.configuration.mirror_index().to_raw()))
 				.expect("todo: invalid mirror index")
-				.push((
-					i,
-					u64::from(header.lba_offset),
-					u64::from(header.block_count),
-				))
+				.push((i, u64::from(hdr.lba_offset), u64::from(hdr.block_count)));
+
+			header.get_or_insert(hdr);
 		}
+		let header = header.expect("no header");
+		let header_key = header_key.expect("no header key");
 
 		drop(headers);
+
+		let mirc = header.configuration.mirror_count().to_raw();
+		let rem_empty = mirrors.drain(usize::from(mirc)..).all(|c| c.is_empty());
+		assert!(rem_empty);
 
 		// Sort each device and check for gaps.
 		for chain in mirrors.iter_mut() {
@@ -226,7 +262,11 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		}
 
 		// TODO avoid conversion to Vec<Option<_>>
-		let mut devices = devices.into_iter().map(|d| Some(d)).collect::<Vec<_>>();
+		let mut devices = config
+			.devices
+			.into_iter()
+			.map(|d| Some(d))
+			.collect::<Vec<_>>();
 
 		// Collect in order.
 		let devices = mirrors
@@ -243,23 +283,35 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			})
 			.collect();
 
+		let hc = &header.configuration;
+
 		let s = Self {
 			devices,
 
-			block_size: BlockSize::from_raw(header.block_length_p2).expect("todo"),
-			max_record_size: MaxRecordSize::from_raw(header.max_record_length_p2).expect("todo"),
-			compression: Compression::from_raw(header.compression).expect("todo"),
+			block_size: hc.block_size(),
+			max_record_size: hc.max_record_size(),
+			compression: hc.compression_algorithm().unwrap(),
 			uid: header.uid,
 			block_count: header.total_block_count.into(),
 
-			object_list: header.object_list.into(),
-			allocation_log: header.allocation_log.into(),
+			object_list_root: header.object_list_root.into(),
+			object_bitmap_root: header.object_bitmap_root.into(),
+			allocation_log_head: header.allocation_log_head.into(),
 
-			resource: resource.into(),
+			cipher: header.cipher().unwrap(),
+			header_key: header_key.into(),
+			key: header.key,
+			key_derivation: header.key_derivation().unwrap().into(),
+			object_list_depth: hc.object_list_depth().into(),
+
+			magic: header.magic,
+			nonce: Cell::new(header.nonce.into()),
+
+			resource: config.resource.into(),
 		};
 
 		// If any headers are broken, fix them now.
-		if !read_only && has_broken_headers.get() {
+		if config.allow_repair && has_broken_headers {
 			s.save_headers().await?;
 		}
 
@@ -298,8 +350,9 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.iter()
 			.enumerate()
 			.map(|(i, chain)| {
+				let i = index_to_miri(i);
 				chain.iter().map(move |node| async move {
-					let buf = self.create_header(i.try_into().unwrap(), node).await?;
+					let buf = self.create_header(i, node).await?;
 					let b = buf.clone();
 					save_header(false, node, b).await?;
 					Ok((node, buf))
@@ -341,11 +394,12 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		blacklist: &Set256,
 	) -> Result<Option<(SetBuf<D>, u8)>, (Error<D>, u8)> {
 		assert!(
-			size % (1usize << self.block_size()) == 0,
+			size % (1 << self.block_size().to_raw()) == 0,
 			"data len isn't a multiple of block size"
 		);
 
-		let lba_end = lba.saturating_add(u64::try_from(size >> self.block_size()).unwrap());
+		let lba_end =
+			lba.saturating_add(u64::try_from(size >> self.block_size().to_raw()).unwrap());
 		assert!(lba_end <= self.block_count, "read is out of bounds");
 
 		// TODO balance loads
@@ -378,8 +432,9 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			} else {
 				// We need to split - aw
 				// Figure out midpoint to split.
-				let mid =
-					size - usize::try_from(lba_end - node_block_end << self.block_size()).unwrap();
+				let mid = size
+					- usize::try_from(lba_end - node_block_end << self.block_size().to_raw())
+						.unwrap();
 				// Allocate two buffers and read into each.
 				let (buf_l, buf_r, mut buf) = futures_util::try_join!(
 					node.dev.read(node_lba, mid),
@@ -416,12 +471,12 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		whitelist: Set256,
 	) -> Result<(), Error<D>> {
 		assert!(
-			data.get().len() % (1usize << self.block_size()) == 0,
+			data.get().len() % (1 << self.block_size().to_raw()) == 0,
 			"data len isn't a multiple of block size"
 		);
 
-		let lba_end =
-			lba.saturating_add(u64::try_from(data.get().len() >> self.block_size()).unwrap());
+		let lba_end = lba
+			.saturating_add(u64::try_from(data.get().len() >> self.block_size().to_raw()).unwrap());
 		assert!(lba_end <= self.block_count, "write is out of bounds");
 
 		// Write to all mirrors
@@ -452,7 +507,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 						let d = data.get();
 						// Figure out midpoint to split.
 						let mid = d.len()
-							- usize::try_from(lba_end - node_lba_end << self.block_size()).unwrap();
+							- usize::try_from(lba_end - node_lba_end << self.block_size().to_raw())
+								.unwrap();
 						// Allocate two buffers, copy halves to each and perform two writes.
 						async fn f<D: Dev>(
 							node: &Node<D>,
@@ -480,36 +536,52 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 	/// Create a header for writing to a device.
 	async fn create_header(
 		&self,
-		chain: u8,
+		chain: MirrorIndex,
 		node: &Node<D>,
 	) -> Result<<D::Allocator as Allocator>::Buf, D::Error> {
-		let mut header = Header {
-			compression: self.compression.to_raw(),
-			block_length_p2: self.block_size.to_raw(),
-			max_record_length_p2: self.max_record_size.to_raw(),
-			mirror_count: self.devices.len().try_into().unwrap(),
-			mirror_index: chain,
-
-			uid: self.uid,
-
-			lba_offset: node.block_offset.into(),
-			block_count: node.block_count.into(),
-			total_block_count: self.block_count.into(),
-
-			object_list: self.object_list.get(),
-
-			allocation_log: self.allocation_log.get(),
-
-			..Default::default()
-		};
-		header.update_xxh3();
-
 		let mut buf = node
 			.dev
 			.allocator()
 			.alloc(1 << self.block_size.to_raw())
 			.await?;
-		buf.get_mut()[..header.as_ref().len()].copy_from_slice(header.as_ref());
+
+		let mirc = u8::try_from(self.devices.len())
+			.ok()
+			.and_then(MirrorCount::from_raw)
+			.expect("too many mirrors");
+
+		let mut conf = Configuration::default();
+		conf.set_version();
+		conf.set_mirror_count(mirc);
+		conf.set_mirror_index(chain);
+		conf.set_block_size(self.block_size());
+		conf.set_max_record_size(self.max_record_size());
+		conf.set_object_list_depth(self.object_list_depth.get());
+		conf.set_compression_level(0);
+		conf.set_compression_algorithm(self.compression());
+		let mut header = Header {
+			magic: self.magic,
+			cipher: self.cipher.to_raw(),
+			key_derivation: self.key_derivation.get().to_raw(),
+			uid: self.uid,
+			nonce: self.nonce.get().into(),
+			hash: [0; 16],
+
+			configuration: conf,
+			lba_offset: node.block_offset.into(),
+			block_count: node.block_count.into(),
+			total_block_count: self.block_count.into(),
+			key: self.key,
+
+			object_list_root: self.object_list_root.get(),
+			object_bitmap_root: self.object_bitmap_root.get(),
+			allocation_log_head: self.allocation_log_head.get(),
+		};
+
+		let cipher = self.new_header_cipher();
+		let nonce = header.encrypt(buf.get_mut(), cipher);
+		self.nonce.set(nonce);
+
 		Ok(buf)
 	}
 
@@ -555,6 +627,38 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 	/// The total amount of blocks addressable by this device set.
 	pub fn block_count(&self) -> u64 {
 		self.block_count
+	}
+
+	/// Construct a cipher.
+	///
+	/// If using [`CipherType::NoneXxh3`], the nonce will always be 0 to improve compression
+	/// efficiency.
+	pub fn new_cipher(&self) -> Cipher {
+		let nonce = match self.cipher {
+			CipherType::NoneXxh3 => 0,
+			_ => self.nonce.update(|x| x + 1),
+		};
+		Cipher { key: self.key, nonce, ty: self.cipher }
+	}
+
+	/// Construct a cipher.
+	///
+	/// # Warning
+	///
+	/// **Only use this cipher for decrypting data!**
+	pub fn cipher_with_nonce(&self, nonce: u64) -> Cipher {
+		Cipher { key: self.key, nonce, ty: self.cipher }
+	}
+
+	/// Construct a cipher for encrypting the header.
+	fn new_header_cipher(&self) -> HeaderCipher {
+		HeaderCipher {
+			cipher: Cipher {
+				key: self.header_key.get(),
+				nonce: self.nonce.update(|x| x + 1),
+				ty: self.cipher,
+			},
+		}
 	}
 }
 
@@ -609,5 +713,18 @@ impl Set256 {
 			self.1 &= !(1 << bit);
 			self.1 |= u128::from(value) << bit;
 		}
+	}
+}
+
+fn index_to_miri(i: usize) -> MirrorIndex {
+	u8::try_from(i)
+		.ok()
+		.and_then(MirrorIndex::from_raw)
+		.expect("mirror index out of range")
+}
+
+impl<D: Dev, R: Resource> fmt::Debug for DevSet<D, R> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(DevSet)).finish_non_exhaustive()
 	}
 }

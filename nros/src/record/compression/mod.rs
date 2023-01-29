@@ -32,7 +32,7 @@ impl Compression {
 		buf: &mut [u8],
 		block_size: BlockSize,
 	) -> (Self, u32) {
-		if buf.len() <= 1usize << block_size {
+		if buf.len() <= 1 << block_size.to_raw() {
 			// It isn't worth compressing this record as it'll take up a full block anyways.
 			return (Self::None, none::compress(data, buf));
 		}

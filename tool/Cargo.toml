@@ -5,9 +5,10 @@ edition = "2021"
 
 [features]
 trace = ["nrfs/trace"]
+parallel = ["nrfs/parallel"]
 
 [dependencies.clap]
-version = "3.2"
+version = "4.1"
 features = ["derive"]
 
 [dependencies.chrono]
@@ -15,10 +16,12 @@ version = "0.4"
 
 [dependencies.nrfs]
 path = "../nrfs"
-#features = ["parallel"]
 
 [dependencies.futures-executor]
 version = "0.3"
 
 [dependencies.futures-util]
 version = "0.3"
+
+[dependencies.rpassword]
+version = "7.2"
