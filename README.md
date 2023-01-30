@@ -4,6 +4,11 @@
 
 &check; = implemented, &cross; = planned
 
+* &check; Maximum volume size of `2^64 - 1` blocks
+  * With a maximum block size of `2^24`, maximum volume size is `2^88 - 2^24`
+    bytes
+* &check; Maximum object size of `2^64 - 1` bytes
+* &check; Maximum object count of `2^58`
 * &check; Error detection
 * &check; Error correction (with mirrors only!)
 * &check; Compression
