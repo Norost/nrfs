@@ -258,7 +258,7 @@ impl<'a, 'b, D: Dev> File<'a, 'b, D> {
 				dir.dealloc_heap(offt, u64::from(length)).await?;
 
 				// Determine whether we should keep the data embedded.
-				let bs = 1u64 << self.fs.block_size();
+				let bs = 1u64 << self.fs.block_size().to_raw();
 				let new_inner = if end <= u64::from(u16::MAX).min(bs * EMBED_FACTOR) {
 					let o = dir.alloc_heap(end).await?;
 					// TODO avoid redundant tail write
@@ -330,7 +330,7 @@ impl<'a, 'b, D: Dev> File<'a, 'b, D> {
 				dir.dealloc_heap(offt, u64::from(length)).await?;
 
 				// Determine whether we should keep the data embedded.
-				let bs = 1u64 << self.fs.block_size();
+				let bs = 1u64 << self.fs.block_size().to_raw();
 				let new_inner = if new_len <= u64::from(u16::MAX).min(bs * EMBED_FACTOR) {
 					// Keep it embedded, write to
 					let o = dir.alloc_heap(new_len).await?;
@@ -500,8 +500,8 @@ impl<'a, 'b, D: Dev> FileRef<'a, 'b, D> {
 				.directories
 				.get_mut(&data.header.parent_id)
 				.expect("parent dir is not loaded");
-			let _r = dir.children.remove(&data.header.parent_index);
-			debug_assert!(matches!(_r, Some(Child::File(i)) if i == idx));
+			let r = dir.children.remove(&data.header.parent_index);
+			debug_assert!(matches!(r, Some(Child::File(i)) if i == idx));
 
 			// Remove filedata.
 			let data = fsr.files.remove(idx).expect("filedata should be present");

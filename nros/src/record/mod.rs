@@ -1,24 +1,21 @@
 mod compression;
 
 use {
-	crate::{resource::Buf, BlockSize, Resource},
+	crate::{BlockSize, Cipher, RecordCipher, Resource},
 	core::fmt,
-	endian::{u16le, u32le, u64le},
-	xxhash_rust::xxh3::xxh3_64,
+	endian::u64le,
 };
 
 pub use compression::Compression;
 
 #[derive(Clone, Copy, Default, PartialEq)]
-#[repr(C, align(32))]
-pub struct Record {
+#[repr(C)]
+pub(crate) struct Record {
 	pub lba: u64le,
-	pub length: u32le,
-	pub compression: u8,
-	pub _reserved: u8,
-	pub references: u16le,
-	pub xxh3: u64le,
-	pub total_length: u64le,
+	nonce: u64le,
+	length: [u8; 3],
+	compression: u8,
+	hash: [u8; 12],
 }
 
 raw!(Record);
@@ -29,41 +26,78 @@ impl Record {
 		buf: &mut [u8],
 		compression: Compression,
 		block_size: BlockSize,
+		cipher: Cipher,
 	) -> Record {
+		debug_assert!(
+			!data.is_empty(),
+			"Record::pack should not be called with empty data"
+		);
+
 		let (compression, length) = compression.compress(data, buf, block_size);
+
+		// Ensure we only encrypt *and hash* the blocks that contain the compressed data.
+		let buf = &mut buf[..block_size.round_up(length.try_into().unwrap())];
+		let (nonce, hash) = RecordCipher { cipher, real_len: length }.encrypt(buf);
+
+		let [length @ .., d] = length.to_le_bytes();
+		debug_assert_eq!(d, 0, "length does not fit in 24 bits");
+
 		Self {
-			length: length.into(),
+			lba: u64::MAX.into(),
+			nonce: nonce.into(),
+			length,
 			compression: compression.to_raw(),
-			// Zero out hash to allow zero optimization ("sparse objects")
-			xxh3: if buf.is_empty() {
-				0
-			} else {
-				xxh3_64(&buf[..length as _])
-			}
-			.into(),
-			..Default::default()
+			hash,
 		}
 	}
 
 	pub fn unpack<R: Resource>(
 		&self,
-		data: &[u8],
-		buf: &mut R::Buf,
+		data: &mut [u8],
+		resource: &R,
 		max_record_size: MaxRecordSize,
-	) -> Result<(), UnpackError> {
-		debug_assert_eq!(data.len() as u32, self.length);
-		if data.len() > 1 << max_record_size.to_raw() {
-			return Err(UnpackError::ExceedsRecordSize);
+		cipher: Cipher,
+	) -> Result<R::Buf, UnpackError> {
+		// TODO add a cipher type that only allows decryption
+		// and takes a nonce as argument.
+		debug_assert_eq!(self.nonce(), cipher.nonce, "nonce mismatch");
+
+		let mut buf = resource.alloc();
+
+		if data.is_empty() {
+			debug_assert_eq!(self.length(), 0, "data empty but record length is nonzero");
+			return Ok(buf);
 		}
-		if !data.is_empty() && xxh3_64(data) != self.xxh3 {
-			return Err(UnpackError::Xxh3Mismatch);
-		}
-		buf.resize(0, 0);
-		Compression::from_raw(self.compression)
-			.ok_or(UnpackError::UnknownCompressionAlgorithm)?
-			.decompress::<R>(data, buf, 1 << max_record_size.to_raw())
+
+		RecordCipher { cipher, real_len: self.length_u32() }
+			.decrypt(&self.hash, data)
+			.map_err(|()| UnpackError::HashMismatch)?;
+
+		let data = &data[..self.length()];
+		self.compression()
+			.map_err(|_| UnpackError::UnknownCompressionAlgorithm)?
+			.decompress::<R>(data, &mut buf, 1 << max_record_size.to_raw())
 			.then_some(())
-			.ok_or(UnpackError::ExceedsRecordSize)
+			.ok_or(UnpackError::ExceedsRecordSize)?;
+
+		Ok(buf)
+	}
+
+	fn length_u32(&self) -> u32 {
+		let [a, b, c] = self.length;
+		u32::from_le_bytes([a, b, c, 0])
+	}
+
+	pub fn length(&self) -> usize {
+		usize::try_from(self.length_u32()).unwrap()
+	}
+
+	pub fn nonce(&self) -> u64 {
+		self.nonce.into()
+	}
+
+	pub fn compression(&self) -> Result<Compression, u8> {
+		Compression::from_raw(self.compression).ok_or(self.compression)
 	}
 }
 
@@ -72,15 +106,14 @@ impl fmt::Debug for Record {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let mut f = f.debug_struct(stringify!(Record));
 		f.field("lba", &self.lba);
-		f.field("length", &self.length);
-		if let Some(c) = Compression::from_raw(self.compression) {
-			f.field("compression_algorithm", &c);
-		} else {
-			f.field("compression_algorithm", &self.compression);
-		}
-		f.field("total_length", &self.total_length);
-		f.field("xxh3", &self.xxh3);
-		f.field("references", &self.references);
+		f.field("nonce", &self.nonce);
+		f.field("length", &self.length());
+		let c = Compression::from_raw(self.compression);
+		let c: &dyn fmt::Debug = if let Some(c) = c.as_ref() { c } else { &c };
+		f.field("compression", c);
+		let mut hash = [0; 16];
+		hash[..12].copy_from_slice(&self.hash);
+		f.field("hash", &format_args!("{:#x}", u128::from_le_bytes(hash)));
 		f.finish()
 	}
 }
@@ -89,7 +122,7 @@ impl fmt::Debug for Record {
 pub enum UnpackError {
 	ExceedsRecordSize,
 	UnknownCompressionAlgorithm,
-	Xxh3Mismatch,
+	HashMismatch,
 }
 
 n2e! {
@@ -110,11 +143,4 @@ n2e! {
 	22 M4
 	23 M8
 	24 M16
-	25 M32
-	26 M64
-	27 M128
-	28 M256
-	29 M512
-	30 G1
-	31 G2
 }

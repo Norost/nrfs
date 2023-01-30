@@ -23,37 +23,40 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			return Ok(0);
 		}
 
-		let root_len = self.len().await?;
+		let object_len = self.len().await?;
 
 		// TODO Cheat a little here so Tree::shrink works properly.
 		// We should make an internal write_zeros functions instead though, perhaps?
-		let root_depth = super::depth(self.max_record_size(), root_len);
-		if root_depth == 0 {
+		let object_depth = super::depth(self.max_record_size(), object_len);
+		if object_depth == 0 {
 			return Ok(0);
 		}
-		let root_len = 1u64
+		let object_len = 1u64
 			.checked_shl(
 				(self.max_record_size().to_raw()
-					+ self.cache.entries_per_parent_p2() * (root_depth - 1))
+					+ self.cache.entries_per_parent_p2() * (object_depth - 1))
 					.into(),
 			)
 			.unwrap_or(u64::MAX);
-		debug_assert_eq!(super::depth(self.max_record_size(), root_len), root_depth);
+		debug_assert_eq!(
+			super::depth(self.max_record_size(), object_len),
+			object_depth
+		);
 
 		// Don't bother if offset exceeds length.
-		if offset >= root_len {
+		if offset >= object_len {
 			return Ok(0);
 		}
 
 		// Restrict offset + len to the end of the object.
-		let len = len.min(root_len - offset);
+		let len = len.min(object_len - offset);
 
 		let end = offset + len - 1;
 
-		let left_offset = offset >> self.max_record_size();
-		let right_offset = end >> self.max_record_size();
+		let left_offset = offset >> self.max_record_size().to_raw();
+		let right_offset = end >> self.max_record_size().to_raw();
 
-		let record_size = 1u64 << self.max_record_size();
+		let record_size = 1u64 << self.max_record_size().to_raw();
 
 		let left_trim = usize::try_from(offset % record_size).unwrap();
 		let right_trim = usize::try_from(end % record_size).unwrap();
@@ -88,7 +91,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		//end -= record_size;
 		} else {
 			// If the object depth is 1, determine if we can just insert a zero record and be done.
-			if root_depth == 1 && offset == 0 {
+			if object_depth == 1 && offset == 0 {
 				self.set(0, self.cache.resource().alloc()).await?;
 				return Ok(len);
 			}
@@ -108,13 +111,13 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 		let entries_per_parent = 1 << self.cache.entries_per_parent_p2();
 
-		let end_offset = end >> self.max_record_size();
-		let end_root = (root_len - 1) >> self.max_record_size();
+		let end_offset = end >> self.max_record_size().to_raw();
+		let end_object = (object_len - 1) >> self.max_record_size().to_raw();
 
 		'z: while offset <= end_offset {
 			// Go up while parent records are zero.
 			let mut entry = loop {
-				if depth >= root_depth {
+				if depth >= object_depth {
 					// We're done.
 					break 'z;
 				}
@@ -142,7 +145,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				// Adjust offset to skip zero records.
 				let total_leafs = 1 << shift(depth);
 				offset = (offset + total_leafs) & !(total_leafs - 1);
-				if offset > end_root {
+				if offset > end_object {
 					// We're *past* the end of the tree.
 					break 'z;
 				}
@@ -150,7 +153,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				// Go up a level.
 				depth += 1;
 			};
-			debug_assert!(offset <= end_root, "offset out of range");
+			debug_assert!(offset <= end_object, "offset out of range");
 
 			// Find the first parent with non-zero or dirty leafs.
 			while depth > 1 {
@@ -182,7 +185,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					let record = util::get_record(entry.get(), usize::try_from(index).unwrap())
 						.unwrap_or_default();
 					let o = entry.key.offset() * entries_per_parent | index;
-					if record.length > 0 || dirty_children.contains(&o) {
+					if record.length() > 0 || dirty_children.contains(&o) {
 						break record;
 					}
 
@@ -205,7 +208,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					self.fetch(&record, busy).await?
 				};
 			}
-			debug_assert!(offset <= end_root, "offset out of range");
+			debug_assert!(offset <= end_object, "offset out of range");
 
 			// Insert zero leafs
 			drop(entry);

@@ -5,7 +5,7 @@ Features
 --------
 
 * Out of band deduplication (+ copy-on-write).
-* Up to 2^32 entries per directory, indexed using a hashmap.
+* Up to `2^32 - 1` entries per directory, indexed using a hashmap.
 * File names up to 255 bytes long.
 * Extensions per directory.
 * Embedding small files inside directories.

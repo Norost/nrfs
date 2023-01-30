@@ -42,16 +42,16 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		// 1. Try to get the target entry directly.
 		// 2. On failure, insert a busy slot.
 		// 3. Find record of current entry to fetch.
-		// 3a. Take root of object if at top.
+		// 3a. Take object of object if at top.
 		// 3b. Find first parent already in cache.
 		// 3bI. If key.id() of the child & parent differ (chain break),
-		//      get root of object of child,
+		//      get object of object of child,
 		//      repeat from 3.
 		// 3c. Insert a busy slot on failure, repeat from 3.
 		// 4. Go down to target entry.
 		// 4a. If target entry, return.
 		// 4b. If key.id() of the child & parent differ (chain break),
-		//     get root of object of child,
+		//     get object of object of child,
 		//     repeat from 3.
 		// 4c. Get record of child to fetch next.
 
@@ -67,7 +67,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 		let mut busy_entries = vec![busy];
 		let mut cur_depth = depth;
-		let mut root = obj.data.root();
+		let mut object = obj.data.object();
 		let mut id = key.id();
 
 		// Helper functions.
@@ -82,12 +82,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let id = child_busy.borrow_mut().key.id();
 			// If the ID of the (supposed) parent and child differ,
 			// try fetching the child again.
-			// The root may have changed, so fetch it again too.
+			// The object may have changed, so fetch it again too.
 			(entry.key.id() != id).then(|| {
 				trace!(info "chain break {:#x} >>> {:#x}", entry.key.id(), id);
 				drop(entry);
 				let (obj, _) = self.cache.get_object(id).expect("no object");
-				(id, obj.data.root())
+				(id, obj.data.object())
 			})
 		};
 
@@ -96,12 +96,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		loop {
 			// 3. Find record of current entry to fetch.
 			let mut record = loop {
-				let obj_depth = super::depth(self.max_record_size(), root.total_length.into());
-				// 3a. Take root of object if at top.
+				let obj_depth = super::depth(self.max_record_size(), object.total_length());
+				// 3a. Take object of object if at top.
 				debug_assert!(cur_depth < obj_depth);
 				if obj_depth == cur_depth + 1 {
-					trace!(info "fetch root");
-					break root;
+					trace!(info "fetch object");
+					break object.root;
 				}
 
 				// 3b. Find first parent already in cache.
@@ -110,10 +110,10 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 					trace!(info "fetch from parent {:?}", k);
 					let record = get_record(entry.get(), cur_depth);
 					// 3bI. If key.id() of the child & parent differ (chain break),
-					//      get root of object of child,
+					//      get object of object of child,
 					//      repeat from 3.
 					if let Some(new_param) = check_chain_break(&busy_entries, entry) {
-						(id, root) = new_param;
+						(id, object) = new_param;
 						continue;
 					}
 					break record;
@@ -142,10 +142,10 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				record = get_record(entry.get(), cur_depth - 1);
 
 				// 4b. If key.id() of the child & parent differ,
-				//     get root of object of child,
+				//     get object of object of child,
 				//     repeat from 3.
 				if let Some(new_param) = check_chain_break(&busy_entries, entry) {
-					(id, root) = new_param;
+					(id, object) = new_param;
 					break;
 				}
 

@@ -55,6 +55,7 @@ mod trace {
 	}
 }
 
+mod config;
 pub mod dir;
 mod file;
 mod name;
@@ -62,9 +63,13 @@ mod name;
 pub mod test;
 
 pub use {
+	config::{LoadConfig, NewConfig},
 	dir::DirOptions,
 	name::Name,
-	nros::{dev, Background, BlockSize, Compression, Dev, MaxRecordSize},
+	nros::{
+		dev, Background, BlockSize, CipherType, Compression, Dev, KeyDeriver, KeyPassword,
+		MaxRecordSize, Resource,
+	},
 };
 
 use {
@@ -108,51 +113,55 @@ pub struct Nrfs<D: Dev> {
 }
 
 impl<D: Dev> Nrfs<D> {
-	pub async fn new<M, C>(
-		mirrors: M,
-		block_size: BlockSize,
-		max_record_size: MaxRecordSize,
-		dir: &DirOptions,
-		compression: Compression,
-		global_cache_size: usize,
-	) -> Result<Self, Error<D>>
-	where
-		M: IntoIterator<Item = C>,
-		C: IntoIterator<Item = D>,
-	{
-		let storage = nros::Nros::new(
-			nros::StdResource::new(),
+	const MAGIC: [u8; 8] = *b"NRFSNRFS";
+
+	pub async fn new(config: NewConfig<'_, D>) -> Result<Self, Error<D>> {
+		let NewConfig {
 			mirrors,
+			key_deriver,
+			cipher,
 			block_size,
 			max_record_size,
 			compression,
-			global_cache_size,
-		)
-		.await?;
+			cache_size,
+			dir,
+		} = config;
+		let conf = nros::NewConfig {
+			mirrors,
+			key_deriver,
+			cipher,
+			block_size,
+			max_record_size,
+			compression,
+			cache_size,
+			resource: nros::StdResource::new(),
+			magic: Self::MAGIC,
+		};
+		let storage = nros::Nros::new(conf).await?;
 		let mut s = Self { storage, data: Default::default(), read_only: false };
 		let bg = Background::default();
-		DirRef::new_root(&bg, &mut s, dir).await?.drop().await?;
+		DirRef::new_root(&bg, &mut s, &dir).await?.drop().await?;
 		bg.drop().await?;
 		Ok(s)
 	}
 
 	/// `read_only` guarantees no modifications will be made.
 	// TODO read_only is a sham.
-	pub async fn load(
-		devices: Vec<D>,
-		global_cache_size: usize,
-		read_only: bool,
-	) -> Result<Self, Error<D>> {
+	pub async fn load(config: LoadConfig<'_, D>) -> Result<Self, Error<D>> {
+		let LoadConfig { devices, key_password, cache_size, allow_repair, retrieve_key } = config;
+		let conf = nros::LoadConfig {
+			devices,
+			key_password,
+			cache_size,
+			allow_repair,
+			retrieve_key,
+			resource: nros::StdResource::new(),
+			magic: Self::MAGIC,
+		};
 		Ok(Self {
-			storage: nros::Nros::load(
-				nros::StdResource::new(),
-				devices,
-				global_cache_size,
-				!read_only,
-			)
-			.await?,
+			storage: nros::Nros::load(conf).await?,
 			data: Default::default(),
-			read_only,
+			read_only: !allow_repair,
 		})
 	}
 
@@ -538,7 +547,8 @@ impl DataHeader {
 ///
 /// Doesn't panic if it is called during another panic to avoid an abort.
 fn forbid_drop() {
-	if !std::thread::panicking() {
+	if cfg!(test) && !std::thread::panicking() {
 		panic!("drop is forbidden");
 	}
+	eprintln!("drop is forbidden");
 }

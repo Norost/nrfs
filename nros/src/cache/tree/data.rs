@@ -1,6 +1,6 @@
 use {
-	super::super::{Key, Lru, MaxRecordSize, Present, RefCount, Slot, RECORD_SIZE_P2},
-	crate::{resource::Buf, Record, Resource},
+	super::super::{Key, Lru, MaxRecordSize, Object, Present, RefCount, Slot, RECORD_SIZE_P2},
+	crate::{resource::Buf, Resource},
 	core::fmt,
 	rustc_hash::{FxHashMap, FxHashSet},
 	std::collections::hash_map,
@@ -8,10 +8,10 @@ use {
 
 /// A single cached record tree.
 pub(in super::super) struct TreeData<R: Resource> {
-	/// The root of the tree.
+	/// The object field of this tree.
 	///
-	/// The `_reserved` field is used to indicate whether the root is dirty or not.
-	root: Record,
+	/// `_reserved[0]` is used to indicate whether the object is dirty or not.
+	object: Object,
 	/// Cached records.
 	///
 	/// The index in the array is correlated with depth.
@@ -23,7 +23,7 @@ impl<R: Resource> fmt::Debug for TreeData<R> {
 	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(TreeData))
-			.field("root", &self.root)
+			.field("object", &self.object)
 			.field("data", &self.data)
 			.finish()
 	}
@@ -82,14 +82,14 @@ impl<R: Resource> fmt::Debug for Level<R> {
 }
 
 impl<R: Resource> TreeData<R> {
-	pub fn new(root: Record, max_record_size: MaxRecordSize) -> Self {
-		let depth = super::depth(max_record_size, root.total_length.into());
-		Self { root, data: (0..depth).map(|_| Default::default()).collect() }
+	pub fn new(object: Object, max_record_size: MaxRecordSize) -> Self {
+		let depth = super::depth(max_record_size, object.total_length());
+		Self { object, data: (0..depth).map(|_| Default::default()).collect() }
 	}
 
 	/// Whether this object is dirty or not.
 	pub fn is_dirty(&self) -> bool {
-		self.root._reserved != 0
+		self.object._reserved != 0
 	}
 
 	/// Mark an entry as dirty.
@@ -173,19 +173,19 @@ impl<R: Resource> TreeData<R> {
 		level.dirty_markers.get(&offset).is_some_and(|m| m.is_dirty)
 	}
 
-	/// Get the root of this object.
-	pub fn root(&self) -> Record {
-		Record { _reserved: 0, ..self.root }
+	/// Get the object field.
+	pub fn object(&self) -> Object {
+		Object { _reserved: 0, ..self.object }
 	}
 
-	/// Set the root of this object.
-	pub fn set_root(&mut self, root: &Record) {
-		self.root = Record { _reserved: 1, ..*root };
+	/// Set the object of this object.
+	pub fn set_object(&mut self, object: &Object) {
+		self.object = Object { _reserved: 1, ..*object };
 	}
 
 	/// Clear the dirty status of this object.
 	pub fn clear_dirty(&mut self) {
-		self.root._reserved = 0;
+		self.object._reserved = 0;
 	}
 
 	#[cfg(debug_assertions)]
@@ -197,9 +197,9 @@ impl<R: Resource> TreeData<R> {
 				.last()
 				.and_then(|l| l.dirty_markers.get(&0))
 				.is_some_and(|l| l.is_dirty);
-			let must_be_empty = self.root.length == 0;
+			let must_be_empty = self.object.root.length() == 0;
 			if !is_dirty && (e.data.len() == 0) != must_be_empty {
-				panic!("mismatch between root record and entry");
+				panic!("mismatch between object record and entry");
 			}
 		}
 	}

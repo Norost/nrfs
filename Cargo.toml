@@ -12,6 +12,6 @@ lto = "fat"
 opt-level = 3
 codegen-units = 1
 
-[profile.grcov]
-inherits = "dev"
-opt-level = 0
+# Because otherwise key derivation, encryption etc is just too damn slow
+[profile.dev.package."*"]
+opt-level = 3

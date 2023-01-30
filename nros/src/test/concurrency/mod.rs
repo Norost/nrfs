@@ -6,14 +6,17 @@ use {
 
 async fn new(delay: usize) -> Nros<SlowDev, StdResource> {
 	let s = SlowDev { dev: MemDev::new(1 << 16, BlockSize::K1), alloc: SlowAllocator { delay } };
-	Nros::new(
-		StdResource::new(),
-		[[s]],
-		BlockSize::K1,
-		MaxRecordSize::K1,
-		Compression::None,
-		4096,
-	)
+	Nros::new(NewConfig {
+		resource: StdResource::new(),
+		mirrors: vec![vec![s]],
+		block_size: BlockSize::K1,
+		max_record_size: MaxRecordSize::K1,
+		compression: Compression::None,
+		cache_size: 4096,
+		key_deriver: KeyDeriver::None { key: &[0; 32] },
+		cipher: CipherType::NoneXxh3,
+		magic: *b"TESTTEST",
+	})
 	.await
 	.unwrap()
 }

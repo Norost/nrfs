@@ -118,8 +118,8 @@ impl<'a, E> Background<'a, Result<(), E>> {
 		let mut f = core::pin::pin!(f.fuse());
 		let mut bg = core::pin::pin!(self.process_background().fuse());
 		futures_util::select_biased! {
-			r = bg => r.map(|r| r).map_err(EE::from),
 			r = f => r,
+			r = bg => r.map(|r| r).map_err(EE::from),
 		}
 	}
 }

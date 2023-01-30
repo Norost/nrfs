@@ -2,7 +2,7 @@
 
 IOZONE=iozone
 MODE=release
-IMG_LEN=256M
+IMG_LEN=4G
 
 . ./_init.sh
 

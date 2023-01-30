@@ -7,7 +7,7 @@ use {
 ///
 /// Returns `None` if the index is completely out of range,
 /// i.e. a zeroed record would be returned.
-pub fn get_record(data: &[u8], index: usize) -> Option<Record> {
+pub(crate) fn get_record(data: &[u8], index: usize) -> Option<Record> {
 	let offt = index * mem::size_of::<Record>();
 	if offt >= data.len() {
 		return None;
@@ -22,21 +22,60 @@ pub fn get_record(data: &[u8], index: usize) -> Option<Record> {
 }
 
 /// Cut off trailing zeroes from [`Buf`].
-pub fn trim_zeros_end(vec: &mut impl Buf) {
-	let i = vec
-		.get()
-		.iter()
-		.rev()
-		.position(|&x| x != 0)
-		.unwrap_or(vec.len());
-	vec.resize(vec.len() - i, 0);
+pub(crate) fn trim_zeros_end(vec: &mut impl Buf) {
+	vec.resize(cutoff_zeros_end(vec.get()), 0);
 	// TODO find a proper heuristic for freeing memory.
 	if vec.capacity() / 2 <= vec.len() {
 		vec.shrink()
 	}
 }
 
+/// Find cutoff point beyond which are only zeros.
+fn cutoff_zeros_end(data: &[u8]) -> usize {
+	let i = data
+		.iter()
+		.rev()
+		.position(|&x| x != 0)
+		.unwrap_or(data.len());
+	data.len() - i
+}
+
+/// Write to a [`Buf`], resizing it no more than necessary.
+pub(crate) fn write(buf: &mut impl Buf, index: usize, data: &[u8]) {
+	if buf.len() < index + data.len() {
+		buf.resize(index, 0);
+		buf.extend_from_slice(&data[..cutoff_zeros_end(data)]);
+	} else {
+		buf.get_mut()[index..index + data.len()].copy_from_slice(data);
+	}
+}
+
+/// Read from a slice, filling the remainder with zeros.
+pub(crate) fn read(index: usize, buf: &mut [u8], data: &[u8]) {
+	if index < data.len() {
+		let data = &data[index..];
+		if let Some(data) = data.get(..buf.len()) {
+			buf.copy_from_slice(data);
+		} else {
+			buf[..data.len()].copy_from_slice(data);
+			buf[data.len()..].fill(0)
+		}
+	} else {
+		buf.fill(0)
+	}
+}
+
 /// Box a future and erase its type.
-pub fn box_fut<'a, T: Future + 'a>(fut: T) -> Pin<Box<dyn Future<Output = T::Output> + 'a>> {
+pub(crate) fn box_fut<'a, T: Future + 'a>(fut: T) -> Pin<Box<dyn Future<Output = T::Output> + 'a>> {
 	Box::pin(fut)
+}
+
+/// Calculate divmod with a power of two.
+pub(crate) fn divmod_p2(offset: u64, pow2: u8) -> (u64, usize) {
+	let mask = (1 << pow2) - 1;
+
+	let index = offset & mask;
+	let offt = offset >> pow2;
+
+	(offt, index.try_into().unwrap())
 }

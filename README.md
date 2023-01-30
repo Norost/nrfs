@@ -7,6 +7,7 @@
 * &check; Error detection
 * &check; Error correction (with mirrors only!)
 * &check; Compression
+* &check; Encryption
 * &check; Transactional updates
 * &check; Mirroring
 * &cross; Defragmentation

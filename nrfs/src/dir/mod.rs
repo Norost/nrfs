@@ -223,8 +223,8 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 			Ok(Ok(()))
 		} else {
 			// On failure, restore entry.
-			let _r = map.insert(old_entry, None).await?;
-			debug_assert!(_r.is_some(), "failed to insert after remove");
+			let r = map.insert(old_entry, None).await?;
+			debug_assert!(r.is_some(), "failed to insert after remove");
 			Ok(Err(RenameError::Duplicate))
 		}
 	}
@@ -415,8 +415,8 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 			if entry.key.is_none() {
 				continue;
 			}
-			let _r = new_map.insert(entry, None).await?;
-			debug_assert!(_r.is_some(), "failed to insert entry in new map");
+			let r = new_map.insert(entry, None).await?;
+			debug_assert!(r.is_some(), "failed to insert entry in new map");
 		}
 
 		// Replace old map
@@ -671,12 +671,12 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		)
 		.await?;
 
-		let _r = parent_dir
+		let r = parent_dir
 			.fs
 			.dir_data(parent_dir.id)
 			.children
 			.insert(parent_index, Child::Dir(dir_ref.id));
-		debug_assert!(_r.is_none(), "child present in parent");
+		debug_assert!(r.is_none(), "child present in parent");
 
 		Ok(dir_ref)
 	}
@@ -822,12 +822,12 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		// Add ourselves to parent dir.
 		// FIXME account for potential move while loading the directory.
 		// The parent directory must hold a lock, but it currently is not.
-		let _r = parent_dir
+		let r = parent_dir
 			.fs
 			.dir_data(parent_dir.id)
 			.children
 			.insert(parent_index, Child::Dir(id));
-		debug_assert!(_r.is_none(), "child present in parent");
+		debug_assert!(r.is_none(), "child present in parent");
 
 		Ok(dir_ref)
 	}
@@ -1118,9 +1118,9 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 						.directories
 						.get_mut(&header.parent_id)
 						.expect("parent dir is not loaded");
-					let _r = dir.children.remove(&header.parent_index);
+					let r = dir.children.remove(&header.parent_index);
 					debug_assert!(
-						matches!(_r, Some(Child::Dir(i)) if i == id),
+						matches!(r, Some(Child::Dir(i)) if i == id),
 						"child not present in parent"
 					);
 
@@ -1293,7 +1293,6 @@ impl EnableExtensions {
 
 #[derive(Default, Debug)]
 #[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
-#[non_exhaustive]
 pub struct Extensions {
 	pub unix: Option<ext::unix::Entry>,
 	pub mtime: Option<ext::mtime::Entry>,

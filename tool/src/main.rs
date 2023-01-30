@@ -4,18 +4,18 @@
 
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
 use {
 	clap::Parser,
 	core::{future::Future, pin::Pin},
-	nrfs::{dev::FileDev, dir::ItemRef, BlockSize, Nrfs},
+	nrfs::{dev::FileDev, dir::ItemRef, BlockSize, CipherType, Nrfs},
 	std::{
 		fs::{self, File, OpenOptions},
-		io::{Read as _, Seek as _, SeekFrom},
 		path::{Path, PathBuf},
 	},
 };
 
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 #[clap(
 	author = "David Hoppenbrouwers",
 	version = "0.1",
@@ -26,7 +26,7 @@ enum Command {
 	Dump(Dump),
 }
 
-#[derive(Debug, clap::StructOpt)]
+#[derive(Debug, clap::Args)]
 #[clap(about = "Create a new filesystem")]
 struct Make {
 	#[clap(help = "The path to the image to put the filesystem in")]
@@ -49,25 +49,53 @@ struct Make {
 		If derivation fails, it defaults to 12 (4K)"
 	)]
 	block_size_p2: Option<u8>,
-	#[clap(short, long, value_enum, default_value_t = Compression::Lz4, help = "The compression to use")]
+	#[clap(
+		short,
+		long,
+		value_enum,
+		default_value = "lz4",
+		help = "The compression to use"
+	)]
 	compression: Compression,
-	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the global cache size")]
-	global_cache_size: usize,
+	#[clap(short, long, value_enum, help = "Encryption to use on the filesystem")]
+	encryption: Option<Encryption>,
+	#[clap(
+		short,
+		long,
+		value_enum,
+		default_value = "argon2id",
+		help = "Which algorithm to use to derive the key for encryption",
+		long_help = "If none, a 32-byte key must be supplied"
+	)]
+	key_derivation_function: KeyDerivationFunction,
+	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the cache")]
+	cache_size: usize,
 }
 
-#[derive(Clone, Debug, clap::ArgEnum)]
+#[derive(Clone, Debug, clap::ValueEnum)]
 enum Compression {
 	None,
 	Lz4,
 }
 
-#[derive(Debug, clap::StructOpt)]
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum Encryption {
+	Chacha8Poly1305,
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum KeyDerivationFunction {
+	None,
+	Argon2id,
+}
+
+#[derive(Debug, clap::Args)]
 #[clap(about = "Dump the contents of a filesystem")]
 struct Dump {
 	#[clap(help = "The path to the filesystem image")]
 	path: String,
 	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the global cache size")]
-	global_cache_size: usize,
+	cache_size: usize,
 }
 
 fn main() {
@@ -110,22 +138,59 @@ async fn make(args: Make) {
 		Compression::Lz4 => nrfs::Compression::Lz4,
 	};
 
+	let keybuf;
+	let (cipher, key_deriver) = if let Some(enc) = &args.encryption {
+		let enc = match enc {
+			Encryption::Chacha8Poly1305 => CipherType::ChaCha8Poly1305,
+		};
+		let kdf = match &args.key_derivation_function {
+			KeyDerivationFunction::None => todo!("ask for file"),
+			KeyDerivationFunction::Argon2id => {
+				// TODO make m, t, p user configurable
+				let m = 4096.try_into().unwrap();
+				let t = (4 * 600).try_into().unwrap();
+				let p = 4.try_into().unwrap();
+				let pwd_a = rpassword::prompt_password("Enter new password: ")
+					.expect("failed to ask password");
+				let pwd_b = rpassword::prompt_password("Confirm password: ")
+					.expect("failed to ask password");
+				if pwd_a != pwd_b {
+					eprintln!("Passwords do not match");
+					std::process::exit(1);
+				}
+				keybuf = pwd_a.into_bytes();
+				nrfs::KeyDeriver::Argon2id { password: &keybuf, m, t, p }
+			}
+		};
+		(enc, kdf)
+	} else {
+		(
+			nrfs::CipherType::NoneXxh3,
+			nrfs::KeyDeriver::None { key: &[0; 32] },
+		)
+	};
+
 	let s = FileDev::new(f, block_size);
-	let nrfs = Nrfs::new(
-		[[s]],
+
+	let config = nrfs::NewConfig {
+		cipher,
+		key_deriver,
+		mirrors: vec![vec![s]],
 		block_size,
-		rec_size,
-		&opt,
-		compr,
-		args.global_cache_size,
-	)
-	.await
-	.unwrap();
+		max_record_size: rec_size,
+		dir: opt,
+		compression: compr,
+		cache_size: args.cache_size,
+	};
+
+	eprintln!("Creating filesystem");
+	let nrfs = Nrfs::new(config).await.unwrap();
 
 	let bg = nrfs::Background::default();
 
 	bg.run(async {
 		if let Some(d) = &args.directory {
+			eprintln!("Adding files from {:?}", d);
 			let root = nrfs.root_dir(&bg).await?;
 			add_files(root, d, &args, extensions).await;
 		}
@@ -202,23 +267,33 @@ async fn make(args: Make) {
 }
 
 async fn dump(args: Dump) {
-	let mut f = File::open(args.path).unwrap();
+	let retrieve_key = &mut |use_password| {
+		if use_password {
+			rpassword::prompt_password("Password: ")
+				.expect("failed to ask password")
+				.into_bytes()
+		} else {
+			todo!("ask for key file")
+		}
+	};
 
+	let f = File::open(args.path).unwrap();
 	// FIXME block size shouldn't matter.
-	let mut block_size_p2 = [0];
-	f.seek(SeekFrom::Start(20)).unwrap();
-	f.read_exact(&mut block_size_p2).unwrap();
+	let s = FileDev::new(f, BlockSize::from_raw(12).unwrap());
 
-	let s = FileDev::new(f, BlockSize::from_raw(block_size_p2[0]).unwrap());
-	let nrfs = Nrfs::load([s].into(), args.global_cache_size, true)
-		.await
-		.unwrap();
+	let conf = nrfs::LoadConfig {
+		key_password: nrfs::KeyPassword::Key(&[0; 32]),
+		retrieve_key,
+		devices: vec![s],
+		cache_size: args.cache_size,
+		allow_repair: true,
+	};
+	let nrfs = Nrfs::load(conf).await.unwrap();
 
 	let bg = nrfs::Background::default();
 
 	bg.run(async {
 		let root = nrfs.root_dir(&bg).await?;
-		println!("block size: 2**{}", block_size_p2[0]);
 		list_files(root, 0).await;
 		Ok::<_, nrfs::Error<_>>(())
 	})

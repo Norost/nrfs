@@ -21,7 +21,7 @@ pub use dev::Dev;
 /// It does *not* handle caching.
 /// Records are read and written as a single unit.
 #[derive(Debug)]
-pub struct Store<D: Dev, R: Resource> {
+pub(crate) struct Store<D: Dev, R: Resource> {
 	devices: DevSet<D, R>,
 	allocator: RefCell<Allocator>,
 
@@ -64,35 +64,34 @@ impl<D: Dev, R: Resource> Store<D, R> {
 
 	/// Read a record.
 	pub async fn read(&self, record: &Record) -> Result<R::Buf, Error<D>> {
-		if record.length == 0 {
+		if record.length() == 0 {
 			return Ok(self.devices.resource.alloc());
 		}
 
 		let lba = u64::from(record.lba);
-		let len = record.length.into();
+		let len = record.length();
 
-		let blocks = self.calc_block_count(len);
+		let blocks = self.block_size().min_blocks(len);
 		#[cfg(debug_assertions)]
 		self.allocator
 			.borrow()
 			.assert_alloc(lba, blocks.try_into().unwrap());
 
-		let count = blocks << self.block_size();
+		let count = blocks << self.block_size().to_raw();
 
 		// Attempt to read the record from any chain.
 		//
 		// If one of the chains fail, try another until we run out.
 		// If we run out of chains, return the last error.
 		// If we find a successful chain, copy the record to the other chains and log an error.
-		let mut v = self.devices.resource.alloc();
 		let mut blacklist = Set256::default();
 		let mut last_err = None;
-		let data = loop {
+		let (data, v) = loop {
 			let res = self
 				.devices
 				.read(lba.try_into().unwrap(), count, &blacklist)
 				.await;
-			let (data, chain) = match res {
+			let (mut data, chain) = match res {
 				Ok(Some(res)) => res,
 				Ok(None) => return Err(last_err.expect("no chains were tried")),
 				Err((e, chain)) => {
@@ -101,8 +100,13 @@ impl<D: Dev, R: Resource> Store<D, R> {
 					continue;
 				}
 			};
-			match record.unpack::<R>(&data.get()[..len as _], &mut v, self.max_record_size()) {
-				Ok(()) => break data,
+			match record.unpack(
+				data.get_mut(),
+				self.resource(),
+				self.max_record_size(),
+				self.devices.cipher_with_nonce(record.nonce()),
+			) {
+				Ok(v) => break (data, v),
 				Err(e) => {
 					self.record_unpack_failures.update(|x| x + 1);
 					blacklist.set(chain, true);
@@ -116,7 +120,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		}
 
 		self.packed_bytes_read
-			.update(|x| x + u64::from(u32::from(record.length)));
+			.update(|x| x + record.length() as u64);
 		self.unpacked_bytes_read
 			.update(|x| x + u64::try_from(v.len()).unwrap());
 
@@ -128,7 +132,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		// Calculate minimum size of buffer necessary for the compression algorithm
 		// to work.
 		let len = self.compression().max_output_size(data.len());
-		let max_blks = self.calc_block_count(len as _);
+		let max_blks = self.block_size().min_blocks(len as _);
 		let block_count = self.devices.block_count();
 
 		// Allocate and pack record.
@@ -145,16 +149,18 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			return Ok((Record::default(), data));
 		}
 
+		let cipher = self.devices.new_cipher();
+
 		let (mut rec, mut buf, data) = self
 			.resource()
 			.run(move || {
-				let rec = Record::pack(data.get(), buf.get_mut(), compression, block_size);
+				let rec = Record::pack(data.get(), buf.get_mut(), compression, block_size, cipher);
 				(rec, buf, data)
 			})
 			.await;
 
 		// Strip unused blocks from the buffer
-		let blks = self.calc_block_count(rec.length.into());
+		let blks = self.block_size().min_blocks(rec.length());
 		buf.shrink(blks << self.block_size().to_raw());
 
 		// Allocate storage space.
@@ -171,7 +177,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			.await?;
 
 		self.packed_bytes_written
-			.update(|x| x + u64::from(u32::from(rec.length)));
+			.update(|x| x + rec.length() as u64);
 		self.unpacked_bytes_written
 			.update(|x| x + u64::try_from(data_len).unwrap());
 
@@ -183,10 +189,10 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	pub fn destroy(&self, record: &Record) {
 		self.allocator.borrow_mut().free(
 			record.lba.into(),
-			self.calc_block_count(record.length.into()) as _,
+			self.block_size().min_blocks(record.length()) as _,
 		);
 		self.packed_bytes_destroyed
-			.update(|x| x + u64::from(u32::from(record.length)));
+			.update(|x| x + record.length() as u64);
 	}
 
 	/// Finish the current transaction.
@@ -206,16 +212,6 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		Ok(self.devices)
 	}
 
-	fn calc_block_count(&self, len: u32) -> usize {
-		let bs = 1 << self.block_size().to_raw();
-		((len + bs - 1) / bs).try_into().unwrap()
-	}
-
-	fn round_block_size(&self, len: u32) -> usize {
-		let bs = 1 << self.block_size().to_raw();
-		((len + bs - 1) & !(bs - 1)).try_into().unwrap()
-	}
-
 	pub fn block_size(&self) -> BlockSize {
 		self.devices.block_size()
 	}
@@ -229,13 +225,33 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	}
 
 	/// Get the root record of the object list.
-	pub fn object_list(&self) -> Record {
-		self.devices.object_list.get()
+	pub fn object_list_root(&self) -> Record {
+		self.devices.object_list_root.get()
 	}
 
 	/// Set the root record of the object list.
-	pub fn set_object_list(&self, root: Record) {
-		self.devices.object_list.set(root)
+	pub fn set_object_list_root(&self, root: Record) {
+		self.devices.object_list_root.set(root)
+	}
+
+	/// Get the root record of the object bitmap.
+	pub fn object_bitmap_root(&self) -> Record {
+		self.devices.object_bitmap_root.get()
+	}
+
+	/// Set the root record of the object bitmap.
+	pub fn set_object_bitmap_root(&self, root: Record) {
+		self.devices.object_bitmap_root.set(root)
+	}
+
+	/// Get the depth of the object list.
+	pub fn object_list_depth(&self) -> u8 {
+		self.devices.object_list_depth.get()
+	}
+
+	/// Set the depth of the object list.
+	pub fn set_object_list_depth(&self, depth: u8) {
+		self.devices.object_list_depth.set(depth)
 	}
 
 	/// Get statistics for this session.
@@ -256,22 +272,6 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			unpacked_bytes_written
 			device_read_failures
 			record_unpack_failures
-		}
-	}
-
-	/// Ensure all blocks in a range are allocated.
-	///
-	/// Used to detect use-after-frees.
-	#[cfg(debug_assertions)]
-	pub fn assert_alloc(&self, record: &Record) {
-		if record.length > 0 {
-			let blocks = self
-				.calc_block_count(record.length.into())
-				.try_into()
-				.unwrap();
-			self.allocator
-				.borrow_mut()
-				.assert_alloc(record.lba.into(), blocks)
 		}
 	}
 

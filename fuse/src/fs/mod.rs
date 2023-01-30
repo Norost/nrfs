@@ -36,12 +36,26 @@ pub struct Fs {
 
 impl Fs {
 	pub async fn new(io: fs::File) -> (Self, FsChannel) {
-		let global_cache_size = 1 << 24;
+		let retrieve_key = &mut |use_password| {
+			if use_password {
+				rpassword::prompt_password("Password: ")
+					.expect("failed to ask password")
+					.into_bytes()
+			} else {
+				todo!("ask for key file")
+			}
+		};
 
 		let fs = FileDev::new(io, nrfs::BlockSize::K4);
-		let fs = Nrfs::load([fs].into(), global_cache_size, false)
-			.await
-			.unwrap();
+		let conf = nrfs::LoadConfig {
+			key_password: nrfs::KeyPassword::Key(&[0; 32]),
+			retrieve_key,
+			devices: vec![fs],
+			cache_size: 1 << 24,
+			allow_repair: true,
+		};
+		eprintln!("Mounting filesystem");
+		let fs = Nrfs::load(conf).await.unwrap();
 
 		// Add root dir now so it's always at ino 1.
 		let mut ino = InodeStore::new(unsafe { libc::getuid() }, unsafe { libc::getgid() });
@@ -60,6 +74,7 @@ impl Fs {
 	}
 
 	pub async fn run(self) -> Result<(), nrfs::Error<FileDev>> {
+		eprintln!("Running");
 		let bg = Background::default();
 		bg.run(async {
 			loop {
@@ -98,7 +113,9 @@ impl Fs {
 			Ok::<_, nrfs::Error<_>>(())
 		})
 		.await?;
+		eprintln!("Session closed, unmounting");
 		bg.drop().await?;
+		self.fs.unmount().await?;
 		Ok(())
 	}
 

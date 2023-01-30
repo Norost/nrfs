@@ -213,10 +213,18 @@ impl Test {
 			});
 			block_on(bg.drop()).unwrap();
 			self.store = block_on(async {
-				let devs = self.store.unmount().await.unwrap();
-				Nros::load(StdResource::new(), devs, new_cache_size, true)
-					.await
-					.unwrap()
+				let devices = self.store.unmount().await.unwrap();
+				Nros::load(LoadConfig {
+					resource: StdResource::new(),
+					devices,
+					cache_size: new_cache_size,
+					allow_repair: true,
+					key_password: KeyPassword::Key(&[0; 32]),
+					magic: *b"TESTTEST",
+					retrieve_key: &mut |_| unreachable!(),
+				})
+				.await
+				.unwrap()
 			});
 		}
 	}
@@ -1464,4 +1472,36 @@ fn get_rewrite_2() {
 		],
 	)
 	.run()
+}
+
+#[test]
+fn util_write_improper_zero_trim_0() {
+	Test::new(
+		1 << 16,
+		0,
+		[
+			Create { size: 0 },
+			Create { size: 0x8001 },
+			Resize { idx: 1, size: 0x8000 },
+			Write { idx: 1, offset: 0, amount: 1 },
+			Destroy { idx: 1 },
+			Create { size: 0x0 },
+		],
+	)
+	.run()
+}
+
+#[test]
+fn util_write_improper_zero_trim_1() {
+	Test::new(
+		1 << 16,
+		0,
+		[
+			Create { size: 0x8000 },
+			Write { idx: 0, offset: 0, amount: 0xffc2 },
+			Resize { idx: 0, size: 0x3ff },
+			Destroy { idx: 0 },
+		],
+	)
+	.run();
 }

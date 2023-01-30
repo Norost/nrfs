@@ -1,6 +1,7 @@
 use {
 	super::{
-		data::TreeData, Buf, Busy, Dev, Error, Key, Present, Record, RefCount, Resource, Slot, Tree,
+		data::TreeData, Buf, Busy, Dev, Error, Key, Object, Present, Record, RefCount, Resource,
+		Slot, Tree,
 	},
 	crate::util,
 	core::mem,
@@ -8,15 +9,15 @@ use {
 
 impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// Shrink record tree.
-	pub(super) async fn shrink(&self, new_len: u64, &cur_root: &Record) -> Result<(), Error<D>> {
+	pub(super) async fn shrink(&self, new_len: u64, &cur_object: &Object) -> Result<(), Error<D>> {
 		trace!("shrink id {:#x}, new_len {}", self.id, new_len);
 		// Steps:
-		// 1. If the depth changes, find new root.
-		// 1a. Split object into two: current with new root and pseudo-object with records to
+		// 1. If the depth changes, find new object.
+		// 1a. Split object into two: current with new object and pseudo-object with records to
 		//     be zeroed.
 		// 2. Zero out data past new_len.
 
-		let cur_len = u64::from(cur_root.total_length);
+		let cur_len = u64::from(cur_object.total_length);
 
 		debug_assert!(
 			new_len < cur_len,
@@ -32,7 +33,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let new_root = if new_depth == 0 {
 				Record::default()
 			} else {
-				// Take new root out
+				// Take new object out
 				let parent = self.get(new_depth, 0).await?;
 				let rec = util::get_record(parent.get(), 0).unwrap_or_default();
 				parent.modify(self.background, |d| {
@@ -44,14 +45,10 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				});
 				rec
 			};
-			let new_root = Record {
-				references: cur_root.references,
-				total_length: new_len.into(),
-				_reserved: 1,
-				..new_root
-			};
+			let new_object =
+				Object { root: new_root, total_length: new_len.into(), _reserved: 1, ..cur_object };
 
-			// 1a. Split object into two: current with new root and pseudo-object with records to
+			// 1a. Split object into two: current with new object and pseudo-object with records to
 			//     be zeroed.
 
 			// Create a pseudo object.
@@ -61,7 +58,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let pseudo_id = data.new_pseudo_id();
 			let Some(Slot::Present(cur_obj)) = data.objects.get_mut(&self.id)
 				else { unreachable!("no object") };
-			let mut pseudo_obj = TreeData::new(new_root, self.max_record_size());
+			let mut pseudo_obj = TreeData::new(new_object, self.max_record_size());
 
 			#[cfg(debug_assertions)]
 			cur_obj.data.check_integrity();
@@ -74,15 +71,12 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				let pseudo_level = &mut pseudo_obj.data[usize::from(d)];
 
 				// Move entries
-				for (offset, slot) in cur_level.slots.drain_filter(|k, _| u128::from(*k) < offt) {
+				for (offset, slot) in cur_level.slots.drain_filter(|k, _| *k < offt) {
 					pseudo_level.slots.insert(offset, slot);
 				}
 
 				// Move markers
-				for (offset, marker) in cur_level
-					.dirty_markers
-					.drain_filter(|k, _| u128::from(*k) < offt)
-				{
+				for (offset, marker) in cur_level.dirty_markers.drain_filter(|k, _| *k < offt) {
 					pseudo_level.dirty_markers.insert(offset, marker);
 				}
 
@@ -136,7 +130,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				else { unreachable!("no object") };
 			cur_obj
 				.data
-				.set_root(&Record { total_length: new_len.into(), ..cur_obj.data.root() });
+				.set_object(&Object { total_length: new_len.into(), ..cur_obj.data.object() });
 		}
 
 		// Zero out data written past the end.

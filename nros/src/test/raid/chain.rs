@@ -6,16 +6,7 @@ fn create_save_2() {
 	block_on(async {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
-		let s = Nros::new(
-			StdResource::new(),
-			[[dev_a, dev_b]],
-			BlockSize::K1,
-			MaxRecordSize::K16,
-			Compression::None,
-			1 << 14,
-		)
-		.await
-		.unwrap();
+		let s = new(vec![vec![dev_a, dev_b]]).await;
 		s.unmount().await.unwrap();
 	});
 }
@@ -29,16 +20,7 @@ fn equal_2() {
 	block_on(async {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
-		let s = Nros::new(
-			StdResource::new(),
-			[[dev_a, dev_b]],
-			BlockSize::K1,
-			MaxRecordSize::K16,
-			Compression::None,
-			1 << 14,
-		)
-		.await
-		.unwrap();
+		let s = new(vec![vec![dev_a, dev_b]]).await;
 		let bg = Background::default();
 
 		let obj = s.create(&bg).await.unwrap();
@@ -51,9 +33,7 @@ fn equal_2() {
 
 		let devs = s.unmount().await.unwrap();
 
-		let s = Nros::load(StdResource::new(), devs, 1 << 14, true)
-			.await
-			.unwrap();
+		let s = load(devs).await;
 		let bg = Background::default();
 		let obj = s.get(&bg, 0).await.unwrap();
 		let buf = &mut [0; 1 << 15];
