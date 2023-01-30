@@ -9,7 +9,7 @@ use {
 
 async fn new(mirrors: Vec<Vec<dev::MemDev>>) -> DevSet<dev::MemDev, StdResource> {
 	DevSet::new(NewConfig {
-		magic: *b"TESTTEST",
+		magic: *b"TEST",
 		resource: StdResource::new(),
 		mirrors,
 		block_size: BlockSize::B512,

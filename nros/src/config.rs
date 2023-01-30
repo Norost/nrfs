@@ -19,7 +19,7 @@ pub struct NewConfig<'a, D: Dev, R: Resource> {
 	/// Mirror of chains of devices.
 	pub mirrors: Vec<Vec<D>>,
 	/// Magic to add to header.
-	pub magic: [u8; 8],
+	pub magic: [u8; 4],
 	/// Key derivation algorithm to apply, with parameters.
 	pub key_deriver: KeyDeriver<'a>,
 	/// Hash & encryption algorithm to apply to filesystem.
@@ -54,7 +54,7 @@ pub struct LoadConfig<'a, D: Dev, R: Resource> {
 	/// Devices.
 	pub devices: Vec<D>,
 	/// Magic which the header should match.
-	pub magic: [u8; 8],
+	pub magic: [u8; 4],
 	/// Key or password
 	pub key_password: KeyPassword<'a>,
 	/// Size of the cache.

@@ -5,7 +5,7 @@ fn write_read_nocache() {
 	let s = block_on(Nros::new(NewConfig {
 		resource: StdResource::new(),
 		mirrors: vec![vec![MemDev::new(1 << 12, BlockSize::K1)]],
-		magic: *b" CRYPTO ",
+		magic: *b"CRYP",
 		key_deriver: KeyDeriver::None { key: &[0xcc; 32] },
 		cipher: CipherType::ChaCha8Poly1305,
 		block_size: BlockSize::K1,

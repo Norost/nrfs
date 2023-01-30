@@ -2,7 +2,7 @@ use {super::*, crate::dev};
 
 async fn load(devices: Vec<dev::MemDev>) -> Nros<dev::MemDev, StdResource> {
 	Nros::load(LoadConfig {
-		magic: *b"TESTTEST",
+		magic: *b"TEST",
 		resource: StdResource::new(),
 		devices,
 		cache_size: 1 << 12,

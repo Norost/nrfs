@@ -15,7 +15,7 @@ async fn new(delay: usize) -> Nros<SlowDev, StdResource> {
 		cache_size: 4096,
 		key_deriver: KeyDeriver::None { key: &[0; 32] },
 		cipher: CipherType::NoneXxh3,
-		magic: *b"TESTTEST",
+		magic: *b"TEST",
 	})
 	.await
 	.unwrap()

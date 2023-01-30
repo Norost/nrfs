@@ -49,7 +49,7 @@ pub(crate) struct DevSet<D: Dev, R: Resource> {
 	pub resource: Arc<R>,
 
 	/// Magic value to copy to the header.
-	magic: [u8; 8],
+	magic: [u8; 4],
 
 	/// Key to encrypt the header with.
 	header_key: Cell<[u8; 32]>,
@@ -562,6 +562,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			magic: self.magic,
 			version: Header::VERSION,
 			cipher: self.cipher.to_raw(),
+			_reserved: [0; 4],
 			key_derivation: self.key_derivation.get().to_raw(),
 			uid: self.uid,
 			nonce: self.nonce.get().into(),

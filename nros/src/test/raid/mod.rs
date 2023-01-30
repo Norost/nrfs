@@ -11,7 +11,7 @@ use {
 
 async fn new(mirrors: Vec<Vec<dev::MemDev>>) -> Nros<dev::MemDev, StdResource> {
 	Nros::new(NewConfig {
-		magic: *b"TESTTEST",
+		magic: *b"TEST",
 		resource: StdResource::new(),
 		mirrors,
 		block_size: BlockSize::K1,
@@ -27,7 +27,7 @@ async fn new(mirrors: Vec<Vec<dev::MemDev>>) -> Nros<dev::MemDev, StdResource> {
 
 async fn load(devices: Vec<dev::MemDev>) -> Nros<dev::MemDev, StdResource> {
 	Nros::load(LoadConfig {
-		magic: *b"TESTTEST",
+		magic: *b"TEST",
 		resource: StdResource::new(),
 		devices,
 		cache_size: 1 << 14,

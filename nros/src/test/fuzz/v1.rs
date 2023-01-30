@@ -220,7 +220,7 @@ impl Test {
 					cache_size: new_cache_size,
 					allow_repair: true,
 					key_password: KeyPassword::Key(&[0; 32]),
-					magic: *b"TESTTEST",
+					magic: *b"TEST",
 					retrieve_key: &mut |_| unreachable!(),
 				})
 				.await

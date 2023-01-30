@@ -9,9 +9,10 @@ use {
 #[derive(Default)]
 #[repr(C)]
 pub(crate) struct Header {
-	pub magic: [u8; 8],
+	pub magic: [u8; 4],
 	pub cipher: u8,
 	pub version: u8,
+	pub _reserved: [u8; 4],
 	pub key_derivation: [u8; 14],
 	pub nonce: u64le,
 	pub uid: [u8; 16],

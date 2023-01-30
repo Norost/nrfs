@@ -34,7 +34,7 @@ fn new_cap(
 ) -> Nros<MemDev, StdResource> {
 	let s = MemDev::new(blocks, BlockSize::K1);
 	let s = Nros::new(NewConfig {
-		magic: *b"TESTTEST",
+		magic: *b"TEST",
 		resource: StdResource::new(),
 		mirrors: vec![vec![s]],
 		block_size: BlockSize::K1,

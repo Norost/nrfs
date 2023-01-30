@@ -113,7 +113,7 @@ pub struct Nrfs<D: Dev> {
 }
 
 impl<D: Dev> Nrfs<D> {
-	const MAGIC: [u8; 8] = *b"NRFSNRFS";
+	const MAGIC: [u8; 4] = *b"NRFS";
 
 	pub async fn new(config: NewConfig<'_, D>) -> Result<Self, Error<D>> {
 		let NewConfig {
