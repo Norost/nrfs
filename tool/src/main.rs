@@ -200,7 +200,6 @@ async fn make(args: Make) {
 	.unwrap();
 
 	bg.drop().await.unwrap();
-	dbg!(nrfs.statistics());
 	nrfs.unmount().await.unwrap();
 
 	async fn add_files(

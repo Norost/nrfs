@@ -10,8 +10,8 @@ use {
 #[repr(C)]
 pub(crate) struct Header {
 	pub magic: [u8; 4],
-	pub cipher: u8,
 	pub version: u8,
+	pub cipher: u8,
 	pub _reserved: [u8; 4],
 	pub key_derivation: [u8; 14],
 	pub nonce: u64le,
@@ -61,7 +61,7 @@ impl Header {
 
 	pub fn get_cipher(data: &[u8]) -> Result<CipherType, u8> {
 		assert!(data.len() >= 512);
-		CipherType::from_raw(data[8]).ok_or(data[8])
+		CipherType::from_raw(data[5]).ok_or(data[5])
 	}
 
 	pub fn key_derivation(&self) -> Result<KeyDerivation, u8> {
