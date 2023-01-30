@@ -2,8 +2,8 @@
 
 set -e
 
-TIMEOUT=5s
-MAX_LEN="${MAX_LEN:-4096}"
+TIMEOUT=30s
+MAX_LEN="${MAX_LEN:-8192}"
 CMD="nice cargo fuzz run random_ops -s none -- -timeout=$TIMEOUT -max_len=$MAX_LEN"
 
 if [[ $# != 2 ]]
