@@ -90,10 +90,10 @@ A header is placed at the start and end of a volume.
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                Magic string ("NRFSNRFS")              |
-  +------+-----------------------------------------+------+------+
-  |    8 |                    Key derivation       | Ciph | Ver. |
-  +------+-----------------------------------------+------+------+
+  |    0 |             | Ciph | Ver. |   Magic string ("NRFS")   |
+  +------+-------------+------+--------------------+-------------+
+  |    8 |                    Key derivation       |             |
+  +------+-----------------------------------------+-------------+
   |   16 |                    Key derivation                     |
   +------+-------------------------------------------------------+
   |   24 |                         Nonce                         |
@@ -155,7 +155,7 @@ A header is placed at the start and end of a volume.
   |  ... |                                                       |
   +------+-------------------------------------------------------+
 
-* Magic string: Must always be "NRFSNRFS"
+* Magic string: Must always be "NRFS"
 
 * Ver.: The version of the data storage format.
   Must have the value 0 as of writing.
