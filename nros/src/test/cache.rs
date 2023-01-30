@@ -544,3 +544,29 @@ fn write_zeros_1() {
 	});
 	block_on(bg.drop()).unwrap();
 }
+
+/// Ensure resizing object list & bitmap works properly.
+#[test]
+fn create_many() {
+	let s = new_cap(MaxRecordSize::K1, 1 << 16, 1 << 10);
+	let bg = Background::default();
+	run2(&bg, async {
+		for _ in 0..1024 * 4 + 1 {
+			s.create(&bg).await.unwrap();
+		}
+	});
+	block_on(bg.drop()).unwrap();
+	block_on(s.unmount()).unwrap();
+}
+
+/// Ensure creating a large amount of objects at once with `create_many` works properly.
+#[test]
+fn create_many_batch() {
+	let s = new_cap(MaxRecordSize::K1, 1 << 16, 1 << 10);
+	let bg = Background::default();
+	run2(&bg, async {
+		s.create_many(&bg, 1024 * 4 + 1).await.unwrap();
+	});
+	block_on(bg.drop()).unwrap();
+	block_on(s.unmount()).unwrap();
+}

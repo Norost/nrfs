@@ -189,7 +189,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		trace!(info "{}", id);
 
 		// Resize if necessary
-		if id + amount > self.object_list_len() {
+		// Use while instead of if in case someone tries to crate *a lot*
+		// of objects at once, which requires growing many times.
+		// While growing to the proper size in one go would be more efficient,
+		// this is an easy fix for what is very much an edge case.
+		while id + amount > self.object_list_len() {
 			self.grow_object_list(bg).await?;
 		}
 
