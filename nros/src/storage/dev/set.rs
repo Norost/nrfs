@@ -251,6 +251,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 		drop(headers);
 
+		assert_eq!(header.version, Header::VERSION, "header version mismatch");
+
 		let mirc = header.configuration.mirror_count().to_raw();
 		let rem_empty = mirrors.drain(usize::from(mirc)..).all(|c| c.is_empty());
 		assert!(rem_empty);
