@@ -30,6 +30,12 @@ After installation, run:
 cargo b --release
 ```
 
+To enable parallelism, enable the `parallelism` feature:
+
+```
+cargo b --release --features parallelism
+```
+
 ### Creating a filesystem
 
 To create a NRFS filesystem, use the `tool` binary:
