@@ -17,7 +17,7 @@ impl KeyDerivation {
 					let i = u32::from_le_bytes(i);
 					NonZeroU32::new(i).unwrap()
 				};
-				Self::Argon2id { p: NonZeroU8::new(buf[1]).unwrap(), t: f(4), m: f(8) }
+				Self::Argon2id { p: NonZeroU8::new(buf[1]).unwrap(), t: f(2), m: f(6) }
 			}
 			_ => return None,
 		})
