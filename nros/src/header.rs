@@ -11,7 +11,8 @@ use {
 pub(crate) struct Header {
 	pub magic: [u8; 8],
 	pub cipher: u8,
-	pub key_derivation: [u8; 15],
+	pub version: u8,
+	pub key_derivation: [u8; 14],
 	pub nonce: u64le,
 	pub uid: [u8; 16],
 	pub hash: [u8; 16],
@@ -50,6 +51,9 @@ n2e! {
 raw!(Header);
 
 impl Header {
+	/// The version of the on-disk format.
+	pub const VERSION: u8 = 0;
+
 	pub fn cipher(&self) -> Result<CipherType, u8> {
 		CipherType::from_raw(self.cipher).ok_or(self.cipher)
 	}
@@ -65,7 +69,7 @@ impl Header {
 
 	pub fn get_key_derivation(data: &[u8]) -> Result<KeyDerivation, u8> {
 		assert!(data.len() >= 512);
-		let kdf = data[9..24].try_into().unwrap();
+		let kdf = data[10..24].try_into().unwrap();
 		KeyDerivation::from_raw(&kdf).ok_or(kdf[0])
 	}
 
@@ -120,9 +124,6 @@ impl Header {
 }
 
 impl Configuration {
-	/// The version of the on-disk format.
-	pub const VERSION: u8 = 0;
-
 	fn get(&self, i: u8, bits: u8) -> u8 {
 		let (i, shift) = (usize::from(i / 8), i % 8);
 		let mask = (1 << bits) - 1;
@@ -135,14 +136,6 @@ impl Configuration {
 		debug_assert_eq!(value & !mask, 0, "value out of range");
 		self.0[i] &= !(mask << shift);
 		self.0[i] |= value << shift;
-	}
-
-	pub fn version(&self) -> u8 {
-		self.get(0, 4)
-	}
-
-	pub fn set_version(&mut self) {
-		self.set(0, 4, Self::VERSION)
 	}
 
 	pub fn mirror_count(&self) -> MirrorCount {
@@ -209,6 +202,7 @@ impl fmt::Debug for Header {
 		let mut f = f.debug_struct(stringify!(Header));
 		// TODO use Utf8Lossy when it is stabilized.
 		f.field("magic", &String::from_utf8_lossy(&self.magic));
+		f.field("version", &self.version);
 		fmt_either(&mut f, "cipher", self.cipher());
 		fmt_either(&mut f, "key_derivation", self.key_derivation());
 		f.field(
@@ -236,7 +230,6 @@ impl fmt::Debug for Configuration {
 	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let mut f = f.debug_struct(stringify!(Configuration));
-		f.field("version", &self.version());
 		f.field("mirror_count", &self.mirror_count());
 		f.field("mirror_index", &self.mirror_index());
 		f.field("block_size", &self.block_size());

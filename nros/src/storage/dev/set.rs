@@ -551,7 +551,6 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.expect("too many mirrors");
 
 		let mut conf = Configuration::default();
-		conf.set_version();
 		conf.set_mirror_count(mirc);
 		conf.set_mirror_index(chain);
 		conf.set_block_size(self.block_size());
@@ -561,6 +560,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		conf.set_compression_algorithm(self.compression());
 		let mut header = Header {
 			magic: self.magic,
+			version: Header::VERSION,
 			cipher: self.cipher.to_raw(),
 			key_derivation: self.key_derivation.get().to_raw(),
 			uid: self.uid,

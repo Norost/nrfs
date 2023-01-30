@@ -91,9 +91,9 @@ A header is placed at the start and end of a volume.
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
   |    0 |                Magic string ("NRFSNRFS")              |
-  +------+------------------------------------------------+------+
-  |    8 |                    Key derivation              | Ciph |
-  +------+------------------------------------------------+------+
+  +------+-----------------------------------------+------+------+
+  |    8 |                    Key derivation       | Ciph | Ver. |
+  +------+-----------------------------------------+------+------+
   |   16 |                    Key derivation                     |
   +------+-------------------------------------------------------+
   |   24 |                         Nonce                         |
@@ -157,6 +157,9 @@ A header is placed at the start and end of a volume.
 
 * Magic string: Must always be "NRFSNRFS"
 
+* Ver.: The version of the data storage format.
+  Must have the value 0 as of writing.
+
 * Ciph: Cipher algorithm to use to decrypt the header and records.
 
   All header data from byte 64 to the end of the block is encrypted.
@@ -181,8 +184,8 @@ A header is placed at the start and end of a volume.
       +------+------+------+------+------+------+------+------+------+
       | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
       +======+======+======+======+======+======+======+======+======+
-      |    8 |                                         |  ID  | ...  |
-      +------+-----------------------------------------+------+------+
+      |    8 |                                  |  ID  |     ...     |
+      +------+----------------------------------+------+-------------+
       |   16 |                                                       |
       +------+-------------------------------------------------------+
 
@@ -193,10 +196,10 @@ A header is placed at the start and end of a volume.
       +------+------+------+------+------+------+------+------+------+
       | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
       +======+======+======+======+======+======+======+======+======+
-      |    8 |             M             |      |  P   |  ID  | ...  |
-      +------+---------------------------+------+------+------+------+
+      |    8 |             M             |  P   |  ID  |     ...     |
+      +------+---------------------------+------+------+-------------+
       |   16 |                           |             T             |
-      +------+-------------------------------------------------------+
+      +------+---------------------------+---------------------------+
 
     * ID: is 1
     * P: Parallelism
@@ -229,9 +232,6 @@ A header is placed at the start and end of a volume.
 
 * Configuration: configuration values for the filesystem.
 
-  * Version: The version of the data storage format.
-    Must have the value 0 as of writing.
-
   * Mirr. count: The amount of mirror volumes.
     Useful to determine how many mirrors should be waited for before allowing
     writes.
@@ -262,7 +262,7 @@ A header is placed at the start and end of a volume.
   +------+------+------+------+------+------+------+------+------+
   | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 | Mirr. index | Mirr. count |          Version          |
+  |    0 | Mirr. index | Mirr. count |                           |
   +------+-------------+-------------+---------------------------+
   |    8 |    Maximum record size    |        Block size         |
   +------+---------------------------+---------------------------+

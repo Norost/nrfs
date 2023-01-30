@@ -8,7 +8,7 @@ pub enum KeyDerivation {
 
 impl KeyDerivation {
 	/// Parse serialized key derivation parameters.
-	pub fn from_raw(buf: &[u8; 15]) -> Option<Self> {
+	pub fn from_raw(buf: &[u8; 14]) -> Option<Self> {
 		Some(match buf[0] {
 			0 => Self::None,
 			1 => {
@@ -24,15 +24,15 @@ impl KeyDerivation {
 	}
 
 	/// Serialize key derivation parameters.
-	pub fn to_raw(self) -> [u8; 15] {
-		let mut buf = [0; 15];
+	pub fn to_raw(self) -> [u8; 14] {
+		let mut buf = [0; 14];
 		match self {
 			Self::None => {}
 			Self::Argon2id { p, t, m } => {
 				buf[0] = 1;
 				buf[1] = p.get();
-				buf[4..8].copy_from_slice(&t.get().to_le_bytes());
-				buf[8..12].copy_from_slice(&m.get().to_le_bytes());
+				buf[2..6].copy_from_slice(&t.get().to_le_bytes());
+				buf[6..10].copy_from_slice(&m.get().to_le_bytes());
 			}
 		}
 		buf
