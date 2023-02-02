@@ -39,6 +39,7 @@ impl Fs {
 		permissions: u16,
 		io: impl Iterator<Item = fs::File>,
 		key: Option<[u8; 32]>,
+		cache_size: usize,
 	) -> (Self, FsChannel) {
 		let retrieve_key = &mut |use_password| {
 			if let Some(key) = key {
@@ -52,8 +53,7 @@ impl Fs {
 		};
 
 		let devices = io.map(|f| FileDev::new(f, nrfs::BlockSize::K4)).collect();
-		let conf =
-			nrfs::LoadConfig { retrieve_key, devices, cache_size: 1 << 24, allow_repair: true };
+		let conf = nrfs::LoadConfig { retrieve_key, devices, cache_size, allow_repair: true };
 		eprintln!("Mounting filesystem");
 		let fs = Nrfs::load(conf).await.unwrap();
 

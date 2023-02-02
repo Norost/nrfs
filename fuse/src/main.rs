@@ -17,6 +17,9 @@ struct Args {
 	/// File to load key from.
 	#[arg(short = 'K', long)]
 	key_file: Option<String>,
+	/// Soft limit on the cache size.
+	#[arg(long, default_value_t = 1 << 27)]
+	cache_size: usize,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -44,7 +47,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 		})
 		.try_collect::<Vec<_>>()?;
 
-	let (f, channel) = futures_executor::block_on(fs::Fs::new(0o755, f.into_iter(), key));
+	let (f, channel) =
+		futures_executor::block_on(fs::Fs::new(0o755, f.into_iter(), key, args.cache_size));
 
 	let mut opts = vec![
 		MountOption::FSName("nrfs".into()),
