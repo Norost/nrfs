@@ -26,49 +26,36 @@ enum Command {
 	Dump(Dump),
 }
 
+/// Create a new filesystem.
 #[derive(Debug, clap::Args)]
-#[clap(about = "Create a new filesystem")]
 struct Make {
-	#[clap(help = "The path to the image to put the filesystem in")]
+	/// The path to the image to write the filesystem to.
 	path: String,
-	#[clap(short, long, help = "The directory to copy to the image")]
+	/// The directory to copy to the image.
+	#[clap(short, long)]
 	directory: Option<PathBuf>,
-	#[clap(
-		short,
-		long,
-		help = "Whether to resolve symlinks when copying a directory"
-	)]
+	/// Whether to resolve symlinks when copying a directory.
+	#[clap(short, long)]
 	follow: bool,
-	#[clap(short, long, value_parser = 9..=24, default_value_t = 17, help = "The record size to use")]
+	/// The record size to use.
+	#[clap(short, long, value_parser = 9..=24, default_value_t = 17)]
 	record_size_p2: u8,
-	#[clap(
-		short,
-		long,
-		value_parser = 9..=24,
-		default_value_t = 12,
-		help = "The block size to use",
-	)]
+	/// The block size to use.
+	#[clap(short, long, value_parser = 9..=24, default_value_t = 12)]
 	block_size_p2: u8,
-	#[clap(
-		short,
-		long,
-		value_enum,
-		default_value = "lz4",
-		help = "The compression to use"
-	)]
+	/// The compression to use.
+	#[clap(short, long, value_enum, default_value = "lz4")]
 	compression: Compression,
-	#[clap(short, long, value_enum, help = "Encryption to use on the filesystem")]
+	/// Encryption to use on the filesystem.
+	#[clap(short, long, value_enum)]
 	encryption: Option<Encryption>,
-	#[clap(
-		short,
-		long,
-		value_enum,
-		default_value = "argon2id",
-		help = "Which algorithm to use to derive the key for encryption",
-		long_help = "If none, a 32-byte key must be supplied"
-	)]
+	/// Which algorithm to use to derive the key for encryption.
+	///
+	/// If none, a 32-byte key must be supplied.
+	#[clap(short, long, value_enum, default_value = "argon2id")]
 	key_derivation_function: KeyDerivationFunction,
-	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the cache")]
+	/// Soft limit on the cache size.
+	#[clap(long, default_value_t = 1 << 27)]
 	cache_size: usize,
 }
 
@@ -89,12 +76,13 @@ enum KeyDerivationFunction {
 	Argon2id,
 }
 
+/// Dump the contents of a filesystem.
 #[derive(Debug, clap::Args)]
-#[clap(about = "Dump the contents of a filesystem")]
 struct Dump {
-	#[clap(help = "The path to the filesystem image")]
+	/// The path to the filesystem image.
 	path: String,
-	#[clap(long, default_value_t = 1 << 27, help = "Soft limit on the global cache size")]
+	/// Soft limit on the global cache size.
+	#[clap(long, default_value_t = 1 << 27)]
 	cache_size: usize,
 }
 
