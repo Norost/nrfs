@@ -2,6 +2,7 @@
 #![feature(const_option, iterator_try_collect, pin_macro)]
 
 mod dump;
+mod extract_key;
 mod make;
 
 #[cfg(target_family = "unix")]
@@ -15,6 +16,7 @@ use clap::Parser;
 )]
 enum Command {
 	Make(make::Make),
+	ExtractKey(extract_key::ExtractKey),
 	Dump(dump::Dump),
 }
 
@@ -53,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let fut = async {
 		match Command::parse() {
 			Command::Make(args) => make::make(args).await,
+			Command::ExtractKey(args) => extract_key::extract_key(args).await,
 			Command::Dump(args) => dump::dump(args).await,
 		}
 	};

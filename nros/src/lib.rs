@@ -331,6 +331,18 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 		let devset = store.unmount().await?;
 		Ok(devset.into_devices())
 	}
+
+	/// Get the key used to encrypt the header.
+	pub fn header_key(&self) -> [u8; 32] {
+		self.store.header_key()
+	}
+
+	/// Set a new key derivation function.
+	///
+	/// This replaces the header key.
+	pub fn set_key_deriver(&self, kdf: KeyDeriver<'_>) {
+		self.store.set_key_deriver(kdf)
+	}
 }
 
 pub enum NewError<D: Dev> {

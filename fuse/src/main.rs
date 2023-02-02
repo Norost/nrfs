@@ -5,15 +5,37 @@
 mod fs;
 mod job;
 
-use fuser::MountOption;
+use {clap::Parser, fuser::MountOption, std::error::Error};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// FUSE driver for NRFS.
+#[derive(Parser)]
+struct Args {
+	/// Path to mount filesystem on.
+	mount: String,
+	/// Paths to filesystem images.
+	images: Vec<String>,
+	/// File to load key from.
+	#[arg(short = 'K', long)]
+	key_file: Option<String>,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
 	env_logger::init();
 
-	let mut a = std::env::args().skip(1);
-	let m = a.next().ok_or("expected mount path")?;
+	let args = Args::parse();
 
-	let f = a
+	let key = args
+		.key_file
+		.map(|key_file| {
+			let key = std::fs::read(key_file)?;
+			let key: [u8; 32] = key.try_into().map_err(|_| "key is not 32 bytes long")?;
+			Ok::<_, Box<dyn Error>>(key)
+		})
+		.transpose()?;
+
+	let f = args
+		.images
+		.into_iter()
 		.map(|path| {
 			std::fs::OpenOptions::new()
 				.read(true)
@@ -22,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		})
 		.try_collect::<Vec<_>>()?;
 
-	let (f, channel) = futures_executor::block_on(fs::Fs::new(0o755, f.into_iter()));
+	let (f, channel) = futures_executor::block_on(fs::Fs::new(0o755, f.into_iter(), key));
 
 	let mut opts = vec![
 		MountOption::FSName("nrfs".into()),
@@ -34,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		opts.extend_from_slice(&[MountOption::AllowOther]);
 	}
 
-	let session = fuser::spawn_mount2(channel, m, &opts)?;
+	let session = fuser::spawn_mount2(channel, args.mount, &opts)?;
 
 	futures_executor::block_on(f.run()).unwrap();
 

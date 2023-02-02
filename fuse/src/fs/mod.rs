@@ -35,25 +35,25 @@ pub struct Fs {
 }
 
 impl Fs {
-	pub async fn new(permissions: u16, io: impl Iterator<Item = fs::File>) -> (Self, FsChannel) {
+	pub async fn new(
+		permissions: u16,
+		io: impl Iterator<Item = fs::File>,
+		key: Option<[u8; 32]>,
+	) -> (Self, FsChannel) {
 		let retrieve_key = &mut |use_password| {
-			if use_password {
-				rpassword::prompt_password("Password: ")
-					.expect("failed to ask password")
-					.into_bytes()
+			if let Some(key) = key {
+				Some(nrfs::KeyPassword::Key(key))
+			} else if use_password {
+				let pwd = rpassword::prompt_password("Password: ").expect("failed to ask password");
+				Some(nrfs::KeyPassword::Password(pwd.into_bytes()))
 			} else {
-				todo!("ask for key file")
+				None
 			}
 		};
 
 		let devices = io.map(|f| FileDev::new(f, nrfs::BlockSize::K4)).collect();
-		let conf = nrfs::LoadConfig {
-			key_password: nrfs::KeyPassword::Key(&[0; 32]),
-			retrieve_key,
-			devices,
-			cache_size: 1 << 24,
-			allow_repair: true,
-		};
+		let conf =
+			nrfs::LoadConfig { retrieve_key, devices, cache_size: 1 << 24, allow_repair: true };
 		eprintln!("Mounting filesystem");
 		let fs = Nrfs::load(conf).await.unwrap();
 

@@ -2,7 +2,9 @@ pub mod allocator;
 pub mod dev;
 
 use {
-	crate::{resource::Buf, BlockSize, Compression, Error, MaxRecordSize, Record, Resource},
+	crate::{
+		resource::Buf, BlockSize, Compression, Error, KeyDeriver, MaxRecordSize, Record, Resource,
+	},
 	allocator::Allocator,
 	core::cell::{Cell, RefCell},
 	dev::Set256,
@@ -276,6 +278,18 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		};
 		s.allocation.total_blocks = self.devices.block_count();
 		s
+	}
+
+	/// Get the key used to encrypt the header.
+	pub fn header_key(&self) -> [u8; 32] {
+		self.devices.header_key()
+	}
+
+	/// Set a new key derivation function.
+	///
+	/// This replaces the header key.
+	pub fn set_key_deriver(&self, kdf: KeyDeriver<'_>) {
+		self.devices.set_key_deriver(kdf)
 	}
 
 	pub fn resource(&self) -> &R {

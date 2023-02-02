@@ -4,7 +4,7 @@ use {
 		cipher::{Cipher, HeaderCipher},
 		header::{Configuration, Header, MirrorCount, MirrorIndex},
 		key_derivation, BlockSize, CipherType, Compression, Error, KeyDerivation, KeyDeriver,
-		LoadConfig, MaxRecordSize, NewConfig, Record, Resource,
+		KeyPassword, LoadConfig, MaxRecordSize, NewConfig, Record, Resource,
 	},
 	alloc::sync::Arc,
 	core::{cell::Cell, fmt, future, mem},
@@ -209,12 +209,17 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 				let kdf = Header::get_key_derivation(buf.get()).ok()?;
 				let header_key = header_key.get_or_insert_with(|| match (kdf, cipher) {
 					(_, CipherType::NoneXxh3) => [0; 32],
-					(KeyDerivation::None, _) => (config.retrieve_key)(false)
-						.try_into()
-						.expect("key is not 16 bytes"),
+					(KeyDerivation::None, _) => match (config.retrieve_key)(false).unwrap() {
+						KeyPassword::Key(k) => k,
+						KeyPassword::Password(_) => panic!("expected key"),
+					},
 					(KeyDerivation::Argon2id { p, t, m }, _) => {
-						let pwd = (config.retrieve_key)(true);
-						key_derivation::argon2id(&pwd, &Header::get_uid(buf.get()), m, t, p)
+						match (config.retrieve_key)(true).unwrap() {
+							KeyPassword::Key(k) => k,
+							KeyPassword::Password(pwd) => {
+								key_derivation::argon2id(&pwd, &Header::get_uid(buf.get()), m, t, p)
+							}
+						}
 					}
 				});
 				let cipher = HeaderCipher {
@@ -665,6 +670,26 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 	/// **Only use this cipher for decrypting data!**
 	pub fn cipher_with_nonce(&self, nonce: u64) -> Cipher {
 		Cipher { key: self.key, nonce, ty: self.cipher }
+	}
+
+	/// Get the key used to encrypt the header.
+	pub fn header_key(&self) -> [u8; 32] {
+		self.header_key.get()
+	}
+
+	/// Set a new key derivation function.
+	///
+	/// This replaces the header key.
+	pub fn set_key_deriver(&self, kdf: KeyDeriver<'_>) {
+		let (key, kdf) = match kdf {
+			KeyDeriver::None { key } => (*key, KeyDerivation::None),
+			KeyDeriver::Argon2id { password, m, t, p } => {
+				let key = key_derivation::argon2id(password, &self.uid, m, t, p);
+				(key, KeyDerivation::Argon2id { m, t, p })
+			}
+		};
+		self.header_key.set(key);
+		self.key_derivation.set(kdf);
 	}
 
 	/// Construct a cipher for encrypting the header.

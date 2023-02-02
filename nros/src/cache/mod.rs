@@ -10,7 +10,7 @@ pub use tree::Tree;
 use {
 	crate::{
 		object::Object, resource::Buf, storage, util::box_fut, Background, BlockSize, Dev, Error,
-		MaxRecordSize, Record, Resource, Store,
+		KeyDeriver, MaxRecordSize, Record, Resource, Store,
 	},
 	core::{
 		cell::{RefCell, RefMut},
@@ -895,6 +895,18 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				.iter()
 				.fold(0, |x, r| r.end - r.start + x),
 		}
+	}
+
+	/// Get the key used to encrypt the header.
+	pub fn header_key(&self) -> [u8; 32] {
+		self.store.header_key()
+	}
+
+	/// Set a new key derivation function.
+	///
+	/// This replaces the header key.
+	pub fn set_key_deriver(&self, kdf: KeyDeriver<'_>) {
+		self.store.set_key_deriver(kdf)
 	}
 
 	/// Amount of entries in a parent record as a power of two.

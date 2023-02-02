@@ -149,10 +149,9 @@ impl<D: Dev> Nrfs<D> {
 	/// `read_only` guarantees no modifications will be made.
 	// TODO read_only is a sham.
 	pub async fn load(config: LoadConfig<'_, D>) -> Result<Self, Error<D>> {
-		let LoadConfig { devices, key_password, cache_size, allow_repair, retrieve_key } = config;
+		let LoadConfig { devices, cache_size, allow_repair, retrieve_key } = config;
 		let conf = nros::LoadConfig {
 			devices,
-			key_password,
 			cache_size,
 			allow_repair,
 			retrieve_key,
@@ -198,6 +197,18 @@ impl<D: Dev> Nrfs<D> {
 	/// Get statistics for this session.
 	pub fn statistics(&self) -> Statistics {
 		Statistics { object_store: self.storage.statistics() }
+	}
+
+	/// Get the key used to encrypt the header.
+	pub fn header_key(&self) -> [u8; 32] {
+		self.storage.header_key()
+	}
+
+	/// Set a new key derivation function.
+	///
+	/// This replaces the header key.
+	pub fn set_key_deriver(&self, kdf: KeyDeriver<'_>) {
+		self.storage.set_key_deriver(kdf)
 	}
 
 	/// Get a reference to a [`FileData`] structure.

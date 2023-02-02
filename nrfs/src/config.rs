@@ -30,8 +30,6 @@ pub struct NewConfig<'a, D: Dev> {
 pub struct LoadConfig<'a, D: Dev> {
 	/// Devices.
 	pub devices: Vec<D>,
-	/// Key or password
-	pub key_password: KeyPassword<'a>,
 	/// Size of the cache.
 	///
 	/// This is a soft limit.
@@ -43,6 +41,8 @@ pub struct LoadConfig<'a, D: Dev> {
 	pub allow_repair: bool,
 	/// Method to retrieve either a key directly or get a password.
 	///
-	/// If the passed parameter is `true` a password is expected.
-	pub retrieve_key: &'a mut dyn FnMut(bool) -> Vec<u8>,
+	/// If the passed parameter is `true` a password can be provided.
+	///
+	/// On failure, return `None`.
+	pub retrieve_key: &'a mut dyn FnMut(bool) -> Option<KeyPassword>,
 }

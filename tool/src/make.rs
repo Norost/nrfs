@@ -1,11 +1,13 @@
 #[cfg(target_family = "unix")]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use {
 	crate::{Compression, Encryption},
-	core::num::{NonZeroU32, NonZeroU8},
 	std::{
+		error::Error,
 		fs::{self, OpenOptions},
 		future::Future,
+		io::Write,
+		num::{NonZeroU32, NonZeroU8},
 		path::{Path, PathBuf},
 		pin::Pin,
 		str::FromStr,
@@ -17,7 +19,7 @@ use {
 /// Should be kept up-to-date with latest recommendations.
 mod defaults {
 	pub mod argon2id {
-		use core::num::{NonZeroU32, NonZeroU8};
+		use std::num::{NonZeroU32, NonZeroU8};
 
 		pub const M: NonZeroU32 = NonZeroU32::new(1 << 20).unwrap(); // 1 GiB
 		pub const T: NonZeroU32 = NonZeroU32::new(10).unwrap(); // 10 iterations
@@ -77,6 +79,11 @@ pub struct Make {
 	/// Soft limit on the cache size.
 	#[clap(long, default_value_t = 1 << 27)]
 	cache_size: usize,
+	/// File to load or save the key to.
+	///
+	/// If a key derivation function is specified, the generated key will be saved to this file.
+	#[arg(short = 'K', long)]
+	key_file: Option<String>,
 }
 
 #[derive(Clone)]
@@ -204,7 +211,7 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 	};
 
 	eprintln!("Creating filesystem");
-	let nrfs = nrfs::Nrfs::new(config).await.unwrap();
+	let nrfs = nrfs::Nrfs::new(config).await?;
 
 	let bg = nrfs::Background::default();
 
@@ -212,77 +219,90 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 		if let Some(d) = &args.directory {
 			eprintln!("Adding files from {:?}", d);
 			let root = nrfs.root_dir(&bg).await?;
-			add_files(root, d, args.follow, extensions).await;
+			add_files(root, d, args.follow, extensions).await?;
 		}
-		nrfs.finish_transaction(&bg).await
+		nrfs.finish_transaction(&bg).await?;
+		Ok::<_, Box<dyn Error>>(())
 	})
-	.await
-	.unwrap();
+	.await?;
 
-	bg.drop().await.unwrap();
-	nrfs.unmount().await.unwrap();
+	bg.drop().await?;
 
-	async fn add_files(
-		root: nrfs::DirRef<'_, '_, nrfs::dev::FileDev>,
-		from: &Path,
-		follow_symlinks: bool,
-		extensions: nrfs::dir::EnableExtensions,
-	) {
-		for f in fs::read_dir(from).expect("failed to read dir") {
-			let f = f.unwrap();
-			let m = f.metadata().unwrap();
-			let n = f.file_name();
-			let n = n.to_str().unwrap().try_into().unwrap();
+	// Get key and unmount now so the user doesn't have to start all over again
+	// in case an error occurs later.
+	let key = nrfs.header_key();
+	nrfs.unmount().await?;
 
-			let mut ext = nrfs::dir::Extensions::default();
-
-			ext.unix = extensions.unix().then(|| {
-				let mut u = nrfs::dir::ext::unix::Entry::new(0o700, 0, 0);
-				let p = m.permissions();
-				#[cfg(target_family = "unix")]
-				{
-					u.permissions = (p.mode() & 0o777) as _;
-					u.set_uid(m.uid());
-					u.set_gid(m.gid());
-				}
-				u
-			});
-
-			ext.mtime = extensions.mtime().then(|| nrfs::dir::ext::mtime::Entry {
-				mtime: m
-					.modified()
-					.ok()
-					.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-					.map(|t| t.as_micros().try_into().unwrap_or(i64::MAX))
-					.unwrap_or(0),
-			});
-
-			if m.is_file() || (m.is_symlink() && follow_symlinks) {
-				let c = fs::read(f.path()).unwrap();
-				let f = root.create_file(n, &ext).await.unwrap().unwrap();
-				f.write_grow(0, &c).await.unwrap();
-				f.drop().await.unwrap();
-			} else if m.is_dir() {
-				// FIXME randomize key
-				let opt = nrfs::DirOptions { extensions, ..nrfs::DirOptions::new(&[0; 16]) };
-				let d = root.create_dir(n, &opt, &ext).await.unwrap().unwrap();
-				let path = f.path();
-				let fut: Pin<Box<dyn Future<Output = ()>>> =
-					Box::pin(add_files(d, &path, follow_symlinks, extensions));
-				fut.await;
-			} else if m.is_symlink() {
-				let c = fs::read_link(f.path()).unwrap();
-				let f = root.create_sym(n, &ext).await.unwrap().unwrap();
-				f.write_grow(0, c.to_str().unwrap().as_bytes())
-					.await
-					.unwrap();
-				f.drop().await.unwrap();
-			} else {
-				todo!()
-			}
-		}
-		root.drop().await.unwrap();
+	if let Some(key_file) = args.key_file {
+		eprintln!("Saving key to {:?}", key_file);
+		let mut opt = fs::OpenOptions::new();
+		opt.create(true);
+		opt.write(true);
+		#[cfg(unix)]
+		opt.mode(0o400); // read-only
+		opt.open(key_file)?.write_all(&key)?;
 	}
 
+	Ok(())
+}
+
+async fn add_files(
+	root: nrfs::DirRef<'_, '_, nrfs::dev::FileDev>,
+	from: &Path,
+	follow_symlinks: bool,
+	extensions: nrfs::dir::EnableExtensions,
+) -> Result<(), Box<dyn Error>> {
+	for f in fs::read_dir(from).expect("failed to read dir") {
+		let f = f?;
+		let m = f.metadata()?;
+		let n = f.file_name();
+		let n = n.to_str().unwrap().try_into().unwrap();
+
+		let mut ext = nrfs::dir::Extensions::default();
+
+		ext.unix = extensions.unix().then(|| {
+			let mut u = nrfs::dir::ext::unix::Entry::new(0o700, 0, 0);
+			let p = m.permissions();
+			#[cfg(target_family = "unix")]
+			{
+				u.permissions = (p.mode() & 0o777) as _;
+				u.set_uid(m.uid());
+				u.set_gid(m.gid());
+			}
+			u
+		});
+
+		ext.mtime = extensions.mtime().then(|| nrfs::dir::ext::mtime::Entry {
+			mtime: m
+				.modified()
+				.ok()
+				.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+				.map(|t| t.as_micros().try_into().unwrap_or(i64::MAX))
+				.unwrap_or(0),
+		});
+
+		if m.is_file() || (m.is_symlink() && follow_symlinks) {
+			let c = fs::read(f.path())?;
+			let f = root.create_file(n, &ext).await?.unwrap();
+			f.write_grow(0, &c).await?;
+			f.drop().await?;
+		} else if m.is_dir() {
+			// FIXME randomize key
+			let opt = nrfs::DirOptions { extensions, ..nrfs::DirOptions::new(&[0; 16]) };
+			let d = root.create_dir(n, &opt, &ext).await?.unwrap();
+			let path = f.path();
+			let fut: Pin<Box<dyn Future<Output = _>>> =
+				Box::pin(add_files(d, &path, follow_symlinks, extensions));
+			fut.await?;
+		} else if m.is_symlink() {
+			let c = fs::read_link(f.path())?;
+			let f = root.create_sym(n, &ext).await?.unwrap();
+			f.write_grow(0, c.to_str().unwrap().as_bytes()).await?;
+			f.drop().await?;
+		} else {
+			todo!()
+		}
+	}
+	root.drop().await?;
 	Ok(())
 }

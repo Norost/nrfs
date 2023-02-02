@@ -1,4 +1,9 @@
-use std::{error::Error, fs::File, future::Future, pin::Pin};
+use std::{
+	error::Error,
+	fs::{self, File},
+	future::Future,
+	pin::Pin,
+};
 
 /// Dump the contents of a filesystem.
 #[derive(clap::Args)]
@@ -8,6 +13,9 @@ pub struct Dump {
 	/// Soft limit on the global cache size.
 	#[clap(long, default_value_t = 1 << 27)]
 	cache_size: usize,
+	/// File containing the key to decrypt the filesystem header with.
+	#[arg(short = 'K', long)]
+	key_file: Option<String>,
 }
 
 /// Additional statistics collected while iterating.
@@ -30,13 +38,24 @@ struct Statistics {
 }
 
 pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
+	let key = args
+		.key_file
+		.map(|key_file| {
+			eprintln!("Loading key from {:?}", &key_file);
+			let key = fs::read(&key_file)?;
+			let key: [u8; 32] = key.try_into().map_err(|_| "key is not 32 bytes long")?;
+			Ok::<_, Box<dyn Error>>(key)
+		})
+		.transpose()?;
+
 	let retrieve_key = &mut |use_password| {
-		if use_password {
-			rpassword::prompt_password("Password: ")
-				.expect("failed to ask password")
-				.into_bytes()
+		if let Some(key) = key {
+			Some(nrfs::KeyPassword::Key(key))
+		} else if use_password {
+			let pwd = rpassword::prompt_password("Password: ").expect("failed to ask password");
+			Some(nrfs::KeyPassword::Password(pwd.into_bytes()))
 		} else {
-			todo!("ask for key file")
+			None
 		}
 	};
 
@@ -52,11 +71,10 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 		.try_collect()?;
 
 	let conf = nrfs::LoadConfig {
-		key_password: nrfs::KeyPassword::Key(&[0; 32]),
 		retrieve_key,
 		devices,
 		cache_size: args.cache_size,
-		allow_repair: true,
+		allow_repair: false,
 	};
 	let nrfs = nrfs::Nrfs::load(conf).await?;
 
