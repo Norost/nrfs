@@ -173,7 +173,7 @@ impl Allocator {
 				total_blocks: 0, // TODO
 				used_blocks,
 				..Default::default()
-			}
+			},
 		})
 	}
 

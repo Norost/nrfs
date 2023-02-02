@@ -890,7 +890,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		Statistics {
 			storage: self.store.statistics(),
 			global_usage: data.lru.size(),
-			used_objects: data.used_objects_ids.iter().fold(0, |x, r| r.end - r.start + x),
+			used_objects: data
+				.used_objects_ids
+				.iter()
+				.fold(0, |x, r| r.end - r.start + x),
 		}
 	}
 

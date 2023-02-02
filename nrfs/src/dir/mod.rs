@@ -1167,6 +1167,22 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		Ok(self.fs.dir_data(self.id).item_count)
 	}
 
+	/// Get the amount of allocated but unused item slots in this directory.
+	pub async fn capacity(&self) -> Result<u32, Error<D>> {
+		Ok(self.fs.dir_data(self.id).item_capacity)
+	}
+
+	/// Get the total size of the heap.
+	pub async fn heap_size(&self) -> Result<u64, Error<D>> {
+		Ok(self
+			.fs
+			.storage
+			.get(self.bg, self.id + HEAP_OFFT)
+			.await?
+			.len()
+			.await?)
+	}
+
 	/// Create a [`Dir`] helper structure.
 	pub(crate) fn dir(&self) -> Dir<'a, 'b, D> {
 		Dir::new(self.bg, self.fs, self.id)

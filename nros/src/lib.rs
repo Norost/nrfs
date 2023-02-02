@@ -17,6 +17,7 @@
 #![feature(pin_macro)]
 #![feature(slice_flatten)]
 #![feature(type_alias_impl_trait)]
+#![feature(error_in_core)]
 
 extern crate alloc;
 
@@ -376,4 +377,21 @@ where
 			Self::NotEnoughSpace => f.debug_tuple("NotEnoughSpace").finish(),
 		}
 	}
+}
+
+impl<D> fmt::Display for Error<D>
+where
+	D: Dev,
+	D::Error: fmt::Debug,
+{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		fmt::Debug::fmt(self, f)
+	}
+}
+
+impl<D> core::error::Error for Error<D>
+where
+	D: Dev,
+	D::Error: fmt::Debug,
+{
 }
