@@ -52,6 +52,10 @@ pub(super) struct Allocator {
 /// Used for debugging.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Statistics {
+	/// Total amount of blocks available
+	pub total_blocks: u64,
+	/// Amount of blocks allocated.
+	pub used_blocks: u64,
 	/// Total amount of allocations in this session.
 	pub allocations: u64,
 	/// Total amount of deallocations in this session.
@@ -151,6 +155,8 @@ impl Allocator {
 
 		trace!("==>  {:?}", &alloc_map);
 
+		let used_blocks = alloc_map.iter().fold(0, |x, r| r.end - r.start + x);
+
 		Ok(Self {
 			#[cfg(feature = "debug-trace-alloc")]
 			debug_alloc_traces: Default::default(),
@@ -163,7 +169,11 @@ impl Allocator {
 			free_map: Default::default(),
 			dirty_map: Default::default(),
 			stack,
-			statistics: Default::default(),
+			statistics: Statistics {
+				total_blocks: 0, // TODO
+				used_blocks,
+				..Default::default()
+			},
 		})
 	}
 
@@ -179,6 +189,7 @@ impl Allocator {
 				self.dirty_map.insert(r.start..r.start + blocks);
 				self.statistics.allocations += 1;
 				self.statistics.allocated_blocks += blocks;
+				self.statistics.used_blocks += blocks;
 				#[cfg(feature = "debug-trace-alloc")]
 				{
 					for i in r.clone() {
@@ -229,6 +240,7 @@ impl Allocator {
 		}
 		self.statistics.deallocations += 1;
 		self.statistics.deallocated_blocks += blocks;
+		self.statistics.used_blocks -= blocks;
 	}
 
 	/// Ensure all blocks in a range are allocated.

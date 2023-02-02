@@ -1,7 +1,7 @@
 use {
 	fuser::{
-		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyWrite,
-		TimeOrNow,
+		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs,
+		ReplyWrite, TimeOrNow,
 	},
 	std::{ffi::OsStr, path::Path},
 };
@@ -25,6 +25,7 @@ pub enum Job {
 	Unlink(Unlink),
 	RmDir(RmDir),
 	FSync(FSync),
+	StatFs(StatFs),
 	Destroy,
 }
 
@@ -150,4 +151,9 @@ pub struct RmDir {
 #[derive(Debug)]
 pub struct FSync {
 	pub reply: ReplyEmpty,
+}
+
+#[derive(Debug)]
+pub struct StatFs {
+	pub reply: ReplyStatfs,
 }

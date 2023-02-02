@@ -35,30 +35,32 @@ pub struct Fs {
 }
 
 impl Fs {
-	pub async fn new(io: fs::File) -> (Self, FsChannel) {
+	pub async fn new(
+		permissions: u16,
+		io: impl Iterator<Item = fs::File>,
+		key: Option<[u8; 32]>,
+		cache_size: usize,
+	) -> (Self, FsChannel) {
 		let retrieve_key = &mut |use_password| {
-			if use_password {
-				rpassword::prompt_password("Password: ")
-					.expect("failed to ask password")
-					.into_bytes()
+			if let Some(key) = key {
+				Some(nrfs::KeyPassword::Key(key))
+			} else if use_password {
+				let pwd = rpassword::prompt_password("Password: ").expect("failed to ask password");
+				Some(nrfs::KeyPassword::Password(pwd.into_bytes()))
 			} else {
-				todo!("ask for key file")
+				None
 			}
 		};
 
-		let fs = FileDev::new(io, nrfs::BlockSize::K4);
-		let conf = nrfs::LoadConfig {
-			key_password: nrfs::KeyPassword::Key(&[0; 32]),
-			retrieve_key,
-			devices: vec![fs],
-			cache_size: 1 << 24,
-			allow_repair: true,
-		};
+		let devices = io.map(|f| FileDev::new(f, nrfs::BlockSize::K4)).collect();
+		let conf = nrfs::LoadConfig { retrieve_key, devices, cache_size, allow_repair: true };
 		eprintln!("Mounting filesystem");
 		let fs = Nrfs::load(conf).await.unwrap();
 
 		// Add root dir now so it's always at ino 1.
-		let mut ino = InodeStore::new(unsafe { libc::getuid() }, unsafe { libc::getgid() });
+		let mut ino = InodeStore::new(permissions, unsafe { libc::getuid() }, unsafe {
+			libc::getgid()
+		});
 
 		let bg = Background::default();
 		let root = bg.run(fs.root_dir(&bg)).await.unwrap();
@@ -108,6 +110,7 @@ impl Fs {
 					Unlink unlink
 					RmDir rmdir
 					FSync fsync
+					StatFs statfs
 				}
 			}
 			Ok::<_, nrfs::Error<_>>(())
@@ -135,6 +138,13 @@ impl Fs {
 		});
 
 		let blksize = 1u32 << self.fs.block_size().to_raw();
+
+		// "Number of 512B blocks allocated"
+		let blocks =
+			u64::try_from((u128::from(len) + u128::from(blksize) - 1) / u128::from(blksize))
+				.unwrap();
+		let blocks = blocks << (self.fs.block_size().to_raw() - 9);
+
 		FileAttr {
 			atime: UNIX_EPOCH,
 			mtime,
@@ -148,9 +158,7 @@ impl Fs {
 			flags: 0,
 			kind: ty,
 			size: len,
-			blocks: ((u128::from(len) + u128::from(blksize) - 1) / u128::from(blksize))
-				.try_into()
-				.unwrap_or(u64::MAX),
+			blocks,
 			ino,
 			blksize,
 		}

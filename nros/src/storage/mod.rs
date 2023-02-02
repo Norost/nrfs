@@ -2,7 +2,9 @@ pub mod allocator;
 pub mod dev;
 
 use {
-	crate::{resource::Buf, BlockSize, Compression, Error, MaxRecordSize, Record, Resource},
+	crate::{
+		resource::Buf, BlockSize, Compression, Error, KeyDeriver, MaxRecordSize, Record, Resource,
+	},
 	allocator::Allocator,
 	core::cell::{Cell, RefCell},
 	dev::Set256,
@@ -260,11 +262,12 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			{$($f:ident)*} => {
 				Statistics {
 					allocation: self.allocator.borrow().statistics,
+					block_size: self.block_size(),
 					$($f: self.$f.get(),)*
 				}
 			}
 		}
-		s! {
+		let mut s = s! {
 			packed_bytes_read
 			packed_bytes_written
 			packed_bytes_destroyed
@@ -272,7 +275,21 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			unpacked_bytes_written
 			device_read_failures
 			record_unpack_failures
-		}
+		};
+		s.allocation.total_blocks = self.devices.block_count();
+		s
+	}
+
+	/// Get the key used to encrypt the header.
+	pub fn header_key(&self) -> [u8; 32] {
+		self.devices.header_key()
+	}
+
+	/// Set a new key derivation function.
+	///
+	/// This replaces the header key.
+	pub fn set_key_deriver(&self, kdf: KeyDeriver<'_>) {
+		self.devices.set_key_deriver(kdf)
 	}
 
 	pub fn resource(&self) -> &R {
@@ -293,6 +310,8 @@ pub struct AllocLog {
 pub struct Statistics {
 	/// Allocation statistics.
 	pub allocation: allocator::Statistics,
+	/// Size of a single block.
+	pub block_size: BlockSize,
 	/// Packed bytes read.
 	pub packed_bytes_read: u64,
 	/// Packed bytes written.

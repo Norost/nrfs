@@ -31,3 +31,9 @@ impl BlockSize {
 		(n + mask) & !mask
 	}
 }
+
+impl Default for BlockSize {
+	fn default() -> Self {
+		Self::K4
+	}
+}

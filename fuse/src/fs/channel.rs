@@ -3,7 +3,7 @@ use {
 	async_channel::Sender,
 	fuser::{
 		Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-		ReplyEntry, ReplyWrite, Request, TimeOrNow,
+		ReplyEntry, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 	},
 	std::{ffi::OsStr, path::Path, time::SystemTime},
 };
@@ -234,6 +234,10 @@ impl Filesystem for FsChannel {
 		reply: ReplyEmpty,
 	) {
 		self.send(Job::FSync(FSync { reply }));
+	}
+
+	fn statfs(&mut self, _: &Request<'_>, _: u64, reply: ReplyStatfs) {
+		self.send(Job::StatFs(StatFs { reply }))
 	}
 
 	fn destroy(&mut self) {

@@ -12,6 +12,7 @@ mod readlink;
 mod rename;
 mod rmdir;
 mod setattr;
+mod statfs;
 mod symlink;
 mod unlink;
 mod write;

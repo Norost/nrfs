@@ -17,6 +17,7 @@
 #![feature(pin_macro)]
 #![feature(slice_flatten)]
 #![feature(type_alias_impl_trait)]
+#![feature(error_in_core)]
 
 extern crate alloc;
 
@@ -330,6 +331,18 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 		let devset = store.unmount().await?;
 		Ok(devset.into_devices())
 	}
+
+	/// Get the key used to encrypt the header.
+	pub fn header_key(&self) -> [u8; 32] {
+		self.store.header_key()
+	}
+
+	/// Set a new key derivation function.
+	///
+	/// This replaces the header key.
+	pub fn set_key_deriver(&self, kdf: KeyDeriver<'_>) {
+		self.store.set_key_deriver(kdf)
+	}
 }
 
 pub enum NewError<D: Dev> {
@@ -376,4 +389,21 @@ where
 			Self::NotEnoughSpace => f.debug_tuple("NotEnoughSpace").finish(),
 		}
 	}
+}
+
+impl<D> fmt::Display for Error<D>
+where
+	D: Dev,
+	D::Error: fmt::Debug,
+{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		fmt::Debug::fmt(self, f)
+	}
+}
+
+impl<D> core::error::Error for Error<D>
+where
+	D: Dev,
+	D::Error: fmt::Debug,
+{
 }
