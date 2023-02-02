@@ -11,7 +11,7 @@ use clap::Parser;
 #[derive(Debug, clap::Parser)]
 #[clap(
 	author = "David Hoppenbrouwers",
-	version = "0.1",
+	version = "0.2",
 	about = "Tool for creating & working with NRFS filesystems"
 )]
 enum Command {
