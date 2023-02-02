@@ -39,16 +39,16 @@ struct Make {
 		help = "Whether to resolve symlinks when copying a directory"
 	)]
 	follow: bool,
-	#[clap(short, long, default_value_t = 17, help = "The record size to use")]
+	#[clap(short, long, value_parser = 9..=24, default_value_t = 17, help = "The record size to use")]
 	record_size_p2: u8,
 	#[clap(
 		short,
 		long,
+		value_parser = 9..=24,
+		default_value_t = 12,
 		help = "The block size to use",
-		long_help = "If not specified it is derived automatically\n\
-		If derivation fails, it defaults to 12 (4K)"
 	)]
-	block_size_p2: Option<u8>,
+	block_size_p2: u8,
 	#[clap(
 		short,
 		long,
@@ -116,16 +116,7 @@ async fn make(args: Make) {
 		.open(&args.path)
 		.unwrap();
 
-	let block_size = if let Some(v) = args.block_size_p2 {
-		v
-	} else {
-		#[cfg(target_family = "unix")]
-		let bs = f.metadata().unwrap().blksize().trailing_zeros() as _;
-		#[cfg(not(target_family = "unix"))]
-		let bs = 12;
-		bs
-	};
-	let block_size = BlockSize::from_raw(block_size).unwrap();
+	let block_size = BlockSize::from_raw(args.block_size_p2).unwrap();
 
 	let mut extensions = nrfs::dir::EnableExtensions::default();
 	extensions.add_unix();
