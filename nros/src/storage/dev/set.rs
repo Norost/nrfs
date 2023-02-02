@@ -76,14 +76,28 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 	///
 	/// If any device has no blocks.
 	pub async fn new(config: NewConfig<'_, D, R>) -> Result<Self, Error<D>> {
+		// Determine length of smallest chain.
+		let block_count = config
+			.mirrors
+			.iter()
+			.map(|c| c.iter().map(|d| d.block_count() - 2).sum::<u64>())
+			.min()
+			.expect("no chains");
+
 		// Collect devices into a convenient format.
 		let mut devices = config
 			.mirrors
 			.into_iter()
 			.map(|chain| {
+				// Don't exceed the block count of the smallest chain.
+				let mut remaining_blocks = block_count;
 				chain
 					.into_iter()
-					.map(|dev| Node { block_count: dev.block_count() - 2, dev, block_offset: 0 })
+					.map(|dev| {
+						let block_count = remaining_blocks.min(dev.block_count() - 2);
+						remaining_blocks -= block_count;
+						Node { block_count, dev, block_offset: 0 }
+					})
 					.collect::<Box<_>>()
 			})
 			.collect::<Box<_>>();
@@ -110,13 +124,6 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 				.all(|d| d.dev.block_size().to_raw() == block_size),
 			"todo: support mismatched block sizes"
 		);
-
-		// Determine length of smallest chain.
-		let block_count = devices
-			.iter()
-			.map(|c| c.iter().map(|d| d.block_count).sum::<u64>())
-			.min()
-			.expect("no chains");
 
 		// Assign block offsets to devices in chains and write headers.
 		for chain in devices.iter_mut() {
@@ -261,6 +268,13 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		for chain in mirrors.iter_mut() {
 			chain.sort_unstable_by_key(|(_, lba_offset, _)| *lba_offset);
 			// TODO check gaps
+			let mut next_lba = 0;
+			for &(_, lba_offset, block_count) in chain.iter() {
+				// FIXME don't panic, return error instead.
+				assert_eq!(lba_offset, next_lba, "gap in chain");
+				next_lba += block_count;
+			}
+			assert_eq!(next_lba, header.total_block_count, "gap in chain");
 		}
 
 		// TODO avoid conversion to Vec<Option<_>>
