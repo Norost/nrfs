@@ -1,7 +1,5 @@
-#![forbid(unused_must_use)]
-#![forbid(rust_2018_idioms)]
-#![feature(iterator_try_collect)]
-#![feature(pin_macro)]
+#![forbid(unused_must_use, rust_2018_idioms)]
+#![feature(const_option, iterator_try_collect, pin_macro)]
 
 mod dump;
 mod make;
@@ -35,15 +33,20 @@ impl From<Compression> for nrfs::Compression {
 	}
 }
 
-#[derive(Clone, Debug, clap::ValueEnum)]
+#[derive(Clone, Debug)]
 enum Encryption {
 	Chacha8Poly1305,
 }
 
-#[derive(Clone, Debug, clap::ValueEnum)]
-enum KeyDerivationFunction {
-	None,
-	Argon2id,
+impl std::str::FromStr for Encryption {
+	type Err = &'static str;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		Ok(match s {
+			"chacha8poly1305" => Self::Chacha8Poly1305,
+			_ => return Err("unknown cipher algorithm"),
+		})
+	}
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

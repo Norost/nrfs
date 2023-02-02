@@ -1,14 +1,33 @@
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use {
-	crate::{Compression, Encryption, KeyDerivationFunction},
+	crate::{Compression, Encryption},
+	core::num::{NonZeroU32, NonZeroU8},
 	std::{
 		fs::{self, OpenOptions},
 		future::Future,
 		path::{Path, PathBuf},
 		pin::Pin,
+		str::FromStr,
 	},
 };
+
+/// Default parameters.
+///
+/// Should be kept up-to-date with latest recommendations.
+mod defaults {
+	pub mod argon2id {
+		use core::num::{NonZeroU32, NonZeroU8};
+
+		pub const M: NonZeroU32 = NonZeroU32::new(1 << 20).unwrap(); // 1 GiB
+		pub const T: NonZeroU32 = NonZeroU32::new(10).unwrap(); // 10 iterations
+		pub const P: NonZeroU8 = NonZeroU8::new(1).unwrap(); // 1 thread
+
+		pub const M_MIN: u64 = 1 << 15; // 32 MiB
+		pub const T_MIN: u64 = 6; // 6 iterations
+		pub const P_MIN: u64 = 1; // 1 thread
+	}
+}
 
 /// Create a new filesystem.
 #[derive(clap::Args)]
@@ -51,11 +70,66 @@ pub struct Make {
 	/// Which algorithm to use to derive the key for encryption.
 	///
 	/// If none, a 32-byte key must be supplied.
-	#[clap(short, long, value_enum, default_value = "argon2id")]
+	///
+	/// Possible values: none, argon2id[,m,t,p].
+	#[arg(short, long, default_value = "argon2id")]
 	key_derivation_function: KeyDerivationFunction,
 	/// Soft limit on the cache size.
 	#[clap(long, default_value_t = 1 << 27)]
 	cache_size: usize,
+}
+
+#[derive(Clone)]
+enum KeyDerivationFunction {
+	None,
+	Argon2id { m: NonZeroU32, t: NonZeroU32, p: NonZeroU8 },
+}
+
+impl FromStr for KeyDerivationFunction {
+	type Err = &'static str;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		use defaults::argon2id::*;
+		Ok(match s {
+			"none" => KeyDerivationFunction::None,
+			"argon2id" => {
+				let p = u8::try_from(num_cpus::get()).unwrap_or(0);
+				Self::Argon2id { m: M, t: T, p: NonZeroU8::new(p).unwrap_or(P) }
+			}
+			_ if s.starts_with("argon2id,") => {
+				let mut it = s.split(',').skip(1);
+				let m = it.next().ok_or("expected 'm' argument")?;
+				let t = it.next().ok_or("expected 't' argument")?;
+				let p = it.next().ok_or("expected 'p' argument")?;
+				let m = m
+					.parse::<u64>()
+					.map_err(|_| "expected integer value for 'm'")?;
+				let t = t
+					.parse::<u64>()
+					.map_err(|_| "expected integer value for 't'")?;
+				let p = p
+					.parse::<u64>()
+					.map_err(|_| "expected integer value for 'p'")?;
+				(M_MIN..1 << 28)
+					.contains(&m)
+					.then(|| ())
+					.ok_or("'m' value out of range")?;
+				(T_MIN..1 << 24)
+					.contains(&t)
+					.then(|| ())
+					.ok_or("'t' value out of range")?;
+				(P_MIN..256)
+					.contains(&p)
+					.then(|| ())
+					.ok_or("'p' value out of range")?;
+				let m = NonZeroU32::new(m.try_into().unwrap()).unwrap();
+				let t = NonZeroU32::new(t.try_into().unwrap()).unwrap();
+				let p = NonZeroU8::new(p.try_into().unwrap()).unwrap();
+				Self::Argon2id { m, t, p }
+			}
+			_ => return Err("unknown KDF algorithm"),
+		})
+	}
 }
 
 fn parse_mirrors(s: &str) -> Result<Vec<Box<str>>, &'static str> {
@@ -97,11 +171,7 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 		};
 		let kdf = match args.key_derivation_function {
 			KeyDerivationFunction::None => todo!("ask for file"),
-			KeyDerivationFunction::Argon2id => {
-				// TODO make m, t, p user configurable
-				let m = 4096.try_into().unwrap();
-				let t = (4 * 600).try_into().unwrap();
-				let p = 4.try_into().unwrap();
+			KeyDerivationFunction::Argon2id { m, t, p } => {
 				let pwd_a = rpassword::prompt_password("Enter new password: ")
 					.expect("failed to ask password");
 				let pwd_b = rpassword::prompt_password("Confirm password: ")
