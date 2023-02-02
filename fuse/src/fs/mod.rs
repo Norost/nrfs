@@ -138,6 +138,13 @@ impl Fs {
 		});
 
 		let blksize = 1u32 << self.fs.block_size().to_raw();
+
+		// "Number of 512B blocks allocated"
+		let blocks =
+			u64::try_from((u128::from(len) + u128::from(blksize) - 1) / u128::from(blksize))
+				.unwrap();
+		let blocks = blocks << (self.fs.block_size().to_raw() - 9);
+
 		FileAttr {
 			atime: UNIX_EPOCH,
 			mtime,
@@ -151,9 +158,7 @@ impl Fs {
 			flags: 0,
 			kind: ty,
 			size: len,
-			blocks: ((u128::from(len) + u128::from(blksize) - 1) / u128::from(blksize))
-				.try_into()
-				.unwrap_or(u64::MAX),
+			blocks,
 			ino,
 			blksize,
 		}

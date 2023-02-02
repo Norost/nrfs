@@ -1,8 +1,7 @@
-use fuser::ReplyStatfs;
 use {
 	fuser::{
-		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyWrite,
-		TimeOrNow,
+		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs,
+		ReplyWrite, TimeOrNow,
 	},
 	std::{ffi::OsStr, path::Path},
 };

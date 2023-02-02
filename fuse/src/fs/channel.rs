@@ -1,10 +1,9 @@
-use fuser::ReplyStatfs;
 use {
 	crate::job::*,
 	async_channel::Sender,
 	fuser::{
 		Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-		ReplyEntry, ReplyWrite, Request, TimeOrNow,
+		ReplyEntry, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 	},
 	std::{ffi::OsStr, path::Path, time::SystemTime},
 };
