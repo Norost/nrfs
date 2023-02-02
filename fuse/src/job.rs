@@ -1,3 +1,4 @@
+use fuser::ReplyStatfs;
 use {
 	fuser::{
 		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyWrite,
@@ -25,6 +26,7 @@ pub enum Job {
 	Unlink(Unlink),
 	RmDir(RmDir),
 	FSync(FSync),
+	StatFs(StatFs),
 	Destroy,
 }
 
@@ -150,4 +152,9 @@ pub struct RmDir {
 #[derive(Debug)]
 pub struct FSync {
 	pub reply: ReplyEmpty,
+}
+
+#[derive(Debug)]
+pub struct StatFs {
+	pub reply: ReplyStatfs,
 }

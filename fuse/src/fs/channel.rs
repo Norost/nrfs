@@ -1,3 +1,4 @@
+use fuser::ReplyStatfs;
 use {
 	crate::job::*,
 	async_channel::Sender,
@@ -234,6 +235,10 @@ impl Filesystem for FsChannel {
 		reply: ReplyEmpty,
 	) {
 		self.send(Job::FSync(FSync { reply }));
+	}
+
+	fn statfs(&mut self, _: &Request<'_>, _: u64, reply: ReplyStatfs) {
+		self.send(Job::StatFs(StatFs { reply }))
 	}
 
 	fn destroy(&mut self) {

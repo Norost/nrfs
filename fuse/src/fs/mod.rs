@@ -110,6 +110,7 @@ impl Fs {
 					Unlink unlink
 					RmDir rmdir
 					FSync fsync
+					StatFs statfs
 				}
 			}
 			Ok::<_, nrfs::Error<_>>(())

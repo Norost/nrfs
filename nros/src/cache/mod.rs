@@ -887,7 +887,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();
-		Statistics { storage: self.store.statistics(), global_usage: data.lru.size() }
+		Statistics {
+			storage: self.store.statistics(),
+			global_usage: data.lru.size(),
+			used_objects: data.used_objects_ids.iter().fold(0, |x, r| r.end - r.start + x),
+		}
 	}
 
 	/// Amount of entries in a parent record as a power of two.
@@ -928,6 +932,8 @@ pub struct Statistics {
 	pub storage: storage::Statistics,
 	/// Total amount of memory used by record data, including dirty data.
 	pub global_usage: usize,
+	/// Total amount of objects allocated.
+	pub used_objects: u64,
 }
 
 fn is_pseudo_id(id: u64) -> bool {

@@ -260,11 +260,12 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			{$($f:ident)*} => {
 				Statistics {
 					allocation: self.allocator.borrow().statistics,
+					block_size: self.block_size(),
 					$($f: self.$f.get(),)*
 				}
 			}
 		}
-		s! {
+		let mut s = s! {
 			packed_bytes_read
 			packed_bytes_written
 			packed_bytes_destroyed
@@ -272,7 +273,9 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			unpacked_bytes_written
 			device_read_failures
 			record_unpack_failures
-		}
+		};
+		s.allocation.total_blocks = self.devices.block_count();
+		s
 	}
 
 	pub fn resource(&self) -> &R {
@@ -293,6 +296,8 @@ pub struct AllocLog {
 pub struct Statistics {
 	/// Allocation statistics.
 	pub allocation: allocator::Statistics,
+	/// Size of a single block.
+	pub block_size: BlockSize,
 	/// Packed bytes read.
 	pub packed_bytes_read: u64,
 	/// Packed bytes written.
