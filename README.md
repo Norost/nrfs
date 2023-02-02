@@ -32,13 +32,13 @@
 After installation, run:
 
 ```
-cargo b --release
+cargo +nightly b --release
 ```
 
 To enable parallelism, enable the `parallelism` feature:
 
 ```
-cargo b --release --features parallelism
+cargo +nightly b --release --features parallelism
 ```
 
 ### Creating a filesystem
