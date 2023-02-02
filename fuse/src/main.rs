@@ -22,15 +22,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		})
 		.try_collect::<Vec<_>>()?;
 
-	let (f, channel) = futures_executor::block_on(fs::Fs::new(f));
-	let session = fuser::spawn_mount2(
-		channel,
-		m,
-		&[
-			MountOption::FSName("nrfs".into()),
-			MountOption::DefaultPermissions,
-		],
-	)?;
+	let (f, channel) = futures_executor::block_on(fs::Fs::new(0o755, f.into_iter()));
+
+	let mut opts = vec![
+		MountOption::FSName("nrfs".into()),
+		MountOption::DefaultPermissions,
+	];
+
+	if unsafe { libc::getuid() } == 0 {
+		eprintln!("Enabling allow_other");
+		opts.extend_from_slice(&[MountOption::AllowOther]);
+	}
+
+	let session = fuser::spawn_mount2(channel, m, &opts)?;
 
 	futures_executor::block_on(f.run()).unwrap();
 

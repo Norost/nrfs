@@ -35,7 +35,7 @@ pub struct Fs {
 }
 
 impl Fs {
-	pub async fn new(io: impl Iterator<Item = fs::File>) -> (Self, FsChannel) {
+	pub async fn new(permissions: u16, io: impl Iterator<Item = fs::File>) -> (Self, FsChannel) {
 		let retrieve_key = &mut |use_password| {
 			if use_password {
 				rpassword::prompt_password("Password: ")
@@ -58,7 +58,9 @@ impl Fs {
 		let fs = Nrfs::load(conf).await.unwrap();
 
 		// Add root dir now so it's always at ino 1.
-		let mut ino = InodeStore::new(unsafe { libc::getuid() }, unsafe { libc::getgid() });
+		let mut ino = InodeStore::new(permissions, unsafe { libc::getuid() }, unsafe {
+			libc::getgid()
+		});
 
 		let bg = Background::default();
 		let root = bg.run(fs.root_dir(&bg)).await.unwrap();

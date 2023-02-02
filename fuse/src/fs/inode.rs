@@ -67,9 +67,12 @@ macro_rules! impl_ty {
 }
 
 impl InodeStore {
-	/// Create a new inode store with the given uid and gid as defaults.
-	pub fn new(uid: u32, gid: u32) -> Self {
-		Self { unix_default: ext::unix::Entry::new(0o700, uid, gid), ..Default::default() }
+	/// Create a new inode store with the given permissions, uid and gid as defaults.
+	pub fn new(permissions: u16, uid: u32, gid: u32) -> Self {
+		Self {
+			unix_default: ext::unix::Entry::new(permissions, uid, gid),
+			..Default::default()
+		}
 	}
 
 	fn add<'a, 'b, T: RawRef<'a, 'b, FileDev>>(
