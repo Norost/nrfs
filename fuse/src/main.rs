@@ -1,5 +1,6 @@
 #![forbid(unused_must_use)]
 #![forbid(rust_2018_idioms)]
+#![feature(iterator_try_collect)]
 
 mod fs;
 mod job;
@@ -10,13 +11,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	env_logger::init();
 
 	let mut a = std::env::args().skip(1);
-	let f = a.next().ok_or("expected file path")?;
 	let m = a.next().ok_or("expected mount path")?;
 
-	let f = std::fs::OpenOptions::new()
-		.read(true)
-		.write(true)
-		.open(&f)?;
+	let f = a
+		.map(|path| {
+			std::fs::OpenOptions::new()
+				.read(true)
+				.write(true)
+				.open(&path)
+		})
+		.try_collect::<Vec<_>>()?;
+
 	let (f, channel) = futures_executor::block_on(fs::Fs::new(f));
 	let session = fuser::spawn_mount2(
 		channel,

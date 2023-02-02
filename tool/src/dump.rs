@@ -1,18 +1,16 @@
-use {
-	std::{fs::File, future::Future, pin::Pin},
-};
+use std::{fs::File, future::Future, pin::Pin};
 
 /// Dump the contents of a filesystem.
-#[derive(Debug, clap::Args)]
+#[derive(clap::Args)]
 pub struct Dump {
-	/// The path to the filesystem image.
-	path: String,
+	/// Paths to the filesystem's images.
+	paths: Vec<String>,
 	/// Soft limit on the global cache size.
 	#[clap(long, default_value_t = 1 << 27)]
 	cache_size: usize,
 }
 
-pub async fn dump(args: Dump) {
+pub async fn dump(args: Dump) -> Result<(), Box<dyn std::error::Error>> {
 	let retrieve_key = &mut |use_password| {
 		if use_password {
 			rpassword::prompt_password("Password: ")
@@ -23,14 +21,21 @@ pub async fn dump(args: Dump) {
 		}
 	};
 
-	let f = File::open(args.path).unwrap();
-	// FIXME block size shouldn't matter.
-	let s = nrfs::dev::FileDev::new(f, nrfs::BlockSize::from_raw(12).unwrap());
+	let devices = args
+		.paths
+		.into_iter()
+		.map(|p| {
+			File::open(p).map(|f| {
+				// FIXME block size shouldn't matter.
+				nrfs::dev::FileDev::new(f, nrfs::BlockSize::from_raw(12).unwrap())
+			})
+		})
+		.try_collect()?;
 
 	let conf = nrfs::LoadConfig {
 		key_password: nrfs::KeyPassword::Key(&[0; 32]),
 		retrieve_key,
-		devices: vec![s],
+		devices,
 		cache_size: args.cache_size,
 		allow_repair: true,
 	};
@@ -125,4 +130,6 @@ pub async fn dump(args: Dump) {
 		}
 		root.drop().await.unwrap();
 	}
+
+	Ok(())
 }

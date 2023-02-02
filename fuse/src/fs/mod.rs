@@ -35,7 +35,7 @@ pub struct Fs {
 }
 
 impl Fs {
-	pub async fn new(io: fs::File) -> (Self, FsChannel) {
+	pub async fn new(io: impl Iterator<Item = fs::File>) -> (Self, FsChannel) {
 		let retrieve_key = &mut |use_password| {
 			if use_password {
 				rpassword::prompt_password("Password: ")
@@ -46,11 +46,11 @@ impl Fs {
 			}
 		};
 
-		let fs = FileDev::new(io, nrfs::BlockSize::K4);
+		let devices = io.map(|f| FileDev::new(f, nrfs::BlockSize::K4)).collect();
 		let conf = nrfs::LoadConfig {
 			key_password: nrfs::KeyPassword::Key(&[0; 32]),
 			retrieve_key,
-			devices: vec![fs],
+			devices,
 			cache_size: 1 << 24,
 			allow_repair: true,
 		};

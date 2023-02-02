@@ -34,7 +34,7 @@ fallocate -l "$IMG_LEN" "$img"
 "./target/$MODE/tool" make "$img"
 
 # Mount
-"./target/$MODE/fuse" "$img" "$mnt" &
+"./target/$MODE/fuse" "$mnt" "$img" &
 trap 'umount "$mnt"; "./target/$MODE/tool" dump "$img"; rm -rf "$img" "$mnt"' EXIT
 
 # Wait a bit to ensure the driver is actually running

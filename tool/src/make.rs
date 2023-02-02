@@ -11,10 +11,25 @@ use {
 };
 
 /// Create a new filesystem.
-#[derive(Debug, clap::Args)]
+#[derive(clap::Args)]
 pub struct Make {
-	/// The path to the image to write the filesystem to.
-	path: String,
+	/// The paths to the images to write the filesystem to.
+	///
+	/// To define a chain of images, specify paths with a comma inbetween them.
+	///
+	/// Examples:
+	///
+	/// * Single image: `a.img`
+	///
+	/// * Mirror (RAID1): `a.img b.img`
+	///
+	/// * Chain (RAID0): `a.img,b.img`.
+	///
+	/// * Mirror of chains (RAID10): `a.img,b.img c.img,d.img`
+	///
+	/// * Mirror of chains with mixed devices: `a.img,b.img c.img`
+	#[clap(value_parser = parse_mirrors)]
+	paths: Vec<Vec<Box<str>>>,
 	/// The directory to copy to the image.
 	#[clap(short, long)]
 	directory: Option<PathBuf>,
@@ -23,10 +38,10 @@ pub struct Make {
 	follow: bool,
 	/// The record size to use.
 	#[clap(short, long, value_parser = 9..=24, default_value_t = 17)]
-	record_size_p2: u8,
+	record_size_p2: i64,
 	/// The block size to use.
 	#[clap(short, long, value_parser = 9..=24, default_value_t = 12)]
-	block_size_p2: u8,
+	block_size_p2: i64,
 	/// The compression to use.
 	#[clap(short, long, value_enum, default_value = "lz4")]
 	compression: Compression,
@@ -43,15 +58,30 @@ pub struct Make {
 	cache_size: usize,
 }
 
-pub async fn make(args: Make) {
-	let f = OpenOptions::new()
-		.truncate(false)
-		.read(true)
-		.write(true)
-		.open(&args.path)
-		.unwrap();
+fn parse_mirrors(s: &str) -> Result<Vec<Box<str>>, &'static str> {
+	Ok(s.split(',').map(From::from).collect())
+}
 
-	let block_size = nrfs::BlockSize::from_raw(args.block_size_p2).unwrap();
+pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
+	let block_size = nrfs::BlockSize::from_raw(args.block_size_p2.try_into().unwrap()).unwrap();
+
+	let mirrors = args
+		.paths
+		.into_iter()
+		.map(|chain| {
+			chain
+				.into_iter()
+				.map(|path| {
+					OpenOptions::new()
+						.truncate(false)
+						.read(true)
+						.write(true)
+						.open(&*path)
+						.map(|f| nrfs::dev::FileDev::new(f, block_size))
+				})
+				.try_collect()
+		})
+		.try_collect()?;
 
 	let mut extensions = nrfs::dir::EnableExtensions::default();
 	extensions.add_unix();
@@ -61,11 +91,11 @@ pub async fn make(args: Make) {
 	let rec_size = nrfs::MaxRecordSize::K128; // TODO
 
 	let keybuf;
-	let (cipher, key_deriver) = if let Some(enc) = &args.encryption {
+	let (cipher, key_deriver) = if let Some(enc) = args.encryption {
 		let enc = match enc {
 			Encryption::Chacha8Poly1305 => nrfs::CipherType::ChaCha8Poly1305,
 		};
-		let kdf = match &args.key_derivation_function {
+		let kdf = match args.key_derivation_function {
 			KeyDerivationFunction::None => todo!("ask for file"),
 			KeyDerivationFunction::Argon2id => {
 				// TODO make m, t, p user configurable
@@ -86,15 +116,16 @@ pub async fn make(args: Make) {
 		};
 		(enc, kdf)
 	} else {
-		(nrfs::CipherType::NoneXxh3, nrfs::KeyDeriver::None { key: &[0; 32] })
+		(
+			nrfs::CipherType::NoneXxh3,
+			nrfs::KeyDeriver::None { key: &[0; 32] },
+		)
 	};
-
-	let s = nrfs::dev::FileDev::new(f, block_size);
 
 	let config = nrfs::NewConfig {
 		cipher,
 		key_deriver,
-		mirrors: vec![vec![s]],
+		mirrors,
 		block_size,
 		max_record_size: rec_size,
 		dir: opt,
@@ -111,7 +142,7 @@ pub async fn make(args: Make) {
 		if let Some(d) = &args.directory {
 			eprintln!("Adding files from {:?}", d);
 			let root = nrfs.root_dir(&bg).await?;
-			add_files(root, d, &args, extensions).await;
+			add_files(root, d, args.follow, extensions).await;
 		}
 		nrfs.finish_transaction(&bg).await
 	})
@@ -124,7 +155,7 @@ pub async fn make(args: Make) {
 	async fn add_files(
 		root: nrfs::DirRef<'_, '_, nrfs::dev::FileDev>,
 		from: &Path,
-		args: &Make,
+		follow_symlinks: bool,
 		extensions: nrfs::dir::EnableExtensions,
 	) {
 		for f in fs::read_dir(from).expect("failed to read dir") {
@@ -156,7 +187,7 @@ pub async fn make(args: Make) {
 					.unwrap_or(0),
 			});
 
-			if m.is_file() || (m.is_symlink() && args.follow) {
+			if m.is_file() || (m.is_symlink() && follow_symlinks) {
 				let c = fs::read(f.path()).unwrap();
 				let f = root.create_file(n, &ext).await.unwrap().unwrap();
 				f.write_grow(0, &c).await.unwrap();
@@ -167,7 +198,7 @@ pub async fn make(args: Make) {
 				let d = root.create_dir(n, &opt, &ext).await.unwrap().unwrap();
 				let path = f.path();
 				let fut: Pin<Box<dyn Future<Output = ()>>> =
-					Box::pin(add_files(d, &path, args, extensions));
+					Box::pin(add_files(d, &path, follow_symlinks, extensions));
 				fut.await;
 			} else if m.is_symlink() {
 				let c = fs::read_link(f.path()).unwrap();
@@ -182,4 +213,6 @@ pub async fn make(args: Make) {
 		}
 		root.drop().await.unwrap();
 	}
+
+	Ok(())
 }

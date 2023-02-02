@@ -1,5 +1,6 @@
 #![forbid(unused_must_use)]
 #![forbid(rust_2018_idioms)]
+#![feature(iterator_try_collect)]
 #![feature(pin_macro)]
 
 mod dump;
@@ -8,7 +9,7 @@ mod make;
 #[cfg(target_family = "unix")]
 use clap::Parser;
 
-#[derive(Debug, clap::Parser)]
+#[derive(clap::Parser)]
 #[clap(
 	author = "David Hoppenbrouwers",
 	version = "0.2",
@@ -45,12 +46,12 @@ enum KeyDerivationFunction {
 	Argon2id,
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let fut = async {
 		match Command::parse() {
 			Command::Make(args) => make::make(args).await,
 			Command::Dump(args) => dump::dump(args).await,
 		}
 	};
-	futures_executor::block_on(fut);
+	futures_executor::block_on(fut)
 }
