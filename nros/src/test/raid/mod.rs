@@ -31,7 +31,6 @@ async fn load(devices: Vec<dev::MemDev>) -> Nros<dev::MemDev, StdResource> {
 		resource: StdResource::new(),
 		devices,
 		cache_size: 1 << 14,
-		key_password: KeyPassword::Key(&[0; 32]),
 		retrieve_key: &mut |_| unreachable!(),
 		allow_repair: true,
 	})
