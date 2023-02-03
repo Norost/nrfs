@@ -641,7 +641,9 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 	pub(crate) async fn clear_item(&self, index: u32) -> Result<(), Error<D>> {
 		trace!("clear_item {:?}", index);
 		let len = self.fs.dir_data(self.id).item_size() - 28;
-		self.set(index, 28, &vec![0; len.into()]).await
+		self.set(index, 28, &vec![0; len.into()]).await?;
+		self.dealloc_item_slot(index).await?;
+		Ok(())
 	}
 }
 
