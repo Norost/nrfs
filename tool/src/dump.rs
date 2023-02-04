@@ -78,18 +78,14 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 	};
 	let nrfs = nrfs::Nrfs::load(conf).await?;
 
-	let bg = nrfs::Background::default();
-
 	let mut stat = Statistics::default();
 
-	bg.run(async {
-		let root = nrfs.root_dir(&bg).await?;
+	nrfs.run(async {
+		let root = nrfs.root_dir().await?;
 		list_files(root, &mut stat, 0).await?;
 		Ok::<_, Box<dyn Error>>(())
 	})
 	.await?;
-
-	bg.drop().await?;
 
 	println!();
 
@@ -119,7 +115,7 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 }
 
 async fn list_files(
-	root: nrfs::DirRef<'_, '_, nrfs::dev::FileDev>,
+	root: nrfs::DirRef<'_, nrfs::dev::FileDev>,
 	stats: &mut Statistics,
 	indent: usize,
 ) -> Result<(), Box<dyn Error>> {

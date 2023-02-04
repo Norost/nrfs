@@ -17,23 +17,20 @@ fn write_read_2() {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let s = new(vec![vec![dev_a], vec![dev_b]]).await;
-		let bg = Background::default();
 
-		let obj = s.create(&bg).await.unwrap();
+		let obj = s.create().await.unwrap();
 		obj.resize(1 << 12).await.unwrap();
 		obj.write(0, &[1; 1 << 12]).await.unwrap();
 		drop(obj);
 
-		bg.drop().await.unwrap();
 		let devs = s.unmount().await.unwrap();
 
 		let s = load(devs).await;
-		let bg = Background::default();
-		let obj = s.get(&bg, 0).await.unwrap();
+
+		let obj = s.get(0).await.unwrap();
 		let buf = &mut [0; 1 << 12];
 		obj.read(0, buf).await.unwrap();
 		assert_eq!(buf, &mut [1; 1 << 12]);
-		bg.drop().await.unwrap();
 	});
 }
 
@@ -44,14 +41,11 @@ fn write_corrupt_read_2() {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let mut s = new(vec![vec![dev_a], vec![dev_b]]).await;
-		let bg = Background::default();
 
-		let obj = s.create(&bg).await.unwrap();
+		let obj = s.create().await.unwrap();
 		obj.resize(1 << 12).await.unwrap();
 		obj.write(0, &[1; 1 << 12]).await.unwrap();
 		drop(obj);
-
-		bg.drop().await.unwrap();
 
 		for i in 0..2 {
 			let devs = s.unmount().await.unwrap();
@@ -67,12 +61,10 @@ fn write_corrupt_read_2() {
 
 			// Remount & test
 			s = load(devs).await;
-			let bg = Background::default();
-			let obj = s.get(&bg, 0).await.unwrap();
+
+			let obj = s.get(0).await.unwrap();
 			let buf = &mut [0; 1 << 12];
 			obj.read(0, buf).await.unwrap();
-
-			bg.drop().await.unwrap();
 
 			assert_eq!(buf, &mut [1; 1 << 12]);
 		}

@@ -1,6 +1,12 @@
 use {
 	crate::{resource::Buf, Record},
-	core::{future::Future, mem, pin::Pin},
+	core::{
+		future::Future,
+		hash::{BuildHasher, Hash},
+		mem,
+		pin::Pin,
+	},
+	std::collections::hash_map,
 };
 
 /// Get a record from a slice of raw data.
@@ -40,14 +46,9 @@ fn cutoff_zeros_end(data: &[u8]) -> usize {
 	data.len() - i
 }
 
-/// Write to a [`Buf`], resizing it no more than necessary.
-pub(crate) fn write(buf: &mut impl Buf, index: usize, data: &[u8]) {
-	if buf.len() < index + data.len() {
-		buf.resize(index, 0);
-		buf.extend_from_slice(&data[..cutoff_zeros_end(data)]);
-	} else {
-		buf.get_mut()[index..index + data.len()].copy_from_slice(data);
-	}
+/// Cut off trailing zeros from a byte slice
+pub(crate) fn slice_trim_zeros_end(data: &[u8]) -> &[u8] {
+	&data[..cutoff_zeros_end(data)]
 }
 
 /// Read from a slice, filling the remainder with zeros.
@@ -78,4 +79,15 @@ pub(crate) fn divmod_p2(offset: u64, pow2: u8) -> (u64, usize) {
 	let offt = offset >> pow2;
 
 	(offt, index.try_into().unwrap())
+}
+
+pub(crate) trait HashMapExt<K, V> {
+	fn occupied(&mut self, key: K) -> Option<hash_map::OccupiedEntry<'_, K, V>>;
+}
+
+impl<K: Hash + Eq, V, S: BuildHasher> HashMapExt<K, V> for hash_map::HashMap<K, V, S> {
+	fn occupied(&mut self, key: K) -> Option<hash_map::OccupiedEntry<'_, K, V>> {
+		let hash_map::Entry::Occupied(e) = self.entry(key) else { return None };
+		Some(e)
+	}
 }

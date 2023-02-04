@@ -1,10 +1,10 @@
 use super::*;
 
 impl Fs {
-	pub async fn rmdir<'a>(&'a self, bg: &Background<'a, FileDev>, job: crate::job::RmDir) {
+	pub async fn rmdir(&self, job: crate::job::RmDir) {
 		let self_ino = self.ino.borrow_mut();
 
-		let d = self_ino.get_dir(&self.fs, bg, job.parent);
+		let d = self_ino.get_dir(&self.fs, job.parent);
 		let Ok(name) = job.name.as_bytes().try_into() else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		// Ensure it's a directory because POSIX yadayada

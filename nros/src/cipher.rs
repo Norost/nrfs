@@ -1,10 +1,13 @@
+#[cfg(miri)]
+use xxhash_rust::const_xxh3::xxh3_128;
+#[cfg(not(miri))]
+use xxhash_rust::xxh3::xxh3_128;
 use {
 	chacha20::{
 		cipher::{KeyIvInit as _, StreamCipher as _},
 		ChaCha8,
 	},
 	poly1305::{universal_hash::KeyInit as _, Poly1305},
-	xxhash_rust::xxh3::xxh3_128,
 };
 
 n2e! {

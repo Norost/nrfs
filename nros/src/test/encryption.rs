@@ -15,16 +15,16 @@ fn write_read_nocache() {
 	}))
 	.unwrap();
 
-	let bg = Default::default();
-	run2(&bg, async {
-		let obj = s.create(&bg).await.unwrap();
+	run(&s, async {
+		let obj = s.create().await.unwrap();
 		obj.resize(1 << 13).await.unwrap();
 		obj.write(0, &[0xcc; 1 << 13]).await.unwrap();
 
-		let obj = s.get(&bg, 0).await.unwrap();
+		let obj = s.get(0).await.unwrap();
 		let buf = &mut [0; 1 << 13];
 		obj.read(0, buf).await.unwrap();
 		assert_eq!(*buf, [0xcc; 1 << 13]);
+
+		Ok(())
 	});
-	block_on(bg.drop()).unwrap();
 }

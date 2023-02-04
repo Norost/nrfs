@@ -1,10 +1,10 @@
 use super::*;
 
 impl Fs {
-	pub async fn lookup<'a>(&'a self, bg: &Background<'a, FileDev>, job: crate::job::Lookup) {
+	pub async fn lookup(&self, job: crate::job::Lookup) {
 		let mut self_ino = self.ino.borrow_mut();
 
-		let d = self_ino.get_dir(&self.fs, bg, job.parent);
+		let d = self_ino.get_dir(&self.fs, job.parent);
 
 		let Ok(name) = job.name.as_bytes().try_into() else { return job.reply.error(libc::ENAMETOOLONG) };
 		let Some(entry) = d.find(name).await.unwrap() else { return job.reply.error(libc::ENOENT) };

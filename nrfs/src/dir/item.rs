@@ -160,23 +160,20 @@ impl Type {
 
 /// A reference to an item.
 #[must_use = "Must be manually dropped with ItemRef::drop"]
-pub enum ItemRef<'a, 'b, D: Dev> {
-	Dir(DirRef<'a, 'b, D>),
-	File(FileRef<'a, 'b, D>),
-	Sym(SymRef<'a, 'b, D>),
-	Unknown(UnknownRef<'a, 'b, D>),
+pub enum ItemRef<'a, D: Dev> {
+	Dir(DirRef<'a, D>),
+	File(FileRef<'a, D>),
+	Sym(SymRef<'a, D>),
+	Unknown(UnknownRef<'a, D>),
 }
 
-impl<'a, 'b, D: Dev> ItemRef<'a, 'b, D> {
+impl<'a, D: Dev> ItemRef<'a, D> {
 	/// Construct an item from raw entry data and the corresponding directory.
 	///
 	/// # Panics
 	///
 	/// If the type is [`Type::None`].
-	pub(super) async fn new(
-		dir: &Dir<'a, 'b, D>,
-		item: &Item,
-	) -> Result<ItemRef<'a, 'b, D>, Error<D>> {
+	pub(super) async fn new(dir: &Dir<'a, D>, item: &Item) -> Result<ItemRef<'a, D>, Error<D>> {
 		Ok(match item.ty {
 			Type::None => panic!("can't reference none type"),
 			Type::File { id } => Self::File(FileRef::from_obj(dir, id, item.index)),
@@ -203,9 +200,8 @@ impl<'a, 'b, D: Dev> ItemRef<'a, 'b, D> {
 		}
 
 		let fs = self.fs();
-		let bg = self.bg();
 		let DataHeader { parent_index, parent_id, .. } = *self.data_header();
-		let item = Dir::new(bg, fs, parent_id).get(parent_index).await?;
+		let item = Dir::new(fs, parent_id).get(parent_index).await?;
 		Ok(item.data)
 	}
 
@@ -260,14 +256,14 @@ impl<'a, 'b, D: Dev> ItemRef<'a, 'b, D> {
 	/// Get a reference to the parent.
 	///
 	/// May be `None` if this item is the parent directory.
-	pub fn parent(&self) -> Option<DirRef<'a, 'b, D>> {
+	pub fn parent(&self) -> Option<DirRef<'a, D>> {
 		if matches!(self, Self::Dir(d) if d.id == 0) {
 			return None;
 		}
 		let id = self.data_header().parent_id;
 		let fs = self.fs();
 		fs.dir_data(id).header.reference_count += 1;
-		Some(DirRef { fs, bg: self.bg(), id })
+		Some(DirRef { fs, id })
 	}
 
 	/// Get a reference to the filesystem containing this item's data.
@@ -277,16 +273,6 @@ impl<'a, 'b, D: Dev> ItemRef<'a, 'b, D> {
 			Self::File(e) => e.fs,
 			Self::Sym(e) => e.0.fs,
 			Self::Unknown(e) => e.0.fs,
-		}
-	}
-
-	/// Get a reference to the background task runner.
-	fn bg(&self) -> &'b nros::Background<'a, D> {
-		match self {
-			Self::Dir(e) => e.bg,
-			Self::File(e) => e.bg,
-			Self::Sym(e) => e.0.bg,
-			Self::Unknown(e) => e.0.bg,
 		}
 	}
 
@@ -301,8 +287,8 @@ impl<'a, 'b, D: Dev> ItemRef<'a, 'b, D> {
 	}
 
 	/// Create a parent dir helper.
-	fn parent_dir(&self) -> Dir<'a, 'b, D> {
-		Dir::new(self.bg(), self.fs(), self.data_header().parent_id)
+	fn parent_dir(&self) -> Dir<'a, D> {
+		Dir::new(self.fs(), self.data_header().parent_id)
 	}
 
 	/// Destroy the reference to this item.

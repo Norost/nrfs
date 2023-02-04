@@ -103,7 +103,7 @@ impl<'a> State<'a> {
 }
 
 impl<'a> Dir<'a> {
-	fn verify_state(&self, dir: &DirRef<'_, '_, impl Dev>) {
+	fn verify_state(&self, dir: &DirRef<'_, impl Dev>) {
 		let ext = dir.enabled_extensions();
 		assert_eq!(self.enabled_extensions.mtime(), ext.mtime());
 		assert_eq!(self.enabled_extensions.unix(), ext.unix());
@@ -173,8 +173,7 @@ impl<'a> Test<'a> {
 	}
 
 	pub fn run(self) {
-		let bg = Background::default();
-		run2(&bg, async {
+		run(&self.fs, async {
 			// References to entries.
 			let mut refs = arena::Arena::<(_, Box<[&Name]>), ()>::new();
 			// Expected contents of the filesystem,
@@ -186,38 +185,36 @@ impl<'a> Test<'a> {
 				enabled_extensions: Default::default(),
 			});
 
-			fn get<'a, 'b, 'c, 'd, 'e>(
-				bg: &'e Background<'b, MemDev>,
+			fn get<'a, 'b, 'c, 'd>(
 				fs: &'b Nrfs<MemDev>,
 				refs: &'c Refs<'a>,
 				state: &'d mut State<'a>,
 				idx: u16,
 			) -> Option<(
-				TmpRef<'c, ItemRef<'b, 'e, MemDev>>,
+				TmpRef<'c, ItemRef<'b, MemDev>>,
 				&'c [&'a Name],
 				Option<&'d mut State<'a>>,
 			)> {
 				match refs.get(arena::Handle::from_raw(idx.into(), ())) {
 					Some((RawItemRef::File { file, removed }, path)) => {
 						let c = (!removed).then(|| state_mut(state, path.iter().copied()).unwrap());
-						Some((file.into_tmp(fs, bg).into(), path, c))
+						Some((file.into_tmp(fs).into(), path, c))
 					}
 					Some((RawItemRef::Dir { dir, removed }, path)) => {
 						let c = (!removed).then(|| state_mut(state, path.iter().copied()).unwrap());
-						Some((dir.into_tmp(fs, bg).into(), path, c))
+						Some((dir.into_tmp(fs).into(), path, c))
 					}
 					_ => None,
 				}
 			}
 
-			fn get_dir<'a, 'b, 'c, 'd, 'e>(
-				bg: &'e Background<'b, MemDev>,
+			fn get_dir<'a, 'b, 'c, 'd>(
 				fs: &'b Nrfs<MemDev>,
 				refs: &'c Refs<'a>,
 				state: &'d mut State<'a>,
 				dir_idx: u16,
 			) -> Option<(
-				TmpRef<'c, DirRef<'b, 'e, MemDev>>,
+				TmpRef<'c, DirRef<'b, MemDev>>,
 				&'c [&'a Name],
 				Option<&'d mut Dir<'a>>,
 			)> {
@@ -225,20 +222,19 @@ impl<'a> Test<'a> {
 					Some((RawItemRef::Dir { dir, removed }, path)) => {
 						let d = (!removed)
 							.then(|| state_mut(state, path.iter().copied()).unwrap().dir_mut());
-						Some((dir.into_tmp(fs, bg), path, d))
+						Some((dir.into_tmp(fs), path, d))
 					}
 					_ => None,
 				}
 			}
 
-			fn get_file<'a, 'b, 'c, 'd, 'e>(
-				bg: &'e Background<'b, MemDev>,
+			fn get_file<'a, 'b, 'c, 'd>(
 				fs: &'b Nrfs<MemDev>,
 				refs: &'c Refs<'a>,
 				state: &'d mut State<'a>,
 				file_idx: u16,
 			) -> Option<(
-				TmpRef<'c, FileRef<'b, 'e, MemDev>>,
+				TmpRef<'c, FileRef<'b, MemDev>>,
 				&'c [&'a Name],
 				Option<&'d mut RangeSet<u64>>,
 			)> {
@@ -246,7 +242,7 @@ impl<'a> Test<'a> {
 					Some((RawItemRef::File { file, removed }, path)) => {
 						let c = (!removed)
 							.then(|| state_mut(state, path.iter().copied()).unwrap().file_mut());
-						Some((file.into_tmp(fs, bg), path, c))
+						Some((file.into_tmp(fs), path, c))
 					}
 					_ => None,
 				}
@@ -259,7 +255,7 @@ impl<'a> Test<'a> {
 			for op in self.ops.into_vec() {
 				match op {
 					Op::CreateFile { dir_idx, name, mut ext } => {
-						let Some((dir, _, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
+						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 						d.as_ref().map(|d| d.verify_state(&dir));
 						ext.mask(dir.enabled_extensions());
 
@@ -297,7 +293,7 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::CreateDir { dir_idx, name, options, mut ext } => {
-						let Some((dir, _, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
+						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 						d.as_ref().map(|d| d.verify_state(&dir));
 						ext.mask(dir.enabled_extensions());
 
@@ -336,7 +332,7 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::Get { dir_idx, name } => {
-						let Some((dir, path, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
+						let Some((dir, path, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
 						// If the dir has been removed it should be empty.
 						let d = d.map(|d| &mut d.children);
@@ -362,7 +358,7 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::Root => {
-						let dir = self.fs.root_dir(&bg).await.unwrap();
+						let dir = self.fs.root_dir().await.unwrap();
 						let idx = refs.insert((
 							RawItemRef::Dir { dir: dir.into_raw(), removed: false },
 							[].into(),
@@ -375,11 +371,11 @@ impl<'a> Test<'a> {
 							// Drop reference
 							let removed = match entry {
 								RawItemRef::File { file, removed } => {
-									FileRef::from_raw(&self.fs, &bg, file).drop().await.unwrap();
+									FileRef::from_raw(&self.fs, file).drop().await.unwrap();
 									removed
 								}
 								RawItemRef::Dir { dir, removed } => {
-									DirRef::from_raw(&self.fs, &bg, dir).drop().await.unwrap();
+									DirRef::from_raw(&self.fs, dir).drop().await.unwrap();
 									removed
 								}
 							};
@@ -394,7 +390,7 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::Write { file_idx, offset, amount } => {
-						let Some((file, _, contents)) = get_file(&bg, &self.fs, &refs, &mut state, file_idx) else { continue };
+						let Some((file, _, contents)) = get_file(&self.fs, &refs, &mut state, file_idx) else { continue };
 
 						// Truncate
 						let end = offset.saturating_add(amount.into());
@@ -415,7 +411,7 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::Read { file_idx, offset, amount } => {
-						let Some((file, _, contents)) = get_file(&bg, &self.fs, &refs, &mut state, file_idx) else { continue };
+						let Some((file, _, contents)) = get_file(&self.fs, &refs, &mut state, file_idx) else { continue };
 
 						// Wrap offset
 						let len = file.len().await.unwrap();
@@ -437,7 +433,7 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::Resize { file_idx, len } => {
-						let Some((file, _, contents)) = get_file(&bg, &self.fs, &refs, &mut state, file_idx) else { continue };
+						let Some((file, _, contents)) = get_file(&self.fs, &refs, &mut state, file_idx) else { continue };
 						file.resize(len).await.unwrap();
 						if len < u64::MAX {
 							let Some(contents) = contents else {
@@ -448,7 +444,7 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::Rename { dir_idx, from, to } => {
-						let Some((dir, dir_path, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
+						let Some((dir, dir_path, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 						let Some(d) = d else {
 							// Entry was already removed.
 							continue
@@ -472,8 +468,8 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::Transfer { from_dir_idx, from, to_dir_idx, to } => {
-						let Some((to_dir, to_path, _)) = get_dir(&bg, &self.fs, &refs, &mut state, to_dir_idx) else { continue };
-						let Some((from_dir, _, d)) = get_dir(&bg, &self.fs, &refs, &mut state, from_dir_idx) else { continue };
+						let Some((to_dir, to_path, _)) = get_dir(&self.fs, &refs, &mut state, to_dir_idx) else { continue };
+						let Some((from_dir, _, d)) = get_dir(&self.fs, &refs, &mut state, from_dir_idx) else { continue };
 
 						let Some(d) = d else {
 							// Entry was already removed.
@@ -523,7 +519,7 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::Remove { dir_idx, name } => {
-						let Some((dir, _, d)) = get_dir(&bg, &self.fs, &refs, &mut state, dir_idx) else { continue };
+						let Some((dir, _, d)) = get_dir(&self.fs, &refs, &mut state, dir_idx) else { continue };
 
 						let Some(d) = d else {
 							// Entry was already removed.
@@ -563,19 +559,19 @@ impl<'a> Test<'a> {
 						}
 					}
 					Op::SetExtUnix { idx, ext } => {
-						let Some((entry, _, e)) = get(&bg, &self.fs, &refs, &mut state, idx) else { continue };
+						let Some((entry, _, e)) = get(&self.fs, &refs, &mut state, idx) else { continue };
 						entry.set_ext_unix(&ext).await.unwrap();
 						// TODO keep track of dangling objects.
 						e.map(|e| *e.ext_unix_mut() = ext);
 					}
 					Op::SetExtMtime { idx, ext } => {
-						let Some((entry, _, e)) = get(&bg, &self.fs, &refs, &mut state, idx) else { continue };
+						let Some((entry, _, e)) = get(&self.fs, &refs, &mut state, idx) else { continue };
 						entry.set_ext_mtime(&ext).await.unwrap();
 						// TODO keep track of dangling objects.
 						e.map(|e| *e.ext_mtime_mut() = ext);
 					}
 					Op::GetExt { idx } => {
-						let Some((entry, _, e)) = get(&bg, &self.fs, &refs, &mut state, idx) else { continue };
+						let Some((entry, _, e)) = get(&self.fs, &refs, &mut state, idx) else { continue };
 						let data = entry.data().await.unwrap();
 						if let Some(e) = e {
 							if let Some(data) = data.ext_unix {
@@ -599,15 +595,14 @@ impl<'a> Test<'a> {
 			for (_, (r, _)) in refs.drain() {
 				match r {
 					RawItemRef::File { file, .. } => {
-						FileRef::from_raw(&self.fs, &bg, file).drop().await.unwrap()
+						FileRef::from_raw(&self.fs, file).drop().await.unwrap()
 					}
 					RawItemRef::Dir { dir, .. } => {
-						DirRef::from_raw(&self.fs, &bg, dir).drop().await.unwrap()
+						DirRef::from_raw(&self.fs, dir).drop().await.unwrap()
 					}
 				}
 			}
 		});
-		block_on(bg.drop()).unwrap();
 	}
 }
 

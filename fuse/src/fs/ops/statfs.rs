@@ -1,7 +1,7 @@
 use super::*;
 
 impl Fs {
-	pub async fn statfs<'a>(&'a self, _: &Background<'a, FileDev>, job: crate::job::StatFs) {
+	pub async fn statfs(&self, job: crate::job::StatFs) {
 		let stat = self.fs.statistics();
 		let store = &stat.object_store.storage;
 		let alloc = &store.allocation;

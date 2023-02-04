@@ -14,8 +14,7 @@ pub(crate) use {child::Child, dir_data::DirData, hasher::Hasher, item::Type};
 
 use {
 	crate::{
-		file, read_exact, write_all, Background, DataHeader, Dev, DirRef, Error, FileRef, Name,
-		Nrfs, SymRef,
+		file, read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Name, Nrfs, SymRef,
 	},
 	core::{cell::RefMut, mem},
 	hashmap::*,
@@ -43,24 +42,22 @@ mod header {
 
 /// Helper structure for working with directories.
 #[derive(Debug)]
-pub(crate) struct Dir<'a, 'b, D: Dev> {
+pub(crate) struct Dir<'a, D: Dev> {
 	/// The filesystem containing the directory's data.
 	pub(crate) fs: &'a Nrfs<D>,
 	/// The ID of this directory.
 	pub(crate) id: u64,
-	/// Background task runner.
-	pub(crate) bg: &'b Background<'a, D>,
 }
 
-impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
+impl<'a, D: Dev> Dir<'a, D> {
 	/// Create a [`Dir`] helper structure.
-	pub(crate) fn new(bg: &'b Background<'a, D>, fs: &'a Nrfs<D>, id: u64) -> Self {
-		Self { fs, id, bg }
+	pub(crate) fn new(fs: &'a Nrfs<D>, id: u64) -> Self {
+		Self { fs, id }
 	}
 
 	/// Create a helper structure to operate on the hashmap of this directory.
-	async fn hashmap(&self) -> Result<HashMap<'a, 'b, D>, Error<D>> {
-		let obj = self.fs.storage.get(self.bg, self.id + MAP_OFFT).await?;
+	async fn hashmap(&self) -> Result<HashMap<'a, D>, Error<D>> {
+		let obj = self.fs.storage.get(self.id + MAP_OFFT).await?;
 		let data = self.fs.dir_data(self.id);
 		Ok(HashMap::new(self, &data, obj, data.hashmap_size))
 	}
@@ -88,7 +85,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 					return Ok(false);
 				}
 				let mut buf = vec![0; len.get().into()];
-				let obj = self.fs.storage.get(self.bg, self.id + HEAP_OFFT).await?;
+				let obj = self.fs.storage.get(self.id + HEAP_OFFT).await?;
 				crate::read_exact(&obj, offset, &mut buf).await?;
 				Ok(&*buf == &**name)
 			}
@@ -115,7 +112,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 		if let Type::Dir { id } = item.ty {
 			// Ensure the directory is empty to avoid space leaks.
 			let buf = &mut [0; 4];
-			let dir = self.fs.storage.get(self.bg, id).await?;
+			let dir = self.fs.storage.get(id).await?;
 			read_exact(&dir, header::offset::ITEM_COUNT.into(), buf).await?;
 			let item_count = u32::from_le_bytes(*buf);
 			if item_count > 0 {
@@ -168,7 +165,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 					// Dereference object.
 					self.fs
 						.storage
-						.get(self.bg, id)
+						.get(id)
 						.await?
 						.decrease_reference_count()
 						.await?;
@@ -178,7 +175,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 					for i in 0..3 {
 						self.fs
 							.storage
-							.get(self.bg, id + i)
+							.get(id + i)
 							.await?
 							.decrease_reference_count()
 							.await?;
@@ -236,7 +233,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 		let count = f(data.item_count);
 		data.item_count = count;
 		drop(data);
-		let obj = self.fs.storage.get(self.bg, self.id).await?;
+		let obj = self.fs.storage.get(self.id).await?;
 		crate::write_all(&obj, 4, &count.to_le_bytes()).await
 	}
 
@@ -265,7 +262,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 			});
 		}
 
-		let to_dir = Dir::new(self.bg, self.fs, to_dir);
+		let to_dir = Dir::new(self.fs, to_dir);
 
 		let from_map = self.hashmap().await?;
 
@@ -422,14 +419,14 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 		// Replace old map
 		self.fs
 			.storage
-			.get(self.bg, self.id + MAP_OFFT)
+			.get(self.id + MAP_OFFT)
 			.await?
 			.replace_with(new_map.map)
 			.await?;
 		let mut data = self.fs.dir_data(self.id);
 		data.hashmap_size = new_size;
 		drop(data);
-		let obj = self.fs.storage.get(self.bg, self.id).await?;
+		let obj = self.fs.storage.get(self.id).await?;
 		crate::write_all(
 			&obj,
 			header::offset::HASHMAP_SIZE.into(),
@@ -507,7 +504,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 		let item_len = d.item_size();
 		drop(d);
 		let mut buf = vec![0; item_len.into()];
-		let obj = self.fs.storage.get(self.bg, self.id).await?;
+		let obj = self.fs.storage.get(self.id).await?;
 		crate::read_exact(&obj, offt, &mut buf).await?;
 		let item = Item::from_raw(&self.fs.dir_data(self.id), &buf, index);
 		Ok(item)
@@ -521,7 +518,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 			+ u64::from(d.item_size()) * u64::from(index)
 			+ u64::from(offset);
 		drop(d);
-		let obj = self.fs.storage.get(self.bg, self.id).await?;
+		let obj = self.fs.storage.get(self.id).await?;
 		crate::write_all(&obj, offt, data).await?;
 		Ok(())
 	}
@@ -543,7 +540,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 		if data.item_capacity <= index {
 			data.item_capacity = index + 1;
 			drop(data);
-			let obj = self.fs.storage.get(self.bg, self.id).await?;
+			let obj = self.fs.storage.get(self.id).await?;
 			crate::write_all(
 				&obj,
 				header::offset::ITEM_CAPACITY.into(),
@@ -580,7 +577,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 		drop(data);
 
 		// Write log
-		let obj = self.fs.storage.get(self.bg, self.id).await?;
+		let obj = self.fs.storage.get(self.id).await?;
 		obj.resize(base + u64::try_from(log.len()).unwrap() * 8)
 			.await?;
 		for (i, r) in log.iter().enumerate() {
@@ -608,7 +605,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 
 		// Read log
 		let mut log = RangeSet::new();
-		let obj = self.fs.storage.get(self.bg, self.id).await?;
+		let obj = self.fs.storage.get(self.id).await?;
 		let len = obj.len().await?;
 		for offt in (base..len).step_by(8) {
 			let mut buf = [0; 8];
@@ -647,13 +644,13 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 	}
 }
 
-impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
+impl<'a, D: Dev> DirRef<'a, D> {
 	/// Create a new directory.
 	pub(crate) async fn new(
-		parent_dir: &Dir<'a, 'b, D>,
+		parent_dir: &Dir<'a, D>,
 		parent_index: u32,
 		options: &DirOptions,
-	) -> Result<DirRef<'a, 'b, D>, Error<D>> {
+	) -> Result<DirRef<'a, D>, Error<D>> {
 		// Increase reference count to parent directory.
 		let mut parent = parent_dir.fs.dir_data(parent_dir.id);
 		parent.header.reference_count += 1;
@@ -664,14 +661,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 
 		// Load directory data.
 		drop(parent);
-		let dir_ref = Self::new_inner(
-			parent_dir.bg,
-			parent_dir.fs,
-			parent_dir.id,
-			parent_index,
-			options,
-		)
-		.await?;
+		let dir_ref = Self::new_inner(parent_dir.fs, parent_dir.id, parent_index, options).await?;
 
 		let r = parent_dir
 			.fs
@@ -687,23 +677,21 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 	///
 	/// This does not lock anything and is meant to be solely used in [`Nrfs::new`].
 	pub(crate) async fn new_root(
-		bg: &'b Background<'a, D>,
 		fs: &'a Nrfs<D>,
 		options: &DirOptions,
-	) -> Result<DirRef<'a, 'b, D>, Error<D>> {
-		Self::new_inner(bg, fs, u64::MAX, u32::MAX, options).await
+	) -> Result<DirRef<'a, D>, Error<D>> {
+		Self::new_inner(fs, u64::MAX, u32::MAX, options).await
 	}
 
 	/// Create a new directory.
 	///
 	/// This does not directly create a reference to a parent directory.
 	async fn new_inner(
-		bg: &'b Background<'a, D>,
 		fs: &'a Nrfs<D>,
 		parent_id: u64,
 		parent_index: u32,
 		options: &DirOptions,
-	) -> Result<DirRef<'a, 'b, D>, Error<D>> {
+	) -> Result<DirRef<'a, D>, Error<D>> {
 		// Initialize data.
 		let mut header_len = 32;
 		let mut item_len = 32 + 8; // header + object id or data offset
@@ -736,7 +724,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		};
 
 		// Create objects (dir, map, heap).
-		let slf_id = fs.storage.create_many(bg, 3).await?;
+		let slf_id = fs.storage.create_many(3).await?;
 
 		// Create header.
 		let (hash_ty, hash_key) = data.hasher.to_raw();
@@ -768,35 +756,31 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 
 		// Write header
 		let header_len = usize::from(data.header_len8) * 8;
-		let obj = fs.storage.get(bg, slf_id).await?;
+		let obj = fs.storage.get(slf_id).await?;
 		crate::write_grow(&obj, 0, &buf[..header_len]).await?;
 		drop(obj);
 
 		// Ensure hashmap is properly sized.
-		fs.storage
-			.get(bg, slf_id + MAP_OFFT)
-			.await?
-			.resize(32)
-			.await?;
+		fs.storage.get(slf_id + MAP_OFFT).await?.resize(32).await?;
 
 		// Insert directory data & return reference.
 		fs.data.borrow_mut().directories.insert(slf_id, data);
-		Ok(Self { fs, bg, id: slf_id })
+		Ok(Self { fs, id: slf_id })
 	}
 
 	/// Load an existing directory.
 	pub(crate) async fn load(
-		parent_dir: &Dir<'a, 'b, D>,
+		parent_dir: &Dir<'a, D>,
 		parent_index: u32,
 		id: u64,
-	) -> Result<DirRef<'a, 'b, D>, Error<D>> {
+	) -> Result<DirRef<'a, D>, Error<D>> {
 		trace!("load {:?} | {:?}:{:?}", id, parent_dir.id, parent_index);
 		// Check if the directory is already present in the filesystem object.
 		//
 		// If so, just reference that and return.
 		if let Some(dir) = parent_dir.fs.data.borrow_mut().directories.get_mut(&id) {
 			dir.header.reference_count += 1;
-			return Ok(DirRef { fs: parent_dir.fs, bg: parent_dir.bg, id });
+			return Ok(DirRef { fs: parent_dir.fs, id });
 		}
 
 		// FIXME check if the directory is already being loaded
@@ -812,14 +796,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 
 		// Load directory data.
 		drop(parent);
-		let dir_ref = Self::load_inner(
-			parent_dir.bg,
-			parent_dir.fs,
-			parent_dir.id,
-			parent_index,
-			id,
-		)
-		.await?;
+		let dir_ref = Self::load_inner(parent_dir.fs, parent_dir.id, parent_index, id).await?;
 
 		// Add ourselves to parent dir.
 		// FIXME account for potential move while loading the directory.
@@ -835,24 +812,21 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 	}
 
 	/// Load the root directory.
-	pub(crate) async fn load_root(
-		bg: &'b Background<'a, D>,
-		fs: &'a Nrfs<D>,
-	) -> Result<DirRef<'a, 'b, D>, Error<D>> {
+	pub(crate) async fn load_root(fs: &'a Nrfs<D>) -> Result<DirRef<'a, D>, Error<D>> {
 		trace!("load_root");
 		// Check if the root directory is already present in the filesystem object.
 		//
 		// If so, just reference that and return.
 		if let Some(dir) = fs.data.borrow_mut().directories.get_mut(&0) {
 			dir.header.reference_count += 1;
-			return Ok(DirRef { fs, bg, id: 0 });
+			return Ok(DirRef { fs, id: 0 });
 		}
 
 		// FIXME check if the directory is already being loaded
 		// Also create some guard when we start fetching directory data.
 
 		// Load directory data.
-		let dir_ref = Self::load_inner(bg, fs, u64::MAX, u32::MAX, 0).await?;
+		let dir_ref = Self::load_inner(fs, u64::MAX, u32::MAX, 0).await?;
 
 		// FIXME ditto
 
@@ -867,14 +841,13 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 	///
 	/// This function does not check if a corresponding [`DirData`] is already present!
 	async fn load_inner(
-		bg: &'b Background<'a, D>,
 		fs: &'a Nrfs<D>,
 		parent_id: u64,
 		parent_index: u32,
 		id: u64,
-	) -> Result<DirRef<'a, 'b, D>, Error<D>> {
+	) -> Result<DirRef<'a, D>, Error<D>> {
 		trace!("load_inner {:?} | {:?}:{:?}", id, parent_id, parent_index);
-		let obj = fs.storage.get(bg, id).await?;
+		let obj = fs.storage.get(id).await?;
 
 		// Get basic info
 		let mut buf = [0; 32];
@@ -937,7 +910,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 
 		// Insert directory data & return reference.
 		fs.data.borrow_mut().directories.insert(id, data);
-		Ok(Self { fs, bg, id })
+		Ok(Self { fs, id })
 	}
 
 	/// Get a list of enabled extensions.
@@ -958,7 +931,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		&self,
 		name: &Name,
 		ext: &Extensions,
-	) -> Result<Result<FileRef<'a, 'b, D>, InsertError>, Error<D>> {
+	) -> Result<Result<FileRef<'a, D>, InsertError>, Error<D>> {
 		trace!("create_file {:?}", name);
 		let ty = Type::EmbedFile { offset: 0, length: 0 };
 		let index = self.dir().insert(name, ty, ext).await?;
@@ -973,7 +946,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		name: &Name,
 		options: &DirOptions,
 		ext: &Extensions,
-	) -> Result<Result<DirRef<'a, 'b, D>, InsertError>, Error<D>> {
+	) -> Result<Result<DirRef<'a, D>, InsertError>, Error<D>> {
 		trace!("create_dir {:?}", name);
 		// Try to insert stub entry
 		let ty = Type::Dir { id: u64::MAX };
@@ -996,7 +969,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		&self,
 		name: &Name,
 		ext: &Extensions,
-	) -> Result<Result<SymRef<'a, 'b, D>, InsertError>, Error<D>> {
+	) -> Result<Result<SymRef<'a, D>, InsertError>, Error<D>> {
 		trace!("create_sym {:?}", name);
 		let ty = Type::EmbedSym { offset: 0, length: 0 };
 		let index = self.dir().insert(name, ty, ext).await?;
@@ -1009,7 +982,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 	pub async fn next_from(
 		&self,
 		mut index: u64,
-	) -> Result<Option<(ItemRef<'a, 'b, D>, u64)>, Error<D>> {
+	) -> Result<Option<(ItemRef<'a, D>, u64)>, Error<D>> {
 		trace!("next_from {:?}", index);
 		while index < u64::from(self.fs.dir_data(self.id).item_capacity) {
 			// Get standard info
@@ -1028,7 +1001,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 	}
 
 	/// Find an entry with the given name.
-	pub async fn find(&self, name: &Name) -> Result<Option<ItemRef<'a, 'b, D>>, Error<D>> {
+	pub async fn find(&self, name: &Name) -> Result<Option<ItemRef<'a, D>>, Error<D>> {
 		trace!("find {:?}", name);
 		let dir = self.dir();
 		if let Some(entry) = dir.hashmap().await?.find_index(name).await? {
@@ -1062,7 +1035,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 	pub async fn transfer(
 		&self,
 		name: &Name,
-		to_dir: &DirRef<'a, 'b, D>,
+		to_dir: &DirRef<'a, D>,
 		to_name: &Name,
 	) -> Result<Result<(), TransferError>, Error<D>> {
 		assert_eq!(
@@ -1099,7 +1072,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		// without recursion and avoid a potential stack overflow.
 		loop {
 			// Don't run the Drop impl
-			let DirRef { id, bg, fs } = self;
+			let DirRef { id, fs } = self;
 			mem::forget(self);
 
 			let mut fs_ref = fs.data.borrow_mut();
@@ -1129,7 +1102,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 					drop(fs_ref);
 
 					// Reconstruct DirRef to adjust reference count of dir appropriately.
-					self = DirRef { fs, bg, id: header.parent_id };
+					self = DirRef { fs, id: header.parent_id };
 
 					// If this directory is dangling, destroy it
 					// and remove it from the parent directory.
@@ -1138,7 +1111,7 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 							// TODO add sanity checks to ensure it is empty.
 							for offt in 0..3 {
 								fs.storage
-									.get(bg, id + offt)
+									.get(id + offt)
 									.await?
 									.decrease_reference_count()
 									.await?;
@@ -1179,15 +1152,15 @@ impl<'a, 'b, D: Dev> DirRef<'a, 'b, D> {
 		Ok(self
 			.fs
 			.storage
-			.get(self.bg, self.id + HEAP_OFFT)
+			.get(self.id + HEAP_OFFT)
 			.await?
 			.len()
 			.await?)
 	}
 
 	/// Create a [`Dir`] helper structure.
-	pub(crate) fn dir(&self) -> Dir<'a, 'b, D> {
-		Dir::new(self.bg, self.fs, self.id)
+	pub(crate) fn dir(&self) -> Dir<'a, D> {
+		Dir::new(self.fs, self.id)
 	}
 }
 

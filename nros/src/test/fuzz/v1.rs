@@ -113,20 +113,19 @@ impl Test {
 	pub fn run(mut self) {
 		self.ops.reverse();
 		while !self.ops.is_empty() {
-			let bg = Background::default();
 			let mut new_cache_size = 0;
-			run2(&bg, async {
+			run(&self.store, async {
 				while let Some(op) = self.ops.pop() {
 					match op {
 						Op::Create { size } => {
-							let obj = self.store.create(&bg).await.unwrap();
+							let obj = self.store.create().await.unwrap();
 							obj.resize(size).await.unwrap();
 							self.contents.insert(obj.id(), Default::default());
 							self.ids.push(obj.id());
 						}
 						Op::Write { idx, offset, amount } => {
 							let id = self.ids[idx as usize % self.ids.len()];
-							let obj = self.store.get(&bg, id).await.unwrap();
+							let obj = self.store.get(id).await.unwrap();
 							let len = obj.len().await.unwrap();
 							if len > 0 {
 								let offt = offset % len;
@@ -141,7 +140,7 @@ impl Test {
 						}
 						Op::Read { idx, offset, amount } => {
 							let id = self.ids[idx as usize % self.ids.len()];
-							let obj = self.store.get(&bg, id).await.unwrap();
+							let obj = self.store.get(id).await.unwrap();
 							let len = obj.len().await.unwrap();
 							if len > 0 {
 								let offt = offset % len;
@@ -178,10 +177,10 @@ impl Test {
 								self.ids.swap_remove(from_i);
 							}
 							self.store
-								.get(&bg, to_id)
+								.get(to_id)
 								.await
 								.unwrap()
-								.replace_with(self.store.get(&bg, from_id).await.unwrap())
+								.replace_with(self.store.get(from_id).await.unwrap())
 								.await
 								.unwrap();
 
@@ -190,7 +189,7 @@ impl Test {
 						}
 						Op::Resize { idx, size } => {
 							let id = self.ids[idx as usize % self.ids.len()];
-							let obj = self.store.get(&bg, id).await.unwrap();
+							let obj = self.store.get(id).await.unwrap();
 							obj.resize(size).await.unwrap();
 							if size < u64::MAX {
 								self.contents.get_mut(&id).unwrap().remove(size..u64::MAX);
@@ -199,7 +198,7 @@ impl Test {
 						Op::Destroy { idx } => {
 							let i = idx as usize % self.ids.len();
 							let id = self.ids[i];
-							let obj = self.store.get(&bg, id).await.unwrap();
+							let obj = self.store.get(id).await.unwrap();
 							obj.decrease_reference_count().await.unwrap();
 							self.ids.swap_remove(i);
 							// Stop immediately if no objects remain.
@@ -210,8 +209,9 @@ impl Test {
 						}
 					}
 				}
+				Ok(())
 			});
-			block_on(bg.drop()).unwrap();
+
 			self.store = block_on(async {
 				let devices = self.store.unmount().await.unwrap();
 				Nros::load(LoadConfig {

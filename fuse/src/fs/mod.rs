@@ -12,7 +12,7 @@ use {
 	nrfs::{
 		dev::FileDev,
 		dir::{ItemData, ItemRef, RemoveError},
-		Background, Name, Nrfs,
+		Name, Nrfs,
 	},
 	std::{
 		cell::RefCell,
@@ -62,10 +62,8 @@ impl Fs {
 			libc::getgid()
 		});
 
-		let bg = Background::default();
-		let root = bg.run(fs.root_dir(&bg)).await.unwrap();
+		let root = fs.run(fs.root_dir()).await.unwrap();
 		ino.add_dir(root, true);
-		bg.drop().await.unwrap();
 
 		let (send, recv) = async_channel::bounded(1024);
 
@@ -77,47 +75,46 @@ impl Fs {
 
 	pub async fn run(self) -> Result<(), nrfs::Error<FileDev>> {
 		eprintln!("Running");
-		let bg = Background::default();
-		bg.run(async {
-			loop {
-				let job = self.channel.recv().await.unwrap();
-				macro_rules! switch {
-					{ [$bg:ident $job:ident] $($v:ident $f:ident)* } => {
+		self.fs
+			.run(async {
+				loop {
+					let job = self.channel.recv().await.unwrap();
+					macro_rules! switch {
+					{ [$job:ident] $($v:ident $f:ident)* } => {
 						match $job {
-							$(Job::$v(job) => self.$f(&$bg, job).await,)*
+							$(Job::$v(job) => self.$f(job).await,)*
 							Job::Destroy => {
-								self.destroy(&bg).await;
+								self.destroy().await;
 								break;
 							}
 						}
 					};
 				}
-				switch! {
-					[bg job]
-					Lookup lookup
-					Forget forget
-					GetAttr getattr
-					SetAttr setattr
-					Read read
-					Write write
-					ReadLink readlink
-					ReadDir readdir
-					Create create
-					FAllocate fallocate
-					SymLink symlink
-					MkDir mkdir
-					Rename rename
-					Unlink unlink
-					RmDir rmdir
-					FSync fsync
-					StatFs statfs
+					switch! {
+						[job]
+						Lookup lookup
+						Forget forget
+						GetAttr getattr
+						SetAttr setattr
+						Read read
+						Write write
+						ReadLink readlink
+						ReadDir readdir
+						Create create
+						FAllocate fallocate
+						SymLink symlink
+						MkDir mkdir
+						Rename rename
+						Unlink unlink
+						RmDir rmdir
+						FSync fsync
+						StatFs statfs
+					}
 				}
-			}
-			Ok::<_, nrfs::Error<_>>(())
-		})
-		.await?;
+				Ok::<_, nrfs::Error<_>>(())
+			})
+			.await?;
 		eprintln!("Session closed, unmounting");
-		bg.drop().await?;
 		self.fs.unmount().await?;
 		Ok(())
 	}
@@ -165,15 +162,10 @@ impl Fs {
 	}
 
 	/// Remove a file or symbolic link.
-	async fn remove_file<'a>(
-		&'a self,
-		bg: &Background<'a, FileDev>,
-		parent: u64,
-		name: &Name,
-	) -> Result<(), i32> {
+	async fn remove_file<'a>(&'a self, parent: u64, name: &Name) -> Result<(), i32> {
 		let self_ino = self.ino.borrow_mut();
 
-		let d = self_ino.get_dir(&self.fs, bg, parent);
+		let d = self_ino.get_dir(&self.fs, parent);
 
 		// Be a good UNIX citizen and check the type.
 		let Some(e) = d.find(name).await.unwrap() else { return Err(libc::ENOENT) };
