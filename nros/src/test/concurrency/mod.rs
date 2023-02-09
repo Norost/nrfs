@@ -113,9 +113,8 @@ fn read() {
 	// FIXME there is a source of non-determinism somewhere
 	// and it's pissing me off.
 	let s = block_on(new(5));
-	let bg = Background::default();
-	run2(&bg, async {
-		let obj = s.create(&bg).await.unwrap();
+	run(&s, async {
+		let obj = s.create().await.unwrap();
 		// Write to at least 8 different leaves to ensure we exceed cache limits
 		obj.resize(1024 * 8).await.unwrap();
 		for i in 0..8 {
@@ -127,23 +126,26 @@ fn read() {
 		(0..8)
 			.map(|i| async move {
 				let buf = &mut [0];
-				obj.read(1024 * i + 1023, buf).await.unwrap();
+				let task = obj.read(1024 * i + 1023, buf);
+				#[cfg(feature = "trace")]
+				let task = trace::TracedTask::new(task);
+				task.await.unwrap();
 				assert_eq!(*buf, [1]);
 			})
 			.collect::<FuturesUnordered<_>>()
 			.for_each(|()| future::ready(()))
 			.await;
+
+		Ok(())
 	});
-	block_on(bg.drop()).unwrap();
 }
 
 /// Write to an object concurrently.
 #[test]
 fn write() {
 	let s = block_on(new(5));
-	let bg = Background::default();
-	run2(&bg, async {
-		let obj = s.create(&bg).await.unwrap();
+	run(&s, async {
+		let obj = s.create().await.unwrap();
 		// Write concurrently.
 		// Write to at least 8 different leaves to ensure we exceed cache limits
 		obj.resize(1024 * 8).await.unwrap();
@@ -159,6 +161,7 @@ fn write() {
 			obj.read(1024 * i + 1023, buf).await.unwrap();
 			assert_eq!(*buf, [1]);
 		}
+
+		Ok(())
 	});
-	block_on(bg.drop()).unwrap();
 }

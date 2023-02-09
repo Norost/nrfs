@@ -21,24 +21,23 @@ fn equal_2() {
 		let dev_a = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let dev_b = dev::MemDev::new(1 << 5, BlockSize::K1);
 		let s = new(vec![vec![dev_a, dev_b]]).await;
-		let bg = Background::default();
 
-		let obj = s.create(&bg).await.unwrap();
-		obj.resize(1 << 15).await.unwrap();
-		obj.write(0, &[1; 1 << 15]).await.unwrap();
-		drop(obj);
-
-		bg.try_run_all().await.unwrap();
-		bg.drop().await.unwrap();
+		s.run(async {
+			let obj = s.create().await.unwrap();
+			obj.resize(1 << 15).await.unwrap();
+			obj.write(0, &[1; 1 << 15]).await.unwrap();
+			Ok::<_, Error<_>>(())
+		})
+		.await
+		.unwrap();
 
 		let devs = s.unmount().await.unwrap();
 
 		let s = load(devs).await;
-		let bg = Background::default();
-		let obj = s.get(&bg, 0).await.unwrap();
+
+		let obj = s.get(0).await.unwrap();
 		let buf = &mut [0; 1 << 15];
 		obj.read(0, buf).await.unwrap();
 		assert_eq!(buf, &mut [1; 1 << 15]);
-		bg.drop().await.unwrap();
 	});
 }

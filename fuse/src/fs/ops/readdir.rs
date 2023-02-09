@@ -1,7 +1,7 @@
 use {super::*, std::ffi::OsStr};
 
 impl Fs {
-	pub async fn readdir<'a>(&'a self, bg: &Background<'a, FileDev>, mut job: crate::job::ReadDir) {
+	pub async fn readdir(&self, mut job: crate::job::ReadDir) {
 		let mut self_ino = self.ino.borrow_mut();
 
 		if job.offset == 0 {
@@ -18,7 +18,7 @@ impl Fs {
 			job.offset += 1;
 		}
 
-		let mut d = self_ino.get_dir(&self.fs, bg, job.ino);
+		let mut d = self_ino.get_dir(&self.fs, job.ino);
 
 		let mut index = job.offset as u64 - 2;
 		while let Some((e, i)) = d.next_from(index).await.unwrap() {
@@ -55,7 +55,7 @@ impl Fs {
 				}
 				ItemRef::Unknown(_) => todo!("miscellaneous file type"),
 			};
-			d = self_ino.get_dir(&self.fs, bg, job.ino);
+			d = self_ino.get_dir(&self.fs, job.ino);
 
 			let offt = i as i64 + 2;
 			if job.reply.add(e_ino, offt, ty, OsStr::from_bytes(&name)) {

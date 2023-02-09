@@ -1,7 +1,9 @@
 use {
-	super::{lru, Key},
+	super::{memory_tracker::Idx, Key},
+	crate::waker_queue::WakerQueue,
 	alloc::rc::Rc,
-	core::{cell::RefCell, task::Waker},
+	core::{cell::RefCell, mem, task::Waker},
+	std::collections::hash_map,
 };
 
 /// A single slot with cached data.
@@ -11,6 +13,22 @@ pub(super) enum Slot<T> {
 	Present(Present<T>),
 	/// The entry is being fetched or flushed.
 	Busy(Rc<RefCell<Busy>>),
+}
+
+impl<T> Slot<T> {
+	pub fn as_present_mut(&mut self) -> Option<&mut Present<T>> {
+		match self {
+			Self::Present(e) => Some(e),
+			_ => None,
+		}
+	}
+
+	fn as_busy(&self) -> Option<&Rc<RefCell<Busy>>> {
+		match self {
+			Self::Busy(e) => Some(e),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Debug)]
@@ -24,7 +42,7 @@ pub(super) struct Present<T> {
 #[derive(Debug)]
 pub(super) struct Busy {
 	/// Wakers for tasks waiting for this slot.
-	pub wakers: Vec<Waker>,
+	pub wakers: WakerQueue<()>,
 	/// The amount of tasks referencing this data.
 	///
 	/// *Excludes* the busy task.
@@ -37,11 +55,23 @@ pub(super) struct Busy {
 
 impl Busy {
 	pub fn new(key: Key) -> Rc<RefCell<Self>> {
-		Rc::new(RefCell::new(Self { wakers: vec![], refcount: 0, key }))
+		Rc::new(RefCell::new(Self {
+			wakers: Default::default(),
+			refcount: 0,
+			key,
+		}))
 	}
 
 	pub fn with_refcount(key: Key, refcount: usize) -> Rc<RefCell<Self>> {
-		Rc::new(RefCell::new(Self { wakers: vec![], refcount, key }))
+		Rc::new(RefCell::new(Self {
+			wakers: Default::default(),
+			refcount,
+			key,
+		}))
+	}
+
+	pub fn wake_all(&mut self) {
+		self.wakers.wake_all();
 	}
 }
 
@@ -57,6 +87,61 @@ pub(super) enum RefCount {
 	/// There are no remaining entries.
 	NoRef {
 		/// The position in the LRU.
-		lru_index: lru::Idx,
+		lru_index: Idx,
 	},
+}
+
+pub(super) trait SlotExt<'a, T> {
+	fn into_present_mut(self) -> Option<&'a mut Present<T>>;
+
+	fn as_present_mut(&mut self) -> Option<&mut Present<T>>;
+
+	fn as_busy(&self) -> Option<&Rc<RefCell<Busy>>>;
+}
+
+impl<'a, T> SlotExt<'a, T> for hash_map::Entry<'a, u64, Slot<T>> {
+	fn into_present_mut(self) -> Option<&'a mut Present<T>> {
+		let hash_map::Entry::Occupied(e) = self else { return None };
+		e.into_mut().as_present_mut()
+	}
+
+	fn as_present_mut(&mut self) -> Option<&mut Present<T>> {
+		let hash_map::Entry::Occupied(e) = self else { return None };
+		e.get_mut().as_present_mut()
+	}
+
+	fn as_busy(&self) -> Option<&Rc<RefCell<Busy>>> {
+		let hash_map::Entry::Occupied(e) = self else { return None };
+		e.get().as_busy()
+	}
+}
+
+impl<'a, T> SlotExt<'a, T> for hash_map::OccupiedEntry<'a, u64, Slot<T>> {
+	fn into_present_mut(self) -> Option<&'a mut Present<T>> {
+		let Slot::Present(p) = self.into_mut() else { return None };
+		Some(p)
+	}
+
+	fn as_present_mut(&mut self) -> Option<&mut Present<T>> {
+		self.get_mut().as_present_mut()
+	}
+
+	fn as_busy(&self) -> Option<&Rc<RefCell<Busy>>> {
+		self.get().as_busy()
+	}
+}
+
+impl<'a, T> SlotExt<'a, T> for Option<&'a mut Slot<T>> {
+	fn into_present_mut(self) -> Option<&'a mut Present<T>> {
+		let Slot::Present(p) = self? else { return None };
+		Some(p)
+	}
+
+	fn as_present_mut(&mut self) -> Option<&mut Present<T>> {
+		self.as_mut()?.as_present_mut()
+	}
+
+	fn as_busy(&self) -> Option<&Rc<RefCell<Busy>>> {
+		self.as_ref()?.as_busy()
+	}
 }

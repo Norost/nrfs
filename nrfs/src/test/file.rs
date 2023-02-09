@@ -4,9 +4,8 @@ use super::*;
 #[test]
 fn transfer_embed() {
 	let fs = new();
-	let bg = Background::default();
-	run2(&bg, async {
-		let root = fs.root_dir(&bg).await.unwrap();
+	run(&fs, async {
+		let root = fs.root_dir().await.unwrap();
 
 		let dir = root
 			.create_dir(
@@ -40,5 +39,4 @@ fn transfer_embed() {
 		dir.drop().await.unwrap();
 		root.drop().await.unwrap();
 	});
-	block_on(bg.drop()).unwrap();
 }

@@ -5,19 +5,25 @@ use {
 	core::cell::RefCell,
 };
 
-impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
+impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// Get a cache entry of a tree node.
 	///
 	/// It may fetch up to [`MAX_DEPTH`] of parent busy_entries.
 	///
 	/// Note that `offset` must already include appropriate shifting.
 	///
+	/// `use_reserved` indicates whether reserved memory may be used when fetching entries.
+	///
 	/// # Note
 	///
 	/// This accounts for busy_entries being moved to pseudo-objects while fetching.
 	///
 	/// The proper ID can be found in the returned entry's `key` field.
-	pub(super) async fn get(&self, depth: u8, offset: u64) -> Result<EntryRef<'a, D, R>, Error<D>> {
+	pub(in super::super) async fn get(
+		&self,
+		depth: u8,
+		offset: u64,
+	) -> Result<EntryRef<'a, D, R>, Error<D>> {
 		let key = Key::new(0, self.id, depth, offset);
 
 		trace!("get {:?}", key);
@@ -61,9 +67,17 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		}
 
 		// 2. On failure, insert a busy slot.
-		let (mut obj, mut lru) = self.cache.fetch_object(self.background, self.id).await?;
+		let _ = self.cache.fetch_object(self.id).await?;
+
+		// The entry may have been inserted during fetch_object, so check again.
+		if let Some(entry) = self.cache.wait_entry(key).await {
+			return Ok(entry);
+		}
+
+		let (mut obj, mut memory_tracker) = self.cache.get_object(self.id).expect("no object");
+
 		let busy = Busy::new(key);
-		obj.add_entry(&mut lru, depth, offset, Slot::Busy(busy.clone()));
+		obj.insert_entry(&mut memory_tracker, depth, offset, Slot::Busy(busy.clone()));
 
 		let mut busy_entries = vec![busy];
 		let mut cur_depth = depth;
@@ -91,7 +105,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			})
 		};
 
-		drop((obj, lru));
+		drop((obj, memory_tracker));
 
 		loop {
 			// 3. Find record of current entry to fetch.
@@ -120,9 +134,15 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				}
 
 				// 3c. Insert a busy slot on failure.
-				let (mut obj, mut lru) = self.cache.get_object(k.id()).expect("no object");
+				let (mut obj, mut memory_tracker) =
+					self.cache.get_object(k.id()).expect("no object");
 				let busy = Busy::new(k);
-				obj.add_entry(&mut lru, k.depth(), k.offset(), Slot::Busy(busy.clone()));
+				obj.insert_entry(
+					&mut memory_tracker,
+					k.depth(),
+					k.offset(),
+					Slot::Busy(busy.clone()),
+				);
 				busy_entries.push(busy);
 
 				cur_depth += 1;

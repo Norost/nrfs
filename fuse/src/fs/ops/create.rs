@@ -1,10 +1,10 @@
 use super::*;
 
 impl Fs {
-	pub async fn create<'a>(&'a self, bg: &Background<'a, FileDev>, job: crate::job::Create) {
+	pub async fn create(&self, job: crate::job::Create) {
 		let mut self_ino = self.ino.borrow_mut();
 
-		let d = self_ino.get_dir(&self.fs, bg, job.parent);
+		let d = self_ino.get_dir(&self.fs, job.parent);
 
 		let Ok(name) = job.name.as_bytes().try_into() else { return job.reply.error(libc::ENAMETOOLONG) };
 		let unix = nrfs::dir::ext::unix::Entry::new(job.mode as _, job.uid, job.gid);
@@ -17,7 +17,7 @@ impl Fs {
 				if let Some(f) = f {
 					f.drop().await.unwrap()
 				}
-				let data = self_ino.get(&self.fs, bg, ino).data().await.unwrap();
+				let data = self_ino.get(&self.fs, ino).data().await.unwrap();
 				drop(self_ino);
 				job.reply.created(
 					&TTL,

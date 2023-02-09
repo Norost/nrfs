@@ -1,11 +1,11 @@
 use super::*;
 
 impl Fs {
-	pub async fn setattr<'a>(&'a self, bg: &Background<'a, FileDev>, job: crate::job::SetAttr) {
+	pub async fn setattr(&self, job: crate::job::SetAttr) {
 		let self_ino = self.ino.borrow_mut();
 
 		// Get entry
-		let e = self_ino.get(&self.fs, bg, job.ino);
+		let e = self_ino.get(&self.fs, job.ino);
 
 		// Set size, if possible
 		let (ty, size) = match &*e {

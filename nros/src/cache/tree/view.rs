@@ -3,7 +3,7 @@ use {
 	crate::{Dev, Error, Resource},
 };
 
-impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
+impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// fetch an entry and return a reference to it.
 	///
 	/// `offset` is calculated in record units.

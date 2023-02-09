@@ -1,9 +1,9 @@
 use {
-	super::{Key, Present, Slot, Tree},
+	super::{Busy, Key, Present, Slot, Tree},
 	crate::{resource::Buf, util, Dev, Error, Resource},
 };
 
-impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
+impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// Set a leaf record's data directly.
 	///
 	/// This avoids a fetch if the entry isn't already present.
@@ -23,13 +23,29 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 		if let Some(entry) = self.cache.wait_entry(key).await {
 			// If the entry is already present, overwrite it.
-			entry.modify(self.background, |d| *d = data);
+			entry.replace(data).await;
 		} else {
 			// Otherwise insert a new entry.
-			let (mut obj, mut lru) = self.cache.fetch_object(self.background, self.id).await?;
-			let refcount = lru.entry_add_noref(key, data.len());
-			let slot = Slot::Present(Present { data, refcount });
-			obj.add_entry(&mut lru, 0, offset, slot);
+
+			// Insert busy entry.
+			let (mut obj, mut memory_tracker) = self.cache.fetch_object(self.id).await?;
+			let busy = Busy::new(Key::new(0, self.id, 0, offset));
+			obj.insert_entry(&mut memory_tracker, 0, offset, Slot::Busy(busy.clone()));
+			obj.set_dirty(true);
+
+			// Reserve memory.
+			drop((obj, memory_tracker));
+			self.cache.memory_reserve_entry(data.len()).await;
+			let key = busy.borrow_mut().key;
+			busy.borrow_mut().wake_all();
+
+			// Set present.
+			let (mut obj, mut memory_tracker) = self.cache.get_object(key.id()).expect("no object");
+			let refcount = memory_tracker.finish_fetch_entry(busy, data.len());
+			let entry = obj.get_mut(key.depth(), key.offset()).expect("no entry");
+			*entry = Slot::Present(Present { data, refcount });
+
+			// Mark dirty
 			obj.data.mark_dirty(0, offset, self.max_record_size());
 		}
 

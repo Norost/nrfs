@@ -3,7 +3,7 @@ use {
 	crate::util,
 };
 
-impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
+impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// Zero out a range of data.
 	///
 	/// This is more efficient than [`Tree::write`] for clearing large regions.
@@ -72,16 +72,16 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		// Trim leftmost record.
 		// If the entire record will be cleared, skip and consider it as part of the middle.
 		if must_trim_left {
-			self.get(0, offset).await?.modify(self.background, |data| {
-				if left_offset == right_offset && right_trim < data.len() {
-					// We have to trim a single record left & right.
-					data.get_mut()[left_trim..=right_trim].fill(0);
-					must_trim_right = false;
-				} else {
-					// We have to trim the leftmost record only on the left.
-					data.resize(left_trim, 0);
-				}
-			});
+			let entry = self.get(0, offset).await?;
+			let len = if left_offset == right_offset {
+				// We have to trim a single record between left & right.
+				must_trim_right = false;
+				right_trim - left_trim + 1
+			} else {
+				// We have to trim the leftmost record only from left to right
+				(1 << self.max_record_size().to_raw()) - left_trim
+			};
+			entry.write_zeros(left_trim, len);
 			offset += 1;
 		}
 

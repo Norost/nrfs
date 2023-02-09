@@ -5,7 +5,7 @@ use {
 	core::{cell::RefCell, mem},
 };
 
-impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
+impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// Update a record.
 	/// This will write the record to the parent record or the object of this object.
 	///
@@ -27,7 +27,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			record.length(),
 		);
 
-		let Self { mut id, cache, background } = self;
+		let Self { mut id, cache } = self;
 
 		// The object is guaranteed to exist.
 		// At least, if called by a task that holds an entry, which should be guaranteed.
@@ -46,7 +46,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 			let (mut obj, _) = cache.get_object(id).expect("no object");
 			#[cfg(debug_assertions)]
-			obj.data.check_integrity();
+			obj.check_integrity();
 			let object = obj.data.object();
 
 			// Ensure the record is actually supposed to be stored at the object.
@@ -87,9 +87,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			let (offt, index) = util::divmod_p2(offset, shift);
 
 			let entry = loop {
-				let entry = Self::new(cache, background, id)
-					.get(parent_depth, offt)
-					.await?;
+				let entry = Self::new(cache, id).get(parent_depth, offt).await?;
 
 				// If the ID changed but does not match with what the busy entry gave us,
 				// check if we should write to the (new!) object instead.
@@ -115,6 +113,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			};
 
 			let old_record = util::get_record(entry.get(), index).unwrap_or_default();
+
 			if old_record.length() == 0 && record.length() == 0 {
 				// Both the old and new record are zero, so don't dirty the parent.
 				trace!(info "skip both zero");
@@ -122,26 +121,20 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 				debug_assert_eq!(record, Record::default());
 				return Ok(());
 			}
-			entry.modify(background, |data| {
-				// Destroy old record
-				trace!(
-					info "replace parent ({}, {}) -> ({}, {})",
-					record.lba,
-					record.length(),
-					old_record.lba,
-					old_record.length(),
-				);
-				cache.store.destroy(&old_record);
 
-				// Calc offset in parent
-				let offt = index * mem::size_of::<Record>();
-				let min_len = data.len().max(offt + mem::size_of::<Record>());
+			// Destroy old record
+			trace!(
+				info "replace parent ({}, {}) -> ({}, {})",
+				record.lba,
+				record.length(),
+				old_record.lba,
+				old_record.length(),
+			);
+			cache.store.destroy(&old_record);
 
-				// Store new record
-				data.resize(min_len, 0);
-				data.get_mut()[offt..offt + mem::size_of::<Record>()]
-					.copy_from_slice(record.as_ref());
-			});
+			// Store new record
+			let offt = index * mem::size_of::<Record>();
+			entry.write(offt, record.as_ref()).await;
 		}
 		Ok(())
 	}

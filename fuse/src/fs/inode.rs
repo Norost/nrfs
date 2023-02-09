@@ -4,8 +4,7 @@ use {
 	nrfs::{
 		dev::FileDev,
 		dir::{ext, ItemRef},
-		Background, DirRef, FileRef, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef, SymRef,
-		TmpRef,
+		DirRef, FileRef, Nrfs, RawDirRef, RawFileRef, RawRef, RawSymRef, SymRef, TmpRef,
 	},
 	std::collections::HashMap,
 };
@@ -44,24 +43,23 @@ struct InodeData<T> {
 
 macro_rules! impl_ty {
 	($ty:ident $val:ident $val_rev:ident $ino:ident | $add:ident $get:ident) => {
-		pub fn $add<'a, 'b>(
+		pub fn $add<'a>(
 			&mut self,
-			$val: $ty<'a, 'b, FileDev>,
+			$val: $ty<'a, FileDev>,
 			incr: bool,
-		) -> (u64, Option<$ty<'a, 'b, FileDev>>) {
+		) -> (u64, Option<$ty<'a, FileDev>>) {
 			let (ino, e) = Self::add(&mut self.$val, &mut self.$val_rev, $val, incr);
 			(ino | $ino, e)
 		}
 
-		pub fn $get<'s, 'a, 'b>(
+		pub fn $get<'s, 'a>(
 			&'s self,
 			fs: &'a Nrfs<FileDev>,
-			bg: &'b Background<'a, FileDev>,
 			ino: u64,
-		) -> TmpRef<'s, $ty<'a, 'b, FileDev>> {
+		) -> TmpRef<'s, $ty<'a, FileDev>> {
 			self.$val[Handle::from_raw((ino ^ $ino) as usize - 1, ())]
 				.value
-				.into_tmp(fs, bg)
+				.into_tmp(fs)
 		}
 	};
 }
@@ -75,7 +73,7 @@ impl InodeStore {
 		}
 	}
 
-	fn add<'a, 'b, T: RawRef<'a, 'b, FileDev>>(
+	fn add<'a, T: RawRef<'a, FileDev>>(
 		m: &mut Arena<InodeData<T::Raw>, ()>,
 		rev_m: &mut HashMap<T::Raw, Handle<()>>,
 		t: T,
@@ -96,17 +94,16 @@ impl InodeStore {
 		(h.into_raw().0 as u64 + 1, t)
 	}
 
-	pub fn get<'s, 'a, 'b>(
+	pub fn get<'s, 'a>(
 		&'s self,
 		fs: &'a Nrfs<FileDev>,
-		bg: &'b Background<'a, FileDev>,
 		ino: u64,
-	) -> TmpRef<'s, ItemRef<'a, 'b, FileDev>> {
+	) -> TmpRef<'s, ItemRef<'a, FileDev>> {
 		let h = Handle::from_raw((ino & !INO_TY_MASK) as usize - 1, ());
 		match ino & INO_TY_MASK {
-			INO_TY_DIR => self.dir[h].value.into_tmp(fs, bg).into(),
-			INO_TY_FILE => self.file[h].value.into_tmp(fs, bg).into(),
-			INO_TY_SYM => self.sym[h].value.into_tmp(fs, bg).into(),
+			INO_TY_DIR => self.dir[h].value.into_tmp(fs).into(),
+			INO_TY_FILE => self.file[h].value.into_tmp(fs).into(),
+			INO_TY_SYM => self.sym[h].value.into_tmp(fs).into(),
 			_ => unreachable!(),
 		}
 	}
@@ -118,13 +115,12 @@ impl InodeStore {
 	/// Forget an entry.
 	///
 	/// Returns an [`ItemRef`] if it needs to be dropped.
-	pub fn forget<'a, 'b>(
+	pub fn forget<'a>(
 		&mut self,
 		fs: &'a Nrfs<FileDev>,
-		bg: &'b Background<'a, FileDev>,
 		ino: u64,
 		nlookup: u64,
-	) -> Option<ItemRef<'a, 'b, FileDev>> {
+	) -> Option<ItemRef<'a, FileDev>> {
 		let h = Handle::from_raw((ino & !INO_TY_MASK) as usize - 1, ());
 		match ino & INO_TY_MASK {
 			INO_TY_DIR => {
@@ -133,7 +129,7 @@ impl InodeStore {
 				if *c == 0 {
 					let d = self.dir.remove(h).unwrap();
 					self.dir_rev.remove(&d.value);
-					return Some(DirRef::from_raw(fs, bg, d.value).into());
+					return Some(DirRef::from_raw(fs, d.value).into());
 				}
 			}
 			INO_TY_FILE => {
@@ -142,7 +138,7 @@ impl InodeStore {
 				if *c == 0 {
 					let f = self.file.remove(h).unwrap();
 					self.file_rev.remove(&f.value);
-					return Some(FileRef::from_raw(fs, bg, f.value).into());
+					return Some(FileRef::from_raw(fs, f.value).into());
 				}
 			}
 			INO_TY_SYM => {
@@ -151,7 +147,7 @@ impl InodeStore {
 				if *c == 0 {
 					let f = self.sym.remove(h).unwrap();
 					self.sym_rev.remove(&f.value);
-					return Some(SymRef::from_raw(fs, bg, f.value).into());
+					return Some(SymRef::from_raw(fs, f.value).into());
 				}
 			}
 			_ => unreachable!(),
@@ -160,19 +156,15 @@ impl InodeStore {
 	}
 
 	/// Drop all references and inodes.
-	pub async fn remove_all<'a, 'b>(
-		&mut self,
-		fs: &'a Nrfs<FileDev>,
-		bg: &'b Background<'a, FileDev>,
-	) {
+	pub async fn remove_all(&mut self, fs: &Nrfs<FileDev>) {
 		for (_, r) in self.dir.drain() {
-			DirRef::from_raw(fs, bg, r.value).drop().await.unwrap();
+			DirRef::from_raw(fs, r.value).drop().await.unwrap();
 		}
 		for (_, r) in self.file.drain() {
-			FileRef::from_raw(fs, bg, r.value).drop().await.unwrap();
+			FileRef::from_raw(fs, r.value).drop().await.unwrap();
 		}
 		for (_, r) in self.sym.drain() {
-			SymRef::from_raw(fs, bg, r.value).drop().await.unwrap();
+			SymRef::from_raw(fs, r.value).drop().await.unwrap();
 		}
 
 		self.dir_rev.clear();

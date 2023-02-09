@@ -9,10 +9,8 @@ mod view;
 mod write_zeros;
 
 use {
-	super::{
-		Busy, Cache, EntryRef, Key, Object, Present, RefCount, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2,
-	},
-	crate::{resource::Buf, Background, Dev, Error, MaxRecordSize, Record, Resource},
+	super::{Busy, Cache, EntryRef, Key, Object, Present, Slot, OBJECT_LIST_ID, RECORD_SIZE_P2},
+	crate::{resource::Buf, Dev, Error, MaxRecordSize, Resource},
 	core::ops::RangeInclusive,
 };
 
@@ -21,23 +19,17 @@ use {
 /// As long as a `Tree` object for a specific ID is alive its [`TreeData`] entry will not be
 /// evicted.
 #[derive(Clone, Debug)]
-pub struct Tree<'a, 'b, D: Dev, R: Resource> {
+pub struct Tree<'a, D: Dev, R: Resource> {
 	/// Underlying cache.
 	cache: &'a Cache<D, R>,
-	/// Background task runner.
-	background: &'b Background<'a, D>,
 	/// ID of the object.
 	id: u64,
 }
 
-impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
+impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// Access a tree.
-	pub(super) fn new(
-		cache: &'a Cache<D, R>,
-		bg: &'b Background<'a, D>,
-		id: u64,
-	) -> Tree<'a, 'b, D, R> {
-		Self { cache, background: bg, id }
+	pub(super) fn new(cache: &'a Cache<D, R>, id: u64) -> Tree<'a, D, R> {
+		Self { cache, id }
 	}
 
 	/// Write data to a range.
@@ -74,29 +66,23 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 		if range.start() == range.end() {
 			// We need to slice one record twice
 			let entry = self.get(0, *range.start()).await?;
-			entry.modify(self.background, |b| {
-				let min_len = last_offset.max(b.len());
-				b.resize(min_len, 0);
-				b.get_mut()[first_offset..last_offset].copy_from_slice(data);
-			});
+			entry.write(first_offset, data).await;
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
 			let mut data = data;
 			let mut range = range.into_iter();
 
-			let first_key = range.next().unwrap();
+			let first_key = (first_offset != 0).then(|| range.next().unwrap());
 			let last_key = range.next_back().unwrap();
 
 			// Copy to first record |----xxxx|
-			{
+			// Don't bother if we can write out an entire record at once.
+			if let Some(first_key) = first_key {
 				let d;
 				(d, data) = data.split_at((1 << self.max_record_size().to_raw()) - first_offset);
 
 				let entry = self.get(0, first_key).await?;
-				entry.modify(self.background, |b| {
-					b.resize(first_offset, 0);
-					b.extend_from_slice(d);
-				});
+				entry.write(first_offset, d).await;
 			}
 
 			// Copy middle records |xxxxxxxx|
@@ -116,11 +102,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			if last_offset > 0 {
 				debug_assert_eq!(data.len(), last_offset);
 				let entry = self.get(0, last_key).await?;
-				entry.modify(self.background, |b| {
-					let min_len = b.len().max(data.len());
-					b.resize(min_len, 0);
-					b.get_mut()[..last_offset].copy_from_slice(data);
-				});
+				entry.write(0, data).await;
 			}
 		}
 
@@ -239,10 +221,8 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 	/// There is more than one active lock on the other object,
 	/// i.e. there are multiple [`Tree`] instances referring to the same object.
 	/// Hence the object cannot safely be destroyed.
-	pub async fn replace_with(&self, other: Tree<'a, 'b, D, R>) -> Result<(), Error<D>> {
-		self.cache
-			.move_object(self.background, other.id, self.id)
-			.await
+	pub async fn replace_with(&self, other: Tree<'a, D, R>) -> Result<(), Error<D>> {
+		self.cache.move_object(other.id, self.id).await
 	}
 
 	/// Increase the reference count of an object.
@@ -255,7 +235,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			"object list & bitmap aren't reference counted"
 		);
 
-		let (mut obj, _) = self.cache.fetch_object(self.background, self.id).await?;
+		let (mut obj, _) = self.cache.fetch_object(self.id).await?;
 		let mut object = obj.data.object();
 		debug_assert!(object.reference_count != 0, "invalid object");
 		if object.reference_count == u64::MAX {
@@ -278,7 +258,7 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			"object list & bitmap aren't reference counted"
 		);
 
-		let (mut obj, _) = self.cache.fetch_object(self.background, self.id).await?;
+		let (mut obj, _) = self.cache.fetch_object(self.id).await?;
 		let mut object = obj.data.object();
 		debug_assert!(object.reference_count != 0, "invalid object");
 		object.reference_count -= 1;
@@ -288,7 +268,6 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 			drop(obj);
 			// Free space.
 			self.resize(0).await?;
-			self.background.try_run_all().await?;
 			self.cache.data.borrow_mut().dealloc_id(self.id);
 		}
 
@@ -307,15 +286,10 @@ impl<'a, 'b, D: Dev, R: Resource> Tree<'a, 'b, D, R> {
 
 	/// Get the object field of this tree.
 	async fn object(&self) -> Result<(Object, u64), Error<D>> {
-		let (obj, _) = self.cache.fetch_object(self.background, self.id).await?;
+		let (obj, _) = self.cache.fetch_object(self.id).await?;
 		#[cfg(debug_assertions)]
-		obj.data.check_integrity();
+		obj.check_integrity();
 		Ok((obj.data.object(), u64::from(obj.data.object().total_length)))
-	}
-
-	/// Get a reference to the background task runner.
-	pub fn background_runner(&self) -> &'b Background<'a, D> {
-		self.background
 	}
 }
 

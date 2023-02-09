@@ -1,10 +1,10 @@
 use super::*;
 
 impl Fs {
-	pub async fn getattr<'a>(&'a self, bg: &Background<'a, FileDev>, job: crate::job::GetAttr) {
+	pub async fn getattr(&self, job: crate::job::GetAttr) {
 		let self_ino = self.ino.borrow_mut();
 
-		let entry = self_ino.get(&self.fs, bg, job.ino);
+		let entry = self_ino.get(&self.fs, job.ino);
 
 		// Get type, len
 		let (ty, len) = match &*entry {

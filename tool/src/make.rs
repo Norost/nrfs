@@ -213,20 +213,16 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 	eprintln!("Creating filesystem");
 	let nrfs = nrfs::Nrfs::new(config).await?;
 
-	let bg = nrfs::Background::default();
-
-	bg.run(async {
+	nrfs.run(async {
 		if let Some(d) = &args.directory {
 			eprintln!("Adding files from {:?}", d);
-			let root = nrfs.root_dir(&bg).await?;
+			let root = nrfs.root_dir().await?;
 			add_files(root, d, args.follow, extensions).await?;
 		}
-		nrfs.finish_transaction(&bg).await?;
+		nrfs.finish_transaction().await?;
 		Ok::<_, Box<dyn Error>>(())
 	})
 	.await?;
-
-	bg.drop().await?;
 
 	// Get key and unmount now so the user doesn't have to start all over again
 	// in case an error occurs later.
@@ -247,7 +243,7 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn add_files(
-	root: nrfs::DirRef<'_, '_, nrfs::dev::FileDev>,
+	root: nrfs::DirRef<'_, nrfs::dev::FileDev>,
 	from: &Path,
 	follow_symlinks: bool,
 	extensions: nrfs::dir::EnableExtensions,

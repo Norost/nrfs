@@ -68,8 +68,8 @@ pub use {
 	dir::DirOptions,
 	name::Name,
 	nros::{
-		dev, Background, BlockSize, CipherType, Compression, Dev, KeyDeriver, KeyPassword,
-		MaxRecordSize, Resource,
+		dev, BlockSize, CipherType, Compression, Dev, KeyDeriver, KeyPassword, MaxRecordSize,
+		Resource,
 	},
 };
 
@@ -77,6 +77,7 @@ use {
 	core::{
 		cell::{RefCell, RefMut},
 		fmt,
+		future::Future,
 		marker::PhantomData,
 		mem,
 		ops::{Deref, DerefMut},
@@ -140,9 +141,7 @@ impl<D: Dev> Nrfs<D> {
 		};
 		let storage = nros::Nros::new(conf).await?;
 		let mut s = Self { storage, data: Default::default(), read_only: false };
-		let bg = Background::default();
-		DirRef::new_root(&bg, &mut s, &dir).await?.drop().await?;
-		bg.drop().await?;
+		DirRef::new_root(&mut s, &dir).await?.drop().await?;
 		Ok(s)
 	}
 
@@ -166,21 +165,20 @@ impl<D: Dev> Nrfs<D> {
 	}
 
 	/// Get a reference to the root directory.
-	pub async fn root_dir<'a, 'b>(
-		&'a self,
-		bg: &'b Background<'a, D>,
-	) -> Result<DirRef<'a, 'b, D>, Error<D>> {
-		DirRef::load_root(bg, self).await
+	pub async fn root_dir(&self) -> Result<DirRef<'_, D>, Error<D>> {
+		DirRef::load_root(self).await
 	}
 
-	pub async fn finish_transaction<'a, 'b>(
-		&'a self,
-		bg: &'b Background<'a, D>,
-	) -> Result<(), Error<D>> {
-		self.storage
-			.finish_transaction(bg)
-			.await
-			.map_err(Error::Nros)
+	pub async fn run<V, E, F>(&self, f: F) -> Result<V, E>
+	where
+		F: Future<Output = Result<V, E>>,
+		E: From<Error<D>> + From<nros::Error<D>>,
+	{
+		self.storage.run(f).await
+	}
+
+	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
+		self.storage.finish_transaction().await.map_err(Error::Nros)
 	}
 
 	/// Unmount the object store.
@@ -227,7 +225,7 @@ impl<D: Dev> Nrfs<D> {
 /// Trait to convert between "raw" and "complete" references,
 /// i.e. references without direct access to the filesystem
 /// and references with.
-pub trait RawRef<'a, 'b, D: Dev>: Sized {
+pub trait RawRef<'a, D: Dev>: Sized {
 	/// The type of the raw reference.
 	type Raw;
 
@@ -242,17 +240,15 @@ pub trait RawRef<'a, 'b, D: Dev>: Sized {
 	/// Create a reference from raw components.
 	///
 	/// *Must* only be used in combination with [`Self::into_raw`]!
-	fn from_raw(fs: &'a Nrfs<D>, bg: &'b Background<'a, D>, raw: Self::Raw) -> Self;
+	fn from_raw(fs: &'a Nrfs<D>, raw: Self::Raw) -> Self;
 }
 
 /// Reference to a directory object.
 #[derive(Debug)]
 #[must_use = "Must be manually dropped with DirRef::drop"]
-pub struct DirRef<'a, 'b, D: Dev> {
+pub struct DirRef<'a, D: Dev> {
 	/// Filesystem object containing the directory.
 	fs: &'a Nrfs<D>,
-	/// Background task runner.
-	bg: &'b Background<'a, D>,
 	/// ID of the directory object.
 	id: u64,
 }
@@ -267,26 +263,26 @@ pub struct RawDirRef {
 	id: u64,
 }
 
-impl<'a, 'b, D: Dev> RawRef<'a, 'b, D> for DirRef<'a, 'b, D> {
+impl<'a, D: Dev> RawRef<'a, D> for DirRef<'a, D> {
 	type Raw = RawDirRef;
 
 	fn as_raw(&self) -> RawDirRef {
 		RawDirRef { id: self.id }
 	}
 
-	fn from_raw(fs: &'a Nrfs<D>, bg: &'b Background<'a, D>, raw: RawDirRef) -> Self {
-		Self { fs, bg, id: raw.id }
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawDirRef) -> Self {
+		Self { fs, id: raw.id }
 	}
 }
 
-impl<'a, 'b, D: Dev> Clone for DirRef<'a, 'b, D> {
+impl<'a, D: Dev> Clone for DirRef<'a, D> {
 	fn clone(&self) -> Self {
 		self.fs.dir_data(self.id).header.reference_count += 1;
-		Self { fs: self.fs, bg: self.bg, id: self.id }
+		Self { fs: self.fs, id: self.id }
 	}
 }
 
-impl<D: Dev> Drop for DirRef<'_, '_, D> {
+impl<D: Dev> Drop for DirRef<'_, D> {
 	fn drop(&mut self) {
 		forbid_drop()
 	}
@@ -295,11 +291,9 @@ impl<D: Dev> Drop for DirRef<'_, '_, D> {
 /// Reference to a file object.
 #[derive(Debug)]
 #[must_use = "Must be manually dropped with FileRef::drop"]
-pub struct FileRef<'a, 'b, D: Dev> {
+pub struct FileRef<'a, D: Dev> {
 	/// Filesystem object containing the directory.
 	fs: &'a Nrfs<D>,
-	/// Background task runner.
-	bg: &'b Background<'a, D>,
 	/// Handle pointing to the corresponding [`FileData`].
 	idx: Idx,
 }
@@ -314,26 +308,26 @@ pub struct RawFileRef {
 	idx: Idx,
 }
 
-impl<'a, 'b, D: Dev> RawRef<'a, 'b, D> for FileRef<'a, 'b, D> {
+impl<'a, D: Dev> RawRef<'a, D> for FileRef<'a, D> {
 	type Raw = RawFileRef;
 
 	fn as_raw(&self) -> RawFileRef {
 		RawFileRef { idx: self.idx }
 	}
 
-	fn from_raw(fs: &'a Nrfs<D>, bg: &'b Background<'a, D>, raw: RawFileRef) -> Self {
-		Self { fs, bg, idx: raw.idx }
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawFileRef) -> Self {
+		Self { fs, idx: raw.idx }
 	}
 }
 
-impl<'a, 'b, D: Dev> Clone for FileRef<'a, 'b, D> {
+impl<'a, D: Dev> Clone for FileRef<'a, D> {
 	fn clone(&self) -> Self {
 		self.fs.file_data(self.idx).header.reference_count += 1;
-		Self { fs: self.fs, bg: self.bg, idx: self.idx }
+		Self { fs: self.fs, idx: self.idx }
 	}
 }
 
-impl<D: Dev> Drop for FileRef<'_, '_, D> {
+impl<D: Dev> Drop for FileRef<'_, D> {
 	fn drop(&mut self) {
 		forbid_drop()
 	}
@@ -342,7 +336,7 @@ impl<D: Dev> Drop for FileRef<'_, '_, D> {
 /// Reference to a file object representing a symbolic link.
 #[derive(Clone, Debug)]
 #[must_use = "Must be manually dropped with SymRef::drop"]
-pub struct SymRef<'a, 'b, D: Dev>(FileRef<'a, 'b, D>);
+pub struct SymRef<'a, D: Dev>(FileRef<'a, D>);
 
 /// Raw [`SymRef`] data.
 ///
@@ -351,22 +345,22 @@ pub struct SymRef<'a, 'b, D: Dev>(FileRef<'a, 'b, D>);
 #[must_use = "value must be used to avoid reference leaks"]
 pub struct RawSymRef(RawFileRef);
 
-impl<'a, 'b, D: Dev> RawRef<'a, 'b, D> for SymRef<'a, 'b, D> {
+impl<'a, D: Dev> RawRef<'a, D> for SymRef<'a, D> {
 	type Raw = RawSymRef;
 
 	fn as_raw(&self) -> RawSymRef {
 		RawSymRef(self.0.as_raw())
 	}
 
-	fn from_raw(fs: &'a Nrfs<D>, bg: &'b Background<'a, D>, raw: RawSymRef) -> Self {
-		SymRef(FileRef::from_raw(fs, bg, raw.0))
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawSymRef) -> Self {
+		SymRef(FileRef::from_raw(fs, raw.0))
 	}
 }
 
 /// Reference to an entry with an unrecognized type.
 #[derive(Clone, Debug)]
 #[must_use = "Must be manually dropped with UnknownRef::drop"]
-pub struct UnknownRef<'a, 'b, D: Dev>(FileRef<'a, 'b, D>);
+pub struct UnknownRef<'a, D: Dev>(FileRef<'a, D>);
 
 /// Raw [`UnknownRef`] data.
 ///
@@ -375,15 +369,15 @@ pub struct UnknownRef<'a, 'b, D: Dev>(FileRef<'a, 'b, D>);
 #[must_use = "value must be used to avoid reference leaks"]
 pub struct RawUnknownRef(RawFileRef);
 
-impl<'a, 'b, D: Dev> RawRef<'a, 'b, D> for UnknownRef<'a, 'b, D> {
+impl<'a, D: Dev> RawRef<'a, D> for UnknownRef<'a, D> {
 	type Raw = RawUnknownRef;
 
 	fn as_raw(&self) -> RawUnknownRef {
 		RawUnknownRef(self.0.as_raw())
 	}
 
-	fn from_raw(fs: &'a Nrfs<D>, bg: &'b Background<'a, D>, raw: RawUnknownRef) -> Self {
-		UnknownRef(FileRef::from_raw(fs, bg, raw.0))
+	fn from_raw(fs: &'a Nrfs<D>, raw: RawUnknownRef) -> Self {
+		UnknownRef(FileRef::from_raw(fs, raw.0))
 	}
 }
 
@@ -413,29 +407,23 @@ macro_rules! impl_tmpref {
 			/// Create a "temporary" reference.
 			///
 			/// See [`TmpRef`] for more information.
-			pub fn into_tmp<'s, 'a, 'b, D: Dev>(
-				&'s self,
-				fs: &'a Nrfs<D>,
-				bg: &'b Background<'a, D>,
-			) -> TmpRef<'s, $ref<'a, 'b, D>> {
+			pub fn into_tmp<'s, 'a, D: Dev>(&'s self, fs: &'a Nrfs<D>) -> TmpRef<'s, $ref<'a, D>> {
 				TmpRef {
-					inner: mem::ManuallyDrop::new($ref::from_raw(fs, bg, self.clone())),
+					inner: mem::ManuallyDrop::new($ref::from_raw(fs, self.clone())),
 					_marker: PhantomData,
 				}
 			}
 		}
 
-		impl<'s, 'a, 'b, D: Dev> From<TmpRef<'s, $ref<'a, 'b, D>>>
-			for TmpRef<'s, ItemRef<'a, 'b, D>>
-		{
-			fn from(TmpRef { inner, _marker }: TmpRef<'s, $ref<'a, 'b, D>>) -> Self {
+		impl<'s, 'a, D: Dev> From<TmpRef<'s, $ref<'a, D>>> for TmpRef<'s, ItemRef<'a, D>> {
+			fn from(TmpRef { inner, _marker }: TmpRef<'s, $ref<'a, D>>) -> Self {
 				let inner = mem::ManuallyDrop::into_inner(inner);
 				Self { inner: mem::ManuallyDrop::new(ItemRef::$var(inner)), _marker }
 			}
 		}
 
-		impl<'a, 'b, D: Dev> From<$ref<'a, 'b, D>> for ItemRef<'a, 'b, D> {
-			fn from(r: $ref<'a, 'b, D>) -> Self {
+		impl<'a, D: Dev> From<$ref<'a, D>> for ItemRef<'a, D> {
+			fn from(r: $ref<'a, D>) -> Self {
 				Self::$var(r)
 			}
 		}
@@ -505,8 +493,8 @@ pub struct Statistics {
 /// Write an exact amount of data.
 ///
 /// Fails if not all data could be written.
-async fn write_all<'a, 'b, D: Dev>(
-	obj: &nros::Tree<'a, 'b, D, nros::StdResource>,
+async fn write_all<'a, D: Dev>(
+	obj: &nros::Tree<'a, D, nros::StdResource>,
 	offset: u64,
 	data: &[u8],
 ) -> Result<(), Error<D>> {
@@ -519,8 +507,8 @@ async fn write_all<'a, 'b, D: Dev>(
 /// Write an exact amount of data.
 ///
 /// This function automatically grows the object if it can't contain the data.
-async fn write_grow<'a, 'b, D: Dev>(
-	obj: &nros::Tree<'a, 'b, D, nros::StdResource>,
+async fn write_grow<'a, D: Dev>(
+	obj: &nros::Tree<'a, D, nros::StdResource>,
 	offset: u64,
 	data: &[u8],
 ) -> Result<(), Error<D>> {
@@ -533,8 +521,8 @@ async fn write_grow<'a, 'b, D: Dev>(
 /// Read an exact amount of data.
 ///
 /// Fails if the buffer could not be filled.
-async fn read_exact<'a, 'b, D: Dev>(
-	obj: &nros::Tree<'a, 'b, D, nros::StdResource>,
+async fn read_exact<'a, D: Dev>(
+	obj: &nros::Tree<'a, D, nros::StdResource>,
 	offset: u64,
 	buf: &mut [u8],
 ) -> Result<(), Error<D>> {

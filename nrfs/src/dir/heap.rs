@@ -5,18 +5,18 @@ use {
 	rangemap::RangeSet,
 };
 
-impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
+impl<'a, D: Dev> Dir<'a, D> {
 	/// Read a heap value.
 	pub(crate) async fn read_heap(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
 		trace!("read_heap {:?} (len: {})", offset, buf.len());
-		let obj = self.fs.storage.get(self.bg, self.id + HEAP_OFFT).await?;
+		let obj = self.fs.storage.get(self.id + HEAP_OFFT).await?;
 		crate::read_exact(&obj, offset, buf).await
 	}
 
 	/// Write a heap value.
 	pub(crate) async fn write_heap(&self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
 		trace!("write_heap {:?} (len: {})", offset, data.len());
-		let obj = self.fs.storage.get(self.bg, self.id + HEAP_OFFT).await?;
+		let obj = self.fs.storage.get(self.id + HEAP_OFFT).await?;
 		crate::write_all(&obj, offset, data).await
 	}
 
@@ -25,7 +25,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 		trace!("zero_heap {:?} (len: {})", offset, len);
 		// TODO make use of write_zeros
 		// We need to properly test the former first though.
-		let obj = self.fs.storage.get(self.bg, self.id + HEAP_OFFT).await?;
+		let obj = self.fs.storage.get(self.id + HEAP_OFFT).await?;
 		let len = usize::try_from(len).unwrap();
 		crate::write_all(&obj, offset, &vec![0; len]).await
 	}
@@ -61,7 +61,7 @@ impl<'a, 'b, D: Dev> Dir<'a, 'b, D> {
 				drop(log);
 
 				// Resize heap
-				let heap = self.fs.storage.get(self.bg, self.id + HEAP_OFFT).await?;
+				let heap = self.fs.storage.get(self.id + HEAP_OFFT).await?;
 				let len = heap.len().await?;
 				heap.resize(len.max(end)).await?;
 				drop(heap);
