@@ -188,8 +188,7 @@ impl Configuration {
 	}
 
 	pub fn compression_algorithm(&self) -> Result<Compression, u8> {
-		let v = self.get(20, 4);
-		Compression::from_raw(v).ok_or(v)
+		Compression::from_raw(self.0[3]).ok_or(self.0[3])
 	}
 
 	pub fn set_compression_algorithm(&mut self, value: Compression) {
