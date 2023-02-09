@@ -1,7 +1,10 @@
 mod lz4;
 mod none;
 
-use crate::{BlockSize, Resource};
+use {
+	crate::{BlockSize, Resource},
+	core::fmt,
+};
 
 n2e! {
 	[Compression]
@@ -57,5 +60,21 @@ impl Compression {
 			Compression::None => none::decompress::<R>(data, buf, max_size),
 			Compression::Lz4 => lz4::decompress::<R>(data, buf, max_size),
 		}
+	}
+}
+
+impl Default for Compression {
+	fn default() -> Self {
+		Compression::Lz4
+	}
+}
+
+impl fmt::Display for Compression {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::None => "none",
+			Self::Lz4 => "lz4",
+		}
+		.fmt(f)
 	}
 }

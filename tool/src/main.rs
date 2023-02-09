@@ -5,8 +5,7 @@ mod dump;
 mod extract_key;
 mod make;
 
-#[cfg(target_family = "unix")]
-use clap::Parser;
+use clap::{Parser, builder::PossibleValue};
 
 #[derive(clap::Parser)]
 #[clap(
@@ -40,13 +39,14 @@ enum Encryption {
 	Chacha8Poly1305,
 }
 
-impl std::str::FromStr for Encryption {
-	type Err = &'static str;
+impl clap::ValueEnum for Encryption {
+	fn value_variants<'a>() -> &'a [Self] {
+		&[Self::Chacha8Poly1305]
+	}
 
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		Ok(match s {
-			"chacha8poly1305" => Self::Chacha8Poly1305,
-			_ => return Err("unknown cipher algorithm"),
+	fn to_possible_value(&self) -> Option<PossibleValue> {
+		Some(match self {
+			Self::Chacha8Poly1305 => PossibleValue::new("chacha8poly1305"),
 		})
 	}
 }

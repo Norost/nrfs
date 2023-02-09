@@ -144,3 +144,9 @@ n2e! {
 	23 M8
 	24 M16
 }
+
+impl Default for MaxRecordSize {
+	fn default() -> Self {
+		Self::K128
+	}
+}

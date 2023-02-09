@@ -263,6 +263,8 @@ impl<D: Dev, R: Resource> Store<D, R> {
 				Statistics {
 					allocation: self.allocator.borrow().statistics,
 					block_size: self.block_size(),
+					compression: self.compression(),
+					max_record_size: self.max_record_size(),
 					$($f: self.$f.get(),)*
 				}
 			}
@@ -312,6 +314,10 @@ pub struct Statistics {
 	pub allocation: allocator::Statistics,
 	/// Size of a single block.
 	pub block_size: BlockSize,
+	/// Maximum size of a record.
+	pub max_record_size: MaxRecordSize,
+	/// Default compression to apply to records.
+	pub compression: Compression,
 	/// Packed bytes read.
 	pub packed_bytes_read: u64,
 	/// Packed bytes written.

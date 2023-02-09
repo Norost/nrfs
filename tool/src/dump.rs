@@ -108,6 +108,8 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 	let sto = &obj.storage;
 	let alloc = &sto.allocation;
 	e("block size", &format!("2**{}", sto.block_size.to_raw()));
+	e("max record size", &format!("2**{}", sto.max_record_size.to_raw()));
+	e("compression", &sto.compression);
 	e("used objects", &obj.used_objects);
 	e("used blocks", &alloc.used_blocks);
 
