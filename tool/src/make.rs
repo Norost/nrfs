@@ -145,6 +145,8 @@ fn parse_mirrors(s: &str) -> Result<Vec<Box<str>>, &'static str> {
 
 pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 	let block_size = nrfs::BlockSize::from_raw(args.block_size_p2.try_into().unwrap()).unwrap();
+	let max_record_size =
+		nrfs::MaxRecordSize::from_raw(args.record_size_p2.try_into().unwrap()).unwrap();
 
 	let mirrors = args
 		.paths
@@ -169,7 +171,6 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 	extensions.add_mtime();
 	// FIXME randomize key
 	let opt = nrfs::DirOptions { extensions, ..nrfs::DirOptions::new(&[0; 16]) };
-	let rec_size = nrfs::MaxRecordSize::K128; // TODO
 
 	let keybuf;
 	let (cipher, key_deriver) = if let Some(enc) = args.encryption {
@@ -204,7 +205,7 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 		key_deriver,
 		mirrors,
 		block_size,
-		max_record_size: rec_size,
+		max_record_size,
 		dir: opt,
 		compression: args.compression.into(),
 		cache_size: args.cache_size,
