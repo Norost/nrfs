@@ -12,6 +12,7 @@ pub fn decompress<R: Resource>(data: &[u8], buf: &mut R::Buf, max_size: usize) -
 	buf.resize(max_size, 0);
 	if let Ok(l) = lz4_flex::block::decompress_into(data, buf.get_mut()) {
 		buf.resize(l, 0);
+		buf.shrink();
 		true
 	} else {
 		false
