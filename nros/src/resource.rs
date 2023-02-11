@@ -100,8 +100,9 @@ mod std {
 			{
 				let (send, recv) = futures_channel::oneshot::channel::<R>();
 				rayon::spawn(move || {
-					send.send(f())
-						.unwrap_or_else(|_| panic!("channel sent no data"));
+					// We may lose data if the other thread panics, returns an error or whatever,
+					// so do *not* use unwrap()
+					let _ = send.send(f());
 				});
 				RunTask { recv }
 			}
