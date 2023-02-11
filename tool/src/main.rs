@@ -5,7 +5,7 @@ mod dump;
 mod extract_key;
 mod make;
 
-use clap::{Parser, builder::PossibleValue};
+use clap::{builder::PossibleValue, Parser};
 
 #[derive(clap::Parser)]
 #[clap(
