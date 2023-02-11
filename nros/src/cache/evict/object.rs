@@ -3,7 +3,7 @@ use {
 		Cache, Present, Slot, SlotExt, TreeData, ID_PSEUDO, OBJECT_BITMAP_ID, OBJECT_LIST_ID,
 	},
 	crate::{
-		util::{self, HashMapExt},
+		util::{self, BTreeMapExt},
 		Dev, Error, Resource,
 	},
 	core::{future::Future, pin::Pin},

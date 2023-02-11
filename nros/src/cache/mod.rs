@@ -14,9 +14,10 @@ use {
 		object::Object,
 		resource::Buf,
 		storage,
-		util::{self, box_fut, HashMapExt},
+		util::{self, box_fut, BTreeMapExt},
 		Background, BlockSize, Dev, Error, KeyDeriver, MaxRecordSize, Record, Resource, Store,
 	},
+	alloc::collections::BTreeMap,
 	core::{
 		cell::{RefCell, RefMut},
 		fmt,
@@ -31,7 +32,6 @@ use {
 	key::Key,
 	memory_tracker::MemoryTracker,
 	rangemap::RangeSet,
-	rustc_hash::FxHashMap,
 	slot::{Busy, Present, RefCount, Slot, SlotExt},
 	tree::data::TreeData,
 };
@@ -69,7 +69,7 @@ pub(crate) struct CacheData<B: Buf> {
 	///
 	/// The key, in order, is `(id, depth, offset)`.
 	/// Using separate hashmaps allows using only a prefix of the key.
-	objects: FxHashMap<u64, Slot<TreeData<B>>>,
+	objects: BTreeMap<u64, Slot<TreeData<B>>>,
 	/// Memory usage tracker.
 	memory_tracker: MemoryTracker,
 	/// Used object IDs.
@@ -330,8 +330,15 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		let data = &mut *self.data.borrow_mut();
 
-		let Some([Slot::Present(from_obj), Slot::Present(to_obj)]) = data.objects.get_many_mut([&from, &to])
-			else { unreachable!("no object(s)") };
+		let (id_min, id_max) = (from.min(to), from.max(to));
+		let mut range = data.objects.range_mut(id_min..=id_max);
+		let Some((_, Slot::Present(obj_min))) = range.next() else { unreachable!("no object(s)") };
+		let Some((_, Slot::Present(obj_max))) = range.next_back() else { unreachable!("no object(s)") };
+		let (from_obj, to_obj) = if from < to {
+			(obj_min, obj_max)
+		} else {
+			(obj_max, obj_min)
+		};
 
 		let mut transfer = |obj: &mut Present<TreeData<R::Buf>>, new_id| {
 			// Fix entries

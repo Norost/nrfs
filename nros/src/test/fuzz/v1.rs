@@ -2,7 +2,7 @@ use {
 	super::*,
 	arbitrary::{Arbitrary, Unstructured},
 	rangemap::RangeSet,
-	rustc_hash::FxHashMap,
+	std::collections::BTreeMap,
 };
 
 #[derive(Debug)]
@@ -16,7 +16,7 @@ pub struct Test {
 	/// Expected contents of each object.
 	///
 	/// We only write `1`s, so it's pretty simple.
-	contents: FxHashMap<u64, RangeSet<u64>>,
+	contents: BTreeMap<u64, RangeSet<u64>>,
 }
 
 #[derive(Arbitrary)]

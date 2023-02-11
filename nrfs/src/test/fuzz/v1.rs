@@ -3,7 +3,7 @@ use {
 	crate::dir::{Hasher, InsertError, RemoveError, RenameError, TransferError},
 	arbitrary::{Arbitrary, Unstructured},
 	rangemap::RangeSet,
-	rustc_hash::FxHashMap,
+	std::collections::BTreeMap,
 };
 
 #[derive(Debug)]
@@ -24,7 +24,47 @@ enum RawItemRef {
 	},
 }
 
-type Refs<'a> = arena::Arena<(RawItemRef, Box<[&'a Name]>), ()>;
+#[derive(Debug, Default)]
+struct Refs<'a> {
+	data: Vec<Option<(RawItemRef, Box<[&'a Name]>)>>,
+	free: Vec<u16>,
+}
+
+impl<'a> Refs<'a> {
+	fn get(&self, idx: u16) -> Option<&(RawItemRef, Box<[&'a Name]>)> {
+		self.data.get(usize::from(idx)).and_then(|v| v.as_ref())
+	}
+
+	fn get_mut(&mut self, idx: u16) -> Option<&mut (RawItemRef, Box<[&'a Name]>)> {
+		self.data.get_mut(usize::from(idx)).and_then(|v| v.as_mut())
+	}
+
+	fn insert(&mut self, value: (RawItemRef, Box<[&'a Name]>)) -> u16 {
+		if let Some(idx) = self.free.pop() {
+			self.data[usize::from(idx)] = Some(value);
+			idx
+		} else {
+			self.data.push(Some(value));
+			(self.data.len() - 1).try_into().unwrap()
+		}
+	}
+
+	fn remove(&mut self, idx: u16) -> Option<(RawItemRef, Box<[&'a Name]>)> {
+		if let Some(v) = self.data.get_mut(usize::from(idx)).and_then(|v| v.take()) {
+			self.free.push(idx);
+			Some(v)
+		} else {
+			None
+		}
+	}
+
+	fn drain(&mut self) -> impl Iterator<Item = (u16, (RawItemRef, Box<[&'a Name]>))> + '_ {
+		self.data
+			.drain(..)
+			.enumerate()
+			.flat_map(move |(i, v)| v.map(move |v| (i as _, v)))
+	}
+}
 
 #[derive(Debug)]
 pub struct Test<'a> {
@@ -40,7 +80,7 @@ enum State<'a> {
 	/// The object is a file.
 	File {
 		contents: RangeSet<u64>,
-		indices: Vec<arena::Handle<()>>,
+		indices: Vec<u16>,
 		ext_unix: ext::unix::Entry,
 		ext_mtime: ext::mtime::Entry,
 	},
@@ -50,8 +90,8 @@ enum State<'a> {
 
 #[derive(Debug)]
 struct Dir<'a> {
-	children: FxHashMap<&'a Name, State<'a>>,
-	indices: Vec<arena::Handle<()>>,
+	children: BTreeMap<&'a Name, State<'a>>,
+	indices: Vec<u16>,
 	ext_unix: ext::unix::Entry,
 	ext_mtime: ext::mtime::Entry,
 	enabled_extensions: EnableExtensions,
@@ -68,7 +108,7 @@ impl<'a> State<'a> {
 		dir
 	}
 
-	fn indices_mut(&mut self) -> &mut Vec<arena::Handle<()>> {
+	fn indices_mut(&mut self) -> &mut Vec<u16> {
 		match self {
 			Self::File { indices, .. } | Self::Dir(Dir { indices, .. }) => indices,
 		}
@@ -90,8 +130,9 @@ impl<'a> State<'a> {
 	fn transfer(&mut self, refs: &mut Refs<'a>, path: &[&'a Name]) {
 		fn rec<'a>(state: &mut State<'a>, refs: &mut Refs<'a>, path: &[&'a Name], depth: usize) {
 			for idx in state.indices_mut() {
-				let l = &refs[*idx].1;
-				refs[*idx].1 = path.iter().chain(&l[l.len() - depth..]).copied().collect();
+				let l = &refs.get(*idx).unwrap().1;
+				refs.get_mut(*idx).unwrap().1 =
+					path.iter().chain(&l[l.len() - depth..]).copied().collect();
 			}
 			let State::Dir(Dir { children, .. }) = state else { return };
 			for (_, child) in children {
@@ -175,7 +216,7 @@ impl<'a> Test<'a> {
 	pub fn run(self) {
 		run(&self.fs, async {
 			// References to entries.
-			let mut refs = arena::Arena::<(_, Box<[&Name]>), ()>::new();
+			let mut refs = Refs::default();
 			// Expected contents of the filesystem,
 			let mut state = State::Dir(Dir {
 				children: Default::default(),
@@ -195,7 +236,7 @@ impl<'a> Test<'a> {
 				&'c [&'a Name],
 				Option<&'d mut State<'a>>,
 			)> {
-				match refs.get(arena::Handle::from_raw(idx.into(), ())) {
+				match refs.get(idx) {
 					Some((RawItemRef::File { file, removed }, path)) => {
 						let c = (!removed).then(|| state_mut(state, path.iter().copied()).unwrap());
 						Some((file.into_tmp(fs).into(), path, c))
@@ -218,7 +259,7 @@ impl<'a> Test<'a> {
 				&'c [&'a Name],
 				Option<&'d mut Dir<'a>>,
 			)> {
-				match refs.get(arena::Handle::from_raw(dir_idx.into(), ())) {
+				match refs.get(dir_idx) {
 					Some((RawItemRef::Dir { dir, removed }, path)) => {
 						let d = (!removed)
 							.then(|| state_mut(state, path.iter().copied()).unwrap().dir_mut());
@@ -238,7 +279,7 @@ impl<'a> Test<'a> {
 				&'c [&'a Name],
 				Option<&'d mut RangeSet<u64>>,
 			)> {
-				match refs.get(arena::Handle::from_raw(file_idx.into(), ())) {
+				match refs.get(file_idx) {
 					Some((RawItemRef::File { file, removed }, path)) => {
 						let c = (!removed)
 							.then(|| state_mut(state, path.iter().copied()).unwrap().file_mut());
@@ -366,7 +407,6 @@ impl<'a> Test<'a> {
 						state.indices_mut().push(idx);
 					}
 					Op::Drop { idx } => {
-						let idx = arena::Handle::from_raw(idx.into(), ());
 						if let Some((entry, path)) = refs.remove(idx) {
 							// Drop reference
 							let removed = match entry {
@@ -538,8 +578,8 @@ impl<'a> Test<'a> {
 										indices
 									}
 								};
-								for &i in indices.iter() {
-									match &mut refs[i].0 {
+								for i in indices.iter() {
+									match &mut refs.get_mut(*i).unwrap().0 {
 										RawItemRef::File { removed, .. } => *removed = true,
 										RawItemRef::Dir { removed, .. } => *removed = true,
 									}

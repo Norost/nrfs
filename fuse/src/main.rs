@@ -1,11 +1,16 @@
 #![forbid(unused_must_use)]
 #![forbid(rust_2018_idioms)]
+#![feature(btree_drain_filter)]
 #![feature(iterator_try_collect)]
 
 mod fs;
 mod job;
 
 use {clap::Parser, fuser::MountOption, std::error::Error};
+
+#[cfg(feature = "dhat")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// FUSE driver for NRFS.
 #[derive(Parser)]
@@ -23,6 +28,9 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+	#[cfg(feature = "dhat")]
+	let _profiler = dhat::Profiler::new_heap();
+
 	env_logger::init();
 
 	let args = Args::parse();

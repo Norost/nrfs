@@ -3,8 +3,8 @@ use {
 		dir::{Child, Dir, Type},
 		DataHeader, Dev, DirRef, Error, FileRef, Idx, Nrfs, SymRef, UnknownRef,
 	},
+	alloc::collections::btree_map,
 	core::{cell::RefMut, mem},
-	std::collections::hash_map,
 };
 
 /// [`File`] shared mutable data.
@@ -434,7 +434,7 @@ impl<'a, D: Dev> FileRef<'a, D> {
 
 		let dir_data = dirs.get_mut(&dir.id).expect("no DirData with id");
 		let idx = match dir_data.children.entry(index) {
-			hash_map::Entry::Occupied(e) => match e.get() {
+			btree_map::Entry::Occupied(e) => match e.get() {
 				&Child::Dir(_) => unreachable!("expected File, not Dir"),
 				&Child::File(idx) => {
 					// Reference existing FileData
@@ -442,7 +442,7 @@ impl<'a, D: Dev> FileRef<'a, D> {
 					idx
 				}
 			},
-			hash_map::Entry::Vacant(e) => {
+			btree_map::Entry::Vacant(e) => {
 				// Insert new FileData and reference parent dict
 				let idx = files.insert(FileData {
 					header: DataHeader::new(dir.id, index),

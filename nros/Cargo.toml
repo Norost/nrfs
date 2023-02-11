@@ -54,9 +54,6 @@ default-features = false
 #       80920467032      instructions              #    2.16  insn per cycle
 features = ["checked-decode", "safe-encode"]
 
-[dependencies.rustc-hash]
-version = "1.1"
-
 [dependencies.xxhash-rust]
 version = "0.8"
 features = ["xxh3", "const_xxh3"]

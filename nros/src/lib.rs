@@ -9,7 +9,7 @@
 #![feature(never_type)]
 #![feature(get_many_mut)]
 #![feature(cell_update)]
-#![feature(hash_drain_filter)]
+#![feature(hash_drain_filter, btree_drain_filter)]
 #![feature(int_roundings)]
 #![feature(iterator_try_collect)]
 #![feature(map_try_insert)]

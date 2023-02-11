@@ -56,6 +56,8 @@ mod trace {
 	}
 }
 
+extern crate alloc;
+
 mod config;
 pub mod dir;
 mod file;
@@ -74,33 +76,77 @@ pub use {
 };
 
 use {
+	alloc::collections::BTreeMap,
 	core::{
 		cell::{RefCell, RefMut},
 		fmt,
 		future::Future,
 		marker::PhantomData,
 		mem,
-		ops::{Deref, DerefMut},
+		ops::{Deref, DerefMut, Index, IndexMut},
 	},
 	dir::{DirData, ItemRef},
 	file::FileData,
-	rustc_hash::FxHashMap,
 };
 
-/// Index used for arenas with file data.
-type Idx = arena::Handle<u8>;
+/// Type used as index in [`File`].
+type Idx = u64;
+
+#[derive(Debug, Default)]
+struct Files {
+	/// File data.
+	///
+	/// A BTreeMap is used since it automatically shrinks itself (cheaply)
+	/// and is DoS-resistant.
+	data: BTreeMap<u64, FileData>,
+	/// File index counter
+	///
+	/// This is used to generate new indices for indexing into [`files`]
+	idx_counter: u64,
+}
+
+impl Files {
+	pub fn get_mut(&mut self, idx: Idx) -> Option<&mut FileData> {
+		self.data.get_mut(&idx)
+	}
+
+	pub fn remove(&mut self, idx: Idx) -> Option<FileData> {
+		self.data.remove(&idx)
+	}
+
+	pub fn insert(&mut self, data: FileData) -> Idx {
+		let idx = self.idx_counter;
+		self.data.insert(idx, data);
+		self.idx_counter += 1;
+		idx
+	}
+}
+
+impl Index<Idx> for Files {
+	type Output = FileData;
+
+	fn index(&self, index: Idx) -> &Self::Output {
+		&self.data[&index]
+	}
+}
+
+impl IndexMut<Idx> for Files {
+	fn index_mut(&mut self, index: Idx) -> &mut Self::Output {
+		self.get_mut(index).expect("no file data with index")
+	}
+}
 
 /// [`Nrfs`] shared mutable data.
 #[derive(Debug, Default)]
 struct NrfsData {
 	/// Files with live references.
 	///
-	/// Since filess may be embedded at any time using IDs is not practical.
-	files: arena::Arena<FileData, u8>,
+	/// Since filess may be embedded at any time using IDs directly is not practical.
+	files: Files,
 	/// Directories with live references.
 	///
 	/// Indexed by ID.
-	directories: FxHashMap<u64, DirData>,
+	directories: BTreeMap<u64, DirData>,
 }
 
 /// NRFS filesystem manager.

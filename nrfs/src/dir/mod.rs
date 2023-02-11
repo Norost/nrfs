@@ -16,12 +16,12 @@ use {
 	crate::{
 		file, read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Name, Nrfs, SymRef,
 	},
+	alloc::collections::btree_map,
 	core::{cell::RefMut, mem},
 	hashmap::*,
 	item::Item,
 	key::Key,
 	rangemap::RangeSet,
-	std::collections::hash_map,
 };
 
 // TODO determine a good load factor.
@@ -1076,7 +1076,7 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			mem::forget(self);
 
 			let mut fs_ref = fs.data.borrow_mut();
-			let hash_map::Entry::Occupied(mut data) = fs_ref.directories.entry(id) else {
+			let btree_map::Entry::Occupied(mut data) = fs_ref.directories.entry(id) else {
 				unreachable!()
 			};
 			data.get_mut().header.reference_count -= 1;

@@ -4,9 +4,11 @@ use {
 		RECORD_SIZE_P2,
 	},
 	crate::resource::Buf,
+	alloc::collections::{
+		btree_map::{self, OccupiedEntry},
+		BTreeMap, BTreeSet,
+	},
 	core::fmt,
-	rustc_hash::{FxHashMap, FxHashSet},
-	std::collections::hash_map::{self, OccupiedEntry},
 };
 
 /// A single cached record tree.
@@ -23,8 +25,8 @@ pub(in super::super) struct TreeData<B: Buf> {
 }
 
 pub(in super::super) struct Level<B> {
-	pub slots: FxHashMap<u64, Slot<B>>,
-	pub dirty_markers: FxHashMap<u64, Dirty>,
+	pub slots: BTreeMap<u64, Slot<B>>,
+	pub dirty_markers: BTreeMap<u64, Dirty>,
 }
 
 #[derive(Debug, Default)]
@@ -32,7 +34,7 @@ pub(in super::super) struct Dirty {
 	/// Whether the entry itself is dirty.
 	pub is_dirty: bool,
 	/// Children of the entry that have dirty descendants.
-	pub children: FxHashSet<u64>,
+	pub children: BTreeSet<u64>,
 }
 
 impl<B> Default for Level<B> {
@@ -76,7 +78,7 @@ impl<B: Buf> fmt::Debug for Level<B> {
 			}
 		}
 
-		struct FmtSlots<'a, B>(&'a FxHashMap<u64, Slot<B>>);
+		struct FmtSlots<'a, B>(&'a BTreeMap<u64, Slot<B>>);
 
 		impl<B: Buf> fmt::Debug for FmtSlots<'_, B> {
 			fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -141,7 +143,7 @@ impl<B: Buf> TreeData<B> {
 		let [level, levels @ ..] = &mut self.data[usize::from(depth)..]
 			else { panic!("depth out of range") };
 
-		let hash_map::Entry::Occupied(mut marker) = level.dirty_markers.entry(offset)
+		let btree_map::Entry::Occupied(mut marker) = level.dirty_markers.entry(offset)
 			else { return false };
 
 		if !marker.get().is_dirty {
@@ -163,7 +165,7 @@ impl<B: Buf> TreeData<B> {
 		let mut offt = offset;
 
 		for lvl in levels {
-			let hash_map::Entry::Occupied(mut marker) = lvl.dirty_markers.entry(offt >> shift)
+			let btree_map::Entry::Occupied(mut marker) = lvl.dirty_markers.entry(offt >> shift)
 				else { unreachable!("no marker") };
 
 			let present = marker.get_mut().children.remove(&offt);
@@ -284,7 +286,7 @@ impl<B: Buf> Present<TreeData<B>> {
 	/// Get an entry.
 	pub fn occupied(&mut self, depth: u8, offset: u64) -> Option<OccupiedEntry<'_, u64, Slot<B>>> {
 		let entry = self.data.data[usize::from(depth)].slots.entry(offset);
-		let hash_map::Entry::Occupied(entry) = entry else { return None };
+		let btree_map::Entry::Occupied(entry) = entry else { return None };
 		Some(entry)
 	}
 
