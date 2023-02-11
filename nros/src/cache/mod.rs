@@ -213,15 +213,15 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		let r = {
 			futures_util::select_biased! {
-				r = pin!(f.fuse()) => r?,
 				r = bg_runner => r,
 				r = pin!(bg.process().fuse()) => r?,
+				r = pin!(f.fuse()) => r?,
 			}
 		};
 
 		futures_util::select_biased! {
-			r = pin!(bg.try_run_all().fuse()) => r?,
 			r = bg_runner => r,
+			r = pin!(bg.try_run_all().fuse()) => r?,
 		};
 
 		Ok(r)
