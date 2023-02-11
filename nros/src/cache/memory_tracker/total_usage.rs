@@ -82,21 +82,16 @@ impl TotalMemoryUsage {
 		trace!(info "{}/{}", self.usage, self.limit);
 
 		// Wake tasks
-		/*
 		let mut estimate = self.usage;
-		while let Some((mem, waker, in_queue)) = self.tasks.pop_front() {
-			estimate += mem;
+		while let Some(node) = self.tasks.get_next() {
+			estimate += *node.value();
 			if estimate > self.limit {
 				// Would exceed limit
-				self.tasks.push_front((mem, waker, in_queue));
 				break;
 			}
-			trace!(info "wake one {}", mem);
-			waker.wake();
-			in_queue.set(false);
+			trace!(info "wake one {}", node.value());
+			self.tasks.wake_next();
 		}
-		*/
-		self.tasks.wake_all();
 	}
 
 	/// Check if there is enough room to fetch an entry.

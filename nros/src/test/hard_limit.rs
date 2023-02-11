@@ -95,8 +95,8 @@ pub fn tree_grow_move_root_race() {
 		let obj_d = s.create().await.unwrap();
 		obj_d.resize(0x1b1b1b1b1b1b1b1b).await.unwrap();
 
-		for i in 0..2 {
-			let obj = s.create().await.unwrap();
+		for _ in 0..2 {
+			let _ = s.create().await.unwrap();
 		}
 
 		obj_d.decrease_reference_count().await.unwrap();

@@ -33,6 +33,13 @@ pub struct Node<V> {
 	next: Cell<Option<Rc<Node<V>>>>,
 }
 
+impl<V> Node<V> {
+	/// Get a reference to the value associated with this node.
+	pub fn value(&self) -> &V {
+		&self.value
+	}
+}
+
 impl<V: fmt::Debug> fmt::Debug for Node<V> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let mut f = f.debug_struct(stringify!(Node));
@@ -63,6 +70,11 @@ impl<V> WakerQueue<V> {
 		self.tail = weak.clone();
 
 		WakerQueueTicket { node: weak }
+	}
+
+	/// Get node with next task to wake.
+	pub fn get_next(&self) -> Option<&Node<V>> {
+		self.head.as_deref()
 	}
 
 	pub fn wake_next(&mut self) -> Option<V> {
