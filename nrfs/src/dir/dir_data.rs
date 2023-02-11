@@ -1,8 +1,8 @@
 use {
 	super::{Child, DirSize, Hasher, MAX_LOAD_FACTOR_MILLI, MIN_LOAD_FACTOR_MILLI},
 	crate::DataHeader,
+	alloc::collections::BTreeMap,
 	rangemap::RangeSet,
-	rustc_hash::FxHashMap,
 };
 
 /// Directory data only, which has no lifetimes.
@@ -16,7 +16,7 @@ pub(crate) struct DirData {
 	/// Live [`FileRef`] and [`DirRef`]s that point to files which are a child of this directory.
 	///
 	/// Index corresponds to the position in the item list.
-	pub(crate) children: FxHashMap<u32, Child>,
+	pub(crate) children: BTreeMap<u32, Child>,
 	/// Whether this directory has been removed and the corresponding item is dangling.
 	///
 	/// If `true`, no modifications may be made to this directory.

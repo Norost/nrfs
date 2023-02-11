@@ -5,6 +5,10 @@ edition = "2021"
 
 [features]
 parallel = ["nrfs/parallel"]
+# Enable DHAT heap profiling.
+#
+# This should be significantly more efficient than valgrind.
+dhat = ["dep:dhat"]
 
 [dependencies.async-channel]
 version = "1.8"
@@ -12,6 +16,10 @@ version = "1.8"
 [dependencies.clap]
 version = "4.1"
 features = ["derive"]
+
+[dependencies.dhat]
+version = "0.3"
+optional = true
 
 [dependencies.fuser]
 version = "0.11"
@@ -22,9 +30,6 @@ version = "*"
 
 [dependencies.nrfs]
 path = "../nrfs"
-
-[dependencies.arena]
-git = "https://git.sr.ht/~demindiro/arena"
 
 [dependencies.env_logger]
 version = "0.9"

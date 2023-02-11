@@ -9,7 +9,7 @@ use core::{
 
 #[derive(Default)]
 struct Tracker {
-	task_depth: rustc_hash::FxHashMap<u64, usize>,
+	task_depth: alloc::collections::BTreeMap<u64, usize>,
 	task_stack: Vec<u64>,
 	id_counter: u64,
 }

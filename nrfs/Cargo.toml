@@ -8,9 +8,6 @@ trace-all = ["trace", "nros/trace"]
 trace = []
 parallel = ["nros/parallel"]
 
-[dependencies.arena]
-git = "https://git.sr.ht/~demindiro/arena"
-
 [dependencies.bstr]
 version = "1.1"
 
@@ -23,9 +20,6 @@ path = "../nros"
 
 [dependencies.rangemap]
 version = "1.0"
-
-[dependencies.rustc-hash]
-version = "1.1"
 
 [dependencies.siphasher]
 version = "0.3"

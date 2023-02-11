@@ -1,7 +1,7 @@
 mod compression;
 
 use {
-	crate::{BlockSize, Cipher, RecordCipher, Resource},
+	crate::{resource::Buf, BlockSize, Cipher, RecordCipher, Resource},
 	core::fmt,
 	endian::u64le,
 };

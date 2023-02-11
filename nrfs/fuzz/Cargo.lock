@@ -361,13 +361,11 @@ name = "nrfs"
 version = "0.2.0"
 dependencies = [
  "arbitrary",
- "arena",
  "bstr",
  "futures-util",
  "nora_endian 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nros",
  "rangemap",
- "rustc-hash",
  "siphasher",
 ]
 
@@ -397,7 +395,6 @@ dependencies = [
  "poly1305",
  "rand",
  "rangemap",
- "rustc-hash",
  "xxhash-rust",
 ]
 
@@ -544,12 +541,6 @@ name = "regex-automata"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c230d73fb8d8c1b9c0b3135c5142a8acee3a0558fb8db5cf1cb65f8d7862132"
-
-[[package]]
-name = "rustc-hash"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "scopeguard"

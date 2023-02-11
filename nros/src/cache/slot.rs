@@ -1,9 +1,8 @@
 use {
 	super::{memory_tracker::Idx, Key},
 	crate::waker_queue::WakerQueue,
-	alloc::rc::Rc,
+	alloc::{collections::btree_map, rc::Rc},
 	core::{cell::RefCell, mem, task::Waker},
-	std::collections::hash_map,
 };
 
 /// A single slot with cached data.
@@ -99,24 +98,24 @@ pub(super) trait SlotExt<'a, T> {
 	fn as_busy(&self) -> Option<&Rc<RefCell<Busy>>>;
 }
 
-impl<'a, T> SlotExt<'a, T> for hash_map::Entry<'a, u64, Slot<T>> {
+impl<'a, T> SlotExt<'a, T> for btree_map::Entry<'a, u64, Slot<T>> {
 	fn into_present_mut(self) -> Option<&'a mut Present<T>> {
-		let hash_map::Entry::Occupied(e) = self else { return None };
+		let btree_map::Entry::Occupied(e) = self else { return None };
 		e.into_mut().as_present_mut()
 	}
 
 	fn as_present_mut(&mut self) -> Option<&mut Present<T>> {
-		let hash_map::Entry::Occupied(e) = self else { return None };
+		let btree_map::Entry::Occupied(e) = self else { return None };
 		e.get_mut().as_present_mut()
 	}
 
 	fn as_busy(&self) -> Option<&Rc<RefCell<Busy>>> {
-		let hash_map::Entry::Occupied(e) = self else { return None };
+		let btree_map::Entry::Occupied(e) = self else { return None };
 		e.get().as_busy()
 	}
 }
 
-impl<'a, T> SlotExt<'a, T> for hash_map::OccupiedEntry<'a, u64, Slot<T>> {
+impl<'a, T> SlotExt<'a, T> for btree_map::OccupiedEntry<'a, u64, Slot<T>> {
 	fn into_present_mut(self) -> Option<&'a mut Present<T>> {
 		let Slot::Present(p) = self.into_mut() else { return None };
 		Some(p)

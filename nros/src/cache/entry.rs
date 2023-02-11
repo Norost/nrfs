@@ -1,14 +1,13 @@
 use {
 	super::{tree::data::Dirty, Busy, Cache, Key, MemoryTracker, Present, Slot},
 	crate::{resource::Buf, util, waker_queue, Dev, Resource},
-	alloc::rc::Rc,
+	alloc::{collections::BTreeMap, rc::Rc},
 	core::{
 		cell::{RefCell, RefMut},
 		future, mem,
 		ops::Deref,
 		task::Poll,
 	},
-	rustc_hash::FxHashMap,
 };
 
 /// Reference to an entry.
@@ -17,7 +16,7 @@ pub struct EntryRef<'a, D: Dev, R: Resource> {
 	pub(super) key: Key,
 	memory_tracker: RefMut<'a, MemoryTracker>,
 	entry: RefMut<'a, Present<R::Buf>>,
-	pub(super) dirty_markers: RefMut<'a, FxHashMap<u64, Dirty>>,
+	pub(super) dirty_markers: RefMut<'a, BTreeMap<u64, Dirty>>,
 }
 
 impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
@@ -28,7 +27,7 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 		cache: &'a Cache<D, R>,
 		key: Key,
 		entry: RefMut<'a, Present<R::Buf>>,
-		dirty_markers: RefMut<'a, FxHashMap<u64, Dirty>>,
+		dirty_markers: RefMut<'a, BTreeMap<u64, Dirty>>,
 		mut memory_tracker: RefMut<'a, MemoryTracker>,
 	) -> Self {
 		memory_tracker.touch(&entry.refcount);
@@ -291,5 +290,5 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 pub(super) struct EntryRefComponents<'a, R: Resource> {
 	pub memory_tracker: RefMut<'a, MemoryTracker>,
 	pub slot: RefMut<'a, Slot<R::Buf>>,
-	pub dirty_markers: RefMut<'a, FxHashMap<u64, Dirty>>,
+	pub dirty_markers: RefMut<'a, BTreeMap<u64, Dirty>>,
 }

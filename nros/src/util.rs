@@ -1,12 +1,12 @@
 use {
 	crate::{resource::Buf, Record},
+	alloc::collections::btree_map,
 	core::{
 		future::Future,
 		hash::{BuildHasher, Hash},
 		mem,
 		pin::Pin,
 	},
-	std::collections::hash_map,
 };
 
 /// Get a record from a slice of raw data.
@@ -81,13 +81,13 @@ pub(crate) fn divmod_p2(offset: u64, pow2: u8) -> (u64, usize) {
 	(offt, index.try_into().unwrap())
 }
 
-pub(crate) trait HashMapExt<K, V> {
-	fn occupied(&mut self, key: K) -> Option<hash_map::OccupiedEntry<'_, K, V>>;
+pub(crate) trait BTreeMapExt<K, V> {
+	fn occupied(&mut self, key: K) -> Option<btree_map::OccupiedEntry<'_, K, V>>;
 }
 
-impl<K: Hash + Eq, V, S: BuildHasher> HashMapExt<K, V> for hash_map::HashMap<K, V, S> {
-	fn occupied(&mut self, key: K) -> Option<hash_map::OccupiedEntry<'_, K, V>> {
-		let hash_map::Entry::Occupied(e) = self.entry(key) else { return None };
+impl<K: Ord + Eq, V> BTreeMapExt<K, V> for btree_map::BTreeMap<K, V> {
+	fn occupied(&mut self, key: K) -> Option<btree_map::OccupiedEntry<'_, K, V>> {
+		let btree_map::Entry::Occupied(e) = self.entry(key) else { return None };
 		Some(e)
 	}
 }

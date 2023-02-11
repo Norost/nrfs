@@ -40,9 +40,9 @@ pub(super) struct Allocator {
 	/// Used for debugging.
 	pub(super) statistics: Statistics,
 	#[cfg(feature = "debug-trace-alloc")]
-	debug_alloc_traces: rustc_hash::FxHashMap<u64, std::backtrace::Backtrace>,
+	debug_alloc_traces: alloc::collections::BTreeMap<u64, std::backtrace::Backtrace>,
 	#[cfg(feature = "debug-trace-alloc")]
-	debug_dealloc_traces: rustc_hash::FxHashMap<u64, std::backtrace::Backtrace>,
+	debug_dealloc_traces: alloc::collections::BTreeMap<u64, std::backtrace::Backtrace>,
 	#[cfg(feature = "debug-trace-alloc")]
 	debug_disable: bool,
 }
