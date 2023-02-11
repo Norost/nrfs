@@ -136,8 +136,7 @@ pub use {
 use {
 	cache::Cache,
 	cipher::{Cipher, HeaderCipher, RecordCipher},
-	core::{fmt, future::Future, pin::pin},
-	futures_util::FutureExt,
+	core::{fmt, future::Future},
 	key_derivation::KeyDerivation,
 	record::Record,
 	storage::{DevSet, Store},

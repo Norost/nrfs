@@ -83,10 +83,6 @@ impl<'a, E> Background<'a, Result<(), E>> {
 		})
 		.await
 	}
-
-	pub fn len(&self) -> usize {
-		self.inner.borrow_mut().tasks.len()
-	}
 }
 
 impl<T> Default for Background<'_, T> {

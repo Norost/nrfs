@@ -1,7 +1,7 @@
 use {
 	super::{ENTRY_COST, OBJECT_COST},
 	crate::{MaxRecordSize, WakerQueue, WakerQueueTicket},
-	core::{cell::Cell, task::Waker},
+	core::task::Waker,
 };
 
 /// Structure keeping track of total cache memory usage.

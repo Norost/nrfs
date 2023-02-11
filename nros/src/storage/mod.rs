@@ -120,11 +120,10 @@ impl<D: Dev, R: Resource> Store<D, R> {
 
 			match entry_data {
 				Ok((v, data)) => break (data, v),
-				Err((e, d)) => {
+				Err((e, _)) => {
 					self.record_unpack_failures.update(|x| x + 1);
 					blacklist.set(chain, true);
 					last_err = Some(Error::RecordUnpack(e));
-					data = d;
 				}
 			}
 		};

@@ -1,12 +1,7 @@
 use {
 	super::super::{Cache, Key, Present, Slot, SlotExt, Tree},
 	crate::{resource::Buf, util, Dev, Error, Resource},
-	core::{
-		future::Future,
-		mem,
-		pin::{pin, Pin},
-	},
-	futures_util::FutureExt,
+	core::{future::Future, mem, pin::Pin},
 };
 
 impl<D: Dev, R: Resource> Cache<D, R> {

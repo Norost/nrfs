@@ -1,12 +1,7 @@
 use {
 	crate::{resource::Buf, Record},
 	alloc::collections::btree_map,
-	core::{
-		future::Future,
-		hash::{BuildHasher, Hash},
-		mem,
-		pin::Pin,
-	},
+	core::{future::Future, mem, pin::Pin},
 };
 
 /// Get a record from a slice of raw data.

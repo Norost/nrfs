@@ -1,7 +1,5 @@
 use {
-	super::super::{
-		Cache, Present, Slot, SlotExt, TreeData, ID_PSEUDO, OBJECT_BITMAP_ID, OBJECT_LIST_ID,
-	},
+	super::super::{Cache, Present, Slot, SlotExt, TreeData, OBJECT_BITMAP_ID, OBJECT_LIST_ID},
 	crate::{
 		util::{self, BTreeMapExt},
 		Dev, Error, Resource,

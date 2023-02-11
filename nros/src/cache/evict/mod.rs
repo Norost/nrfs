@@ -3,8 +3,7 @@ mod object;
 
 use {
 	super::{Cache, Key},
-	crate::{Background, Dev, Resource, WakerQueueTicket},
-	core::{future, future::Future, task::Poll},
+	crate::{Background, Dev, Resource},
 };
 
 impl<D: Dev, R: Resource> Cache<D, R> {

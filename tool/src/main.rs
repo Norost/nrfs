@@ -1,5 +1,5 @@
 #![forbid(unused_must_use, rust_2018_idioms)]
-#![feature(const_option, iterator_try_collect, pin_macro)]
+#![feature(const_option, iterator_try_collect)]
 
 mod dump;
 mod extract_key;

@@ -3,7 +3,6 @@
 #![forbid(elided_lifetimes_in_paths)]
 #![feature(iterator_try_collect)]
 #![feature(cell_update)]
-#![feature(pin_macro)]
 #![feature(split_array)]
 #![feature(error_in_core)]
 

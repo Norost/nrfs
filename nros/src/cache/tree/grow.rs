@@ -41,7 +41,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 				.memory_reserve_entry(mem::size_of::<Record>())
 				.await;
 			// Refetch root, which may have changed in the meantime.
-			let (obj, mut memory_tracker) = self.cache.fetch_object(self.id).await?;
+			let (obj, _) = self.cache.fetch_object(self.id).await?;
 			obj.data.object().root
 		} else {
 			cur_object.root

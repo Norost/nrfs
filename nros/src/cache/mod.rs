@@ -28,7 +28,7 @@ use {
 		task::Waker,
 	},
 	entry::EntryRef,
-	futures_util::{stream::FuturesUnordered, FutureExt, TryStreamExt},
+	futures_util::FutureExt,
 	key::Key,
 	memory_tracker::MemoryTracker,
 	rangemap::RangeSet,

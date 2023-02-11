@@ -6,11 +6,7 @@ use {
 	},
 	crate::{util, waker_queue},
 	alloc::rc::Rc,
-	core::{
-		cell::{RefCell, RefMut},
-		future,
-		task::Poll,
-	},
+	core::cell::{RefCell, RefMut},
 };
 
 impl<D: Dev, R: Resource> Cache<D, R> {

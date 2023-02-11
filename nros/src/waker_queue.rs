@@ -55,7 +55,7 @@ impl<V> WakerQueue<V> {
 		let node = Rc::new(Node { waker: Cell::new(Some(waker)), value, next: None.into() });
 		let weak = Rc::downgrade(&node);
 
-		if let Some(mut tail) = self.tail.upgrade() {
+		if let Some(tail) = self.tail.upgrade() {
 			tail.next.set(Some(node));
 		} else {
 			self.head = Some(node);

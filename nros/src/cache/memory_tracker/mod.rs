@@ -5,7 +5,7 @@ use {
 	super::{Busy, Key, RefCount},
 	crate::{waker_queue, Dev, MaxRecordSize, Resource, WakerQueue, WakerQueueTicket},
 	alloc::rc::Rc,
-	core::{cell::RefCell, future, task::Poll},
+	core::cell::RefCell,
 	std::task::Waker,
 };
 
@@ -28,14 +28,6 @@ pub(super) struct MemoryTracker {
 	lru: lru::Lru,
 	/// Tasks to wake if there are more entries to evict.
 	soft_wakers: WakerQueue<()>,
-	/// Tasks waiting to be able to grow memory.
-	///
-	/// See [`Self::memory_reserve_grow`].
-	hard_grow_wakers: WakerQueue<()>,
-	/// Amount of tasks currently growing memory.
-	///
-	/// See [`Self::memory_reserve_grow`].
-	hard_grow_tasks: usize,
 }
 
 impl MemoryTracker {
@@ -51,8 +43,6 @@ impl MemoryTracker {
 			total: total_usage::TotalMemoryUsage::new(hard_limit),
 			lru: lru::Lru::new(soft_limit),
 			soft_wakers: Default::default(),
-			hard_grow_wakers: Default::default(),
-			hard_grow_tasks: 0,
 		}
 	}
 
@@ -299,10 +289,6 @@ impl MemoryTracker {
 	/// Must be used in combination with [`Self::soft_remove_entry`].
 	pub(crate) fn hard_remove_entry(&mut self, length: usize) {
 		self.hard_remove(ENTRY_COST + length)
-	}
-
-	pub(super) fn can_reserve_grow(&self) -> bool {
-		self.hard_grow_tasks == 0
 	}
 }
 

@@ -4,9 +4,7 @@ use {
 	alloc::{collections::BTreeMap, rc::Rc},
 	core::{
 		cell::{RefCell, RefMut},
-		future, mem,
 		ops::Deref,
-		task::Poll,
 	},
 };
 
@@ -49,7 +47,7 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 			data.len()
 		);
 
-		let Self { cache, mut key, mut entry, mut memory_tracker, dirty_markers } = self;
+		let Self { cache, key, mut entry, mut memory_tracker, dirty_markers } = self;
 		drop(dirty_markers);
 
 		let rec_size = 1 << self.cache.max_record_size().to_raw();
@@ -162,7 +160,7 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 	pub(super) async fn replace(self, mut data: R::Buf) {
 		trace!("EntryRef::replace {:?} len {}", self.key, data.len());
 
-		let Self { cache, mut key, mut entry, dirty_markers, mut memory_tracker } = self;
+		let Self { cache, key, mut entry, dirty_markers, mut memory_tracker } = self;
 		drop(dirty_markers);
 
 		let rec_size = 1 << cache.max_record_size().to_raw();

@@ -2,7 +2,7 @@ use {
 	super::{memory_tracker::Idx, Key},
 	crate::waker_queue::WakerQueue,
 	alloc::{collections::btree_map, rc::Rc},
-	core::{cell::RefCell, mem, task::Waker},
+	core::cell::RefCell,
 };
 
 /// A single slot with cached data.

@@ -302,11 +302,6 @@ impl<B: Buf> Present<TreeData<B>> {
 		&mut self.data.data[usize::from(depth)]
 	}
 
-	/// Get a level.
-	pub fn try_level_mut(&mut self, depth: u8) -> Option<&mut Level<B>> {
-		self.data.data.get_mut(usize::from(depth))
-	}
-
 	/// Get levels at & above `depth`.
 	pub fn levels_mut(&mut self, depth: u8) -> (&mut Level<B>, &mut [Level<B>]) {
 		let Some([level, levels @ ..]) = self.data.data.get_mut(usize::from(depth)..)

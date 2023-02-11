@@ -157,8 +157,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let flush_object = |id| async move {
 			trace!("flush_all::flush_object {:#x}", id);
 			// Bottom to top
-			let Some((mut obj, _)) = self.wait_object(id).await else { return Ok(()) };
-			drop(obj);
 			for d in 0.. {
 				// If None, it has been evicted and nothing is left for us to do.
 				let Some((mut obj, _)) = self.wait_object(id).await else { return Ok(()) };
@@ -255,7 +253,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// Wait for evicts to finish.
 		self.wait_all_evict().await;
 
-		let mut data = self.data.borrow_mut();
+		let data = self.data.borrow_mut();
 
 		// Write object list root.
 		if let Some(Slot::Present(obj)) = data.objects.get(&OBJECT_LIST_ID) {

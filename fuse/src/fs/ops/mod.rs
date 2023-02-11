@@ -18,7 +18,7 @@ mod unlink;
 mod write;
 
 use {
-	super::{mtime_now, mtime_sys, FileDev, Fs, TTL},
+	super::{mtime_now, mtime_sys, Fs, TTL},
 	fuser::{FileType, TimeOrNow},
 	nrfs::dir::{InsertError, ItemRef, RemoveError, TransferError},
 	std::os::unix::ffi::OsStrExt,
