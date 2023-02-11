@@ -20,6 +20,13 @@ Features
 * Defragmentation
 * Sparse objects
 
+
+Partition identifier
+--------------------
+
+See the filesystem document for the partition identifier.
+
+
 Transactions
 ------------
 
