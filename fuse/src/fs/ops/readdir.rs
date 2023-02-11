@@ -31,6 +31,9 @@ impl Fs {
 					continue;
 				};
 
+			// FIXME we're supposed to return an inode while *not* increasing the reference count.
+			// wtf exactly are we supposed to do? Surely there has to be a solution for other
+			// inode-less filesystems right?
 			let (ty, e_ino) = match e {
 				ItemRef::Dir(d) => {
 					let (ino, e) = self_ino.add_dir(d, false);

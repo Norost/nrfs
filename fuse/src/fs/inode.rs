@@ -103,7 +103,12 @@ impl InodeStore {
 		} else {
 			let ino = *counter;
 			*counter += 1;
-			m.insert(ino, InodeData { value: t.as_raw(), reference_count: 1 });
+			// TODO what is the proper thing to do here, really?
+			// See fs/ops/readdir.rs for more info.
+			m.insert(
+				ino,
+				InodeData { value: t.as_raw(), reference_count: incr.into() },
+			);
 			rev_m.insert(t.into_raw(), ino);
 			(ino, None)
 		};
