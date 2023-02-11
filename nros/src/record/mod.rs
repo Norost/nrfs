@@ -54,7 +54,7 @@ impl Record {
 	pub fn unpack<R: Resource>(
 		&self,
 		data: &mut [u8],
-		resource: &R,
+		mut buf: R::Buf,
 		max_record_size: MaxRecordSize,
 		cipher: Cipher,
 	) -> Result<R::Buf, UnpackError> {
@@ -62,7 +62,7 @@ impl Record {
 		// and takes a nonce as argument.
 		debug_assert_eq!(self.nonce(), cipher.nonce, "nonce mismatch");
 
-		let mut buf = resource.alloc();
+		buf.resize(0, 0);
 
 		if data.is_empty() {
 			debug_assert_eq!(self.length(), 0, "data empty but record length is nonzero");

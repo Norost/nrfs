@@ -34,7 +34,10 @@ macro_rules! t {
 					let b = &mut [0; 2048];
 					let r = Record::pack(data, b, Compression::$comp, BlockSize::B512, cipher());
 					let b = &mut b[..BlockSize::B512.round_up(r.length())];
-					let d = r.unpack(b, &StdResource::new(), MaxRecordSize::K1, cipher()).unwrap();
+
+					let res = StdResource::new();
+					let d = res.alloc();
+					let d = r.unpack::<StdResource>(b, d, MaxRecordSize::K1, cipher()).unwrap();
 					assert_eq!(data, &*d);
 				}
 			})*

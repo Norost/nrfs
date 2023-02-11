@@ -102,17 +102,29 @@ impl<D: Dev, R: Resource> Store<D, R> {
 					continue;
 				}
 			};
-			match record.unpack(
-				data.get_mut(),
-				self.resource(),
-				self.max_record_size(),
-				self.devices.cipher_with_nonce(record.nonce()),
-			) {
-				Ok(v) => break (data, v),
-				Err(e) => {
+
+			let cipher = self.devices.cipher_with_nonce(record.nonce());
+			let max_rec_size = self.max_record_size();
+			let buf = self.resource().alloc();
+			let record = *record;
+			let entry_data = self
+				.resource()
+				.run(move || {
+					let buf = record.unpack::<R>(data.get_mut(), buf, max_rec_size, cipher);
+					match buf {
+						Ok(buf) => Ok((buf, data)),
+						Err(e) => Err((e, data)),
+					}
+				})
+				.await;
+
+			match entry_data {
+				Ok((v, data)) => break (data, v),
+				Err((e, d)) => {
 					self.record_unpack_failures.update(|x| x + 1);
 					blacklist.set(chain, true);
 					last_err = Some(Error::RecordUnpack(e));
+					data = d;
 				}
 			}
 		};
