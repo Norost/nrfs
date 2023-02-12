@@ -63,7 +63,7 @@ impl Fs {
 		});
 
 		let root = fs.run(fs.root_dir()).await.unwrap();
-		ino.add_dir(root, true);
+		ino.add_dir(root);
 
 		let (send, recv) = async_channel::bounded(1024);
 

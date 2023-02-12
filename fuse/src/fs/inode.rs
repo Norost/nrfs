@@ -46,17 +46,12 @@ struct InodeData<T> {
 
 macro_rules! impl_ty {
 	($ty:ident $val:ident $val_rev:ident $ino:ident | $add:ident $get:ident) => {
-		pub fn $add<'a>(
-			&mut self,
-			$val: $ty<'a, FileDev>,
-			incr: bool,
-		) -> (u64, Option<$ty<'a, FileDev>>) {
+		pub fn $add<'a>(&mut self, $val: $ty<'a, FileDev>) -> (u64, Option<$ty<'a, FileDev>>) {
 			let (ino, e) = Self::add(
 				&mut self.ino_counter,
 				&mut self.$val,
 				&mut self.$val_rev,
 				$val,
-				incr,
 			);
 			(ino | $ino, e)
 		}
@@ -87,32 +82,29 @@ impl InodeStore {
 		}
 	}
 
+	/// Add an entry.
+	///
+	/// If the entry was already present,
+	/// the reference count is increased and the [`RawRef`] is returned.
 	fn add<'a, T: RawRef<'a, FileDev>>(
 		counter: &mut u64,
 		m: &mut BTreeMap<Ino, InodeData<T::Raw>>,
 		rev_m: &mut BTreeMap<T::Raw, Ino>,
-		t: T,
-		incr: bool,
+		ref_: T,
 	) -> (u64, Option<T>)
 	where
 		T::Raw: Ord + Eq,
 	{
-		let (h, t) = if let Some(h) = rev_m.get_mut(&t.as_raw()) {
-			m.get_mut(h).expect("no item with handle").reference_count += u64::from(incr);
-			(*h, Some(t))
+		if let Some(h) = rev_m.get_mut(&ref_.as_raw()) {
+			m.get_mut(h).expect("no item with handle").reference_count += 1;
+			(*h, Some(ref_))
 		} else {
 			let ino = *counter;
 			*counter += 1;
-			// TODO what is the proper thing to do here, really?
-			// See fs/ops/readdir.rs for more info.
-			m.insert(
-				ino,
-				InodeData { value: t.as_raw(), reference_count: incr.into() },
-			);
-			rev_m.insert(t.into_raw(), ino);
+			m.insert(ino, InodeData { value: ref_.as_raw(), reference_count: 1 });
+			rev_m.insert(ref_.into_raw(), ino);
 			(ino, None)
-		};
-		(h, t)
+		}
 	}
 
 	pub fn get<'s, 'a>(

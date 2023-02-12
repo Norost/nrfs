@@ -20,11 +20,11 @@ impl Fs {
 		};
 		match d.create_dir(name, &opt, &ext).await.unwrap() {
 			Ok(dd) => {
-				let (ino, dd) = self_ino.add_dir(dd, false);
-				if let Some(dd) = dd {
-					dd.drop().await.unwrap()
+				let data = dd.data().await.unwrap();
+				let (ino, e) = self_ino.add_dir(dd);
+				if let Some(e) = e {
+					e.drop().await.unwrap();
 				}
-				let data = self_ino.get(&self.fs, ino).data().await.unwrap();
 				drop(self_ino);
 				let attr = self.attr(ino, FileType::Directory, 0, &data);
 				job.reply.entry(&TTL, &attr, 0);

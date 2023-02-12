@@ -15,7 +15,7 @@ impl Fs {
 		let (ty, len, ino) = match entry {
 			ItemRef::Dir(d) => {
 				let len = d.len().await.unwrap().into();
-				let (ino, e) = self_ino.add_dir(d, true);
+				let (ino, e) = self_ino.add_dir(d);
 				if let Some(e) = e {
 					e.drop().await.unwrap()
 				}
@@ -23,7 +23,7 @@ impl Fs {
 			}
 			ItemRef::File(f) => {
 				let len = f.len().await.unwrap();
-				let (ino, e) = self_ino.add_file(f, true);
+				let (ino, e) = self_ino.add_file(f);
 				if let Some(e) = e {
 					e.drop().await.unwrap()
 				}
@@ -31,7 +31,7 @@ impl Fs {
 			}
 			ItemRef::Sym(f) => {
 				let len = f.len().await.unwrap();
-				let (ino, e) = self_ino.add_sym(f, true);
+				let (ino, e) = self_ino.add_sym(f);
 				if let Some(e) = e {
 					e.drop().await.unwrap()
 				}

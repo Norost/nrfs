@@ -2,7 +2,7 @@ use {super::*, std::ffi::OsStr};
 
 impl Fs {
 	pub async fn readdir(&self, mut job: crate::job::ReadDir) {
-		let mut self_ino = self.ino.borrow_mut();
+		let self_ino = self.ino.borrow_mut();
 
 		if job.offset == 0 {
 			if job.reply.add(job.ino, 1, FileType::Directory, ".") {
@@ -31,37 +31,22 @@ impl Fs {
 					continue;
 				};
 
-			// FIXME we're supposed to return an inode while *not* increasing the reference count.
-			// wtf exactly are we supposed to do? Surely there has to be a solution for other
-			// inode-less filesystems right?
-			let (ty, e_ino) = match e {
-				ItemRef::Dir(d) => {
-					let (ino, e) = self_ino.add_dir(d, false);
-					if let Some(e) = e {
-						e.drop().await.unwrap()
-					}
-					(FileType::Directory, ino)
-				}
-				ItemRef::File(f) => {
-					let (ino, e) = self_ino.add_file(f, false);
-					if let Some(e) = e {
-						e.drop().await.unwrap()
-					}
-					(FileType::RegularFile, ino)
-				}
-				ItemRef::Sym(f) => {
-					let (ino, e) = self_ino.add_sym(f, false);
-					if let Some(e) = e {
-						e.drop().await.unwrap()
-					}
-					(FileType::Symlink, ino)
-				}
+			// It's possible the ino is not known due to readdir not doing an implicit lookup
+			// and hence not increasing refcount, which in turns means there may be no entry
+			// in the inode store.
+			//
+			// For consistency's sake, always use NO_INO (-1).
+			let ty = match &e {
+				ItemRef::Dir(_) => FileType::Directory,
+				ItemRef::File(_) => FileType::RegularFile,
+				ItemRef::Sym(_) => FileType::Symlink,
 				ItemRef::Unknown(_) => todo!("miscellaneous file type"),
 			};
+			e.drop().await.unwrap();
 			d = self_ino.get_dir(&self.fs, job.ino);
 
 			let offt = i as i64 + 2;
-			if job.reply.add(e_ino, offt, ty, OsStr::from_bytes(&name)) {
+			if job.reply.add(NO_INO, offt, ty, OsStr::from_bytes(&name)) {
 				break;
 			}
 			index = i;

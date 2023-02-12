@@ -15,6 +15,7 @@ pub(crate) use {child::Child, dir_data::DirData, hasher::Hasher, item::Type};
 use {
 	crate::{
 		file, read_exact, write_all, DataHeader, Dev, DirRef, Error, FileRef, Name, Nrfs, SymRef,
+		TmpRef,
 	},
 	alloc::collections::btree_map,
 	core::{cell::RefMut, mem},
@@ -1135,6 +1136,11 @@ impl<'a, D: Dev> DirRef<'a, D> {
 			break;
 		}
 		Ok(())
+	}
+
+	/// Get item data, i.e. data in the entry itself, excluding heap data.
+	pub async fn data(&self) -> Result<ItemData, Error<D>> {
+		TmpRef::<'_, ItemRef<'_, D>>::from(self).data().await
 	}
 
 	/// Get the amount of items in this directory.

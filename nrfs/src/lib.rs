@@ -432,6 +432,13 @@ pub struct TmpRef<'a, T> {
 	_marker: PhantomData<&'a ()>,
 }
 
+impl<'a, T> TmpRef<'a, T> {
+	/// Erase the associated lifetime.
+	fn erase_lifetime<'x>(self) -> TmpRef<'x, T> {
+		TmpRef { inner: self.inner, _marker: PhantomData }
+	}
+}
+
 impl<'a, T> Deref for TmpRef<'a, T> {
 	type Target = T;
 
@@ -447,7 +454,7 @@ impl<'a, T> DerefMut for TmpRef<'a, T> {
 }
 
 macro_rules! impl_tmpref {
-	($raw:ident $ref:ident $var:ident) => {
+	($raw:ident $ref:ident $var:ident $v:ident $v_deref:expr) => {
 		impl $raw {
 			/// Create a "temporary" reference.
 			///
@@ -467,18 +474,28 @@ macro_rules! impl_tmpref {
 			}
 		}
 
+		impl<'s, 'a, D: Dev> From<&'s $ref<'a, D>> for TmpRef<'s, ItemRef<'a, D>> {
+			fn from($v: &'s $ref<'a, D>) -> Self {
+				$v_deref
+					.as_raw()
+					.into_tmp($v_deref.fs)
+					.erase_lifetime()
+					.into()
+			}
+		}
+
 		impl<'a, D: Dev> From<$ref<'a, D>> for ItemRef<'a, D> {
-			fn from(r: $ref<'a, D>) -> Self {
-				Self::$var(r)
+			fn from($v: $ref<'a, D>) -> Self {
+				Self::$var($v)
 			}
 		}
 	};
 }
 
-impl_tmpref!(RawDirRef DirRef Dir);
-impl_tmpref!(RawFileRef FileRef File);
-impl_tmpref!(RawSymRef SymRef Sym);
-impl_tmpref!(RawUnknownRef UnknownRef Unknown);
+impl_tmpref!(RawDirRef DirRef Dir ref_ ref_);
+impl_tmpref!(RawFileRef FileRef File ref_ ref_);
+impl_tmpref!(RawSymRef SymRef Sym ref_ ref_.0);
+impl_tmpref!(RawUnknownRef UnknownRef Unknown ref_ ref_.0);
 
 pub enum Error<D>
 where

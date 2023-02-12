@@ -14,12 +14,12 @@ impl Fs {
 			Ok(f) => {
 				let link = job.link.as_os_str().as_bytes();
 				f.write_grow(0, link).await.unwrap();
-				let (ino, f) = self_ino.add_sym(f, false);
-				if let Some(f) = f {
-					f.drop().await.unwrap()
-				}
-				let data = self_ino.get(&self.fs, ino).data().await.unwrap();
+				let data = f.data().await.unwrap();
+				let (ino, e) = self_ino.add_sym(f);
 				drop(self_ino);
+				if let Some(e) = e {
+					e.drop().await.unwrap();
+				}
 				let attr = self.attr(ino, FileType::Symlink, link.len() as _, &data);
 				job.reply.entry(&TTL, &attr, 0);
 			}

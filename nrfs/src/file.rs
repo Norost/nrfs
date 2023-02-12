@@ -1,7 +1,7 @@
 use {
 	crate::{
-		dir::{Child, Dir, Type},
-		DataHeader, Dev, DirRef, Error, FileRef, Idx, Nrfs, SymRef, UnknownRef,
+		dir::{Child, Dir, ItemData, Type},
+		DataHeader, Dev, DirRef, Error, FileRef, Idx, ItemRef, Nrfs, SymRef, TmpRef, UnknownRef,
 	},
 	alloc::collections::btree_map,
 	core::{cell::RefMut, mem},
@@ -403,6 +403,11 @@ macro_rules! impl_common {
 		/// Whether this file is embedded or not.
 		pub fn is_embedded(&self) -> bool {
 			self.file().is_embedded()
+		}
+
+		/// Get item data, i.e. data in the entry itself, excluding heap data.
+		pub async fn data(&self) -> Result<ItemData, Error<D>> {
+			TmpRef::<'_, ItemRef<'_, D>>::from(self).data().await
 		}
 
 		/// Construct a helper [`File`]
