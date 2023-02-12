@@ -510,7 +510,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 	/// Get statistics for this sesion.
 	pub fn statistics(&self) -> Statistics {
-		#[cfg(test)]
 		self.verify_cache_usage();
 
 		let data = self.data.borrow();

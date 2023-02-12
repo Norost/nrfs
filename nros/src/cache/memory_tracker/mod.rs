@@ -330,9 +330,11 @@ impl<D: Dev, R: Resource> super::Cache<D, R> {
 	}
 
 	/// Check if cache size matches real usage
-	#[cfg(test)]
 	#[track_caller]
 	pub(crate) fn verify_cache_usage(&self) {
+		if !(cfg!(test) || cfg!(fuzzing)) {
+			return;
+		}
 		use super::{Buf, Present, Slot};
 		let data = &mut *self.data.borrow_mut();
 		let real_usage = data.objects.values_mut().fold(0, |x, s| {

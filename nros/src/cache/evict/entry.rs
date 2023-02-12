@@ -124,11 +124,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				data.wake_after_evicts.take().map(|w| w.wake());
 			}
 
-			#[cfg(test)]
-			{
-				drop(data);
-				self.verify_cache_usage();
-			}
+			drop(data);
+			self.verify_cache_usage();
 
 			Ok(())
 		}))

@@ -89,7 +89,6 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 			.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
 
 		drop(obj);
-		#[cfg(test)]
 		cache.verify_cache_usage();
 
 		// Do try to stay as close as the limit as possible.
@@ -146,7 +145,6 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 			.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
 
 		drop(obj);
-		#[cfg(test)]
 		cache.verify_cache_usage();
 	}
 
@@ -190,7 +188,6 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 			.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
 
 		drop(obj);
-		#[cfg(test)]
 		cache.verify_cache_usage();
 
 		// Do try to stay as close as the limit as possible.
