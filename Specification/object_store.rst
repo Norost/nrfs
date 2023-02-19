@@ -9,7 +9,7 @@ Features
   * With a maximum block size of `2^24`, maximum volume size is `2^88 - 2^24`
     bytes
 
-* Maximum object size of `2^64 - 1` bytes
+* Maximum object size of `2^64 - 1` bytes (depends on record size)
 * Maximum object count of `2^58`
 * Error detection
 * Error correction (with mirrors only!)
@@ -58,8 +58,10 @@ Storage
 -------
 
 All data is stored as records.
-A record is a pointer to data with a hash and optional compression.
-Records have a maximum size specified by the header.
+A record is a unit of packed data.
+Packing involves compressing, encrypting, hashing and prefixing a header.
+
+Records have a maximum size. This size is specified in the filesystem header.
 
 If data does not fit in a single record a record tree is made.
 In a record tree, all but the last record have the maximum size.
@@ -70,14 +72,13 @@ firmware or any other source a hash is added to all records.
 Mirroring
 ~~~~~~~~~
 
-The filesystem can be mirrored to any number of disks.
+The filesystem can be mirrored to up to 4 chains of disks.
 This allows restoring corrupted data.
 
 Chaining
 ~~~~~~~~
 
-Multiple disks can be used for a single filesystem, increasing the capacity of
-that filesystem.
+Multiple disks can be chained, increasing the capacity of the filesystem.
 
 
 Data Structures
@@ -85,24 +86,22 @@ Data Structures
 
 All integers are in little-endian format.
 
-Header
-~~~~~~
+Filesystem info
+~~~~~~~~~~~~~~~
 
-A header is placed at the start and end of a volume.
+A block with a filesystem header & info is placed at the start and end of a volume.
 
-.. table:: FS Header
-  :align: center
-  :widths: grid
+.. table:: Filesystem header
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |             | Ciph | Ver. |   Magic string ("NRFS")   |
-  +------+-------------+------+--------------------+-------------+
-  |    8 |                    Key derivation       |             |
+  |    0 | KDF  | Ciph | BlkS | Ver. |       Magic string        |
+  +------+------+------+------+------+---------------------------+
+  |    8 |               Key derivation parameters               |
   +------+-----------------------------------------+-------------+
-  |   16 |                    Key derivation                     |
-  +------+-------------------------------------------------------+
+  |   16 |                                         |  Key hash   |
+  +------+-----------------------------------------+-------------+
   |   24 |                         Nonce                         |
   +------+-------------------------------------------------------+
   |   32 |                                                       |
@@ -113,59 +112,18 @@ A header is placed at the start and end of a volume.
   +------+                         Hash                          |
   |   56 |                                                       |
   +------+-------------------------------------------------------+
-  |   64 |                     Configuration                     |
-  +------+-------------------------------------------------------+
-  |   72 |                   Total block count                   |
-  +------+-------------------------------------------------------+
-  |   80 |                      LBA offset                       |
-  +------+-------------------------------------------------------+
-  |   88 |                      Block count                      |
-  +------+-------------------------------------------------------+
-  |   96 |                                                       |
-  +------+                                                       |
-  |  104 |                                                       |
-  +------+                          Key                          |
-  |  112 |                                                       |
-  +------+                                                       |
-  |  120 |                                                       |
-  +------+-------------------------------------------------------+
-  |  128 |                                                       |
-  +------+                                                       |
-  |  136 |                                                       |
-  +------+                   Object list root                    |
-  |  144 |                                                       |
-  +------+                                                       |
-  |  156 |                                                       |
-  +------+-------------------------------------------------------+
-  |  164 |                                                       |
-  +------+                                                       |
-  |  172 |                                                       |
-  +------+                  Object bitmap root                   |
-  |  180 |                                                       |
-  +------+                                                       |
-  |  188 |                                                       |
-  +------+-------------------------------------------------------+
-  |  196 |                                                       |
-  +------+                                                       |
-  |  204 |                                                       |
-  +------+                  Allocation log head                  |
-  |  212 |                                                       |
-  +------+                                                       |
-  |  220 |                                                       |
-  +------+-------------------------------------------------------+
-  |  228 |                                                       |
-  +------+                       Reserved                        |
-  |  ... |                                                       |
-  +------+-------------------------------------------------------+
-  |  256 |                                                       |
-  +------+              Free for use by filesystem               |
-  |  ... |                                                       |
-  +------+-------------------------------------------------------+
 
-* Magic string: Must always be "NRFS"
+* Magic string: Defined by the upper layer.
+  See the filesystem document for the value.
 
 * Ver.: The version of the data storage format.
-  Must have the value 0 as of writing.
+  Must have the value 1 as of writing.
+
+* BlkS: The size of a single block.
+  This affects the size of a header.
+  Only the lower 4 bits are used. The upper 4 bits are reserved.
+
+  The size is encoded as `2^(x + 9)`.
 
 * Ciph: Cipher algorithm to use to decrypt the header and records.
 
@@ -181,19 +139,28 @@ A header is placed at the start and end of a volume.
   |  1 | Poly1305 | ChaCha8    |
   +----+----------+------------+
 
-* Key derivation: The key derivation function to use to get the key necessary
+* KDF: The key derivation function to use to get the key necessary
   to decrypt the header.
 
-  Assuming the byte range is between 1 and 15, then byte 1 is the ID.
+.. table:: Key derivation functions
+
+  +----+-----------+
+  | ID | Algorithm |
+  +====+===========+
+  |  0 | None      |
+  +----+-----------+
+  |  1 | Argon2id  |
+  +----+-----------+
+
+* Key derivation function parameters: Parameters to use for the KDF.
+  Contents depend on the selected KDF.
 
     .. table:: None
 
       +------+------+------+------+------+------+------+------+------+
       | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
       +======+======+======+======+======+======+======+======+======+
-      |    8 |                                  |  ID  |     ...     |
-      +------+----------------------------------+------+-------------+
-      |   16 |                                                       |
+      |    8 |                                                       |
       +------+-------------------------------------------------------+
 
     * ID: is 0
@@ -203,17 +170,21 @@ A header is placed at the start and end of a volume.
       +------+------+------+------+------+------+------+------+------+
       | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
       +======+======+======+======+======+======+======+======+======+
-      |    8 |             M             |  P   |  ID  |     ...     |
-      +------+---------------------------+------+------+-------------+
-      |   16 |                           |             T             |
-      +------+---------------------------+---------------------------+
+      |    8 |             M             |  P   |          T         |
+      +------+---------------------------+------+--------------------+
 
-    * ID: is 1
-    * P: Parallelism
-    * M: Memory
     * T: Iterations
+    * M: Memory
+    * P: Parallelism
 
     UID is used as the salt.
+
+* Key hash: Hash of the key
+  The hash is derived with Poly1305.
+
+  * The message is 16 bytes of zeros.
+  * The key is the derived key.
+  * The hash is the 64 lower bits of the output.
 
 * UID: Unique filesystem identifier.
 
@@ -237,54 +208,85 @@ A header is placed at the start and end of a volume.
   The hash is calculated from encrypted data from byte 64 to the end of the
   header.
 
-* Configuration: configuration values for the filesystem.
-
-  * Mirr. count: The amount of mirror volumes.
-    Useful to determine how many mirrors should be waited for before allowing
-    writes.
-
-  * Mirr. index: The index of this chain in the mirror list.
-    It simplifies loading code & prevents devices from being shuffled between
-    chains on each mount.
-
-  * Block size: The length of a single block in bytes.
-    Affects LBA addressing.
-
-    The block size is calculated as `2^(x + 9)`.
-
-  * Maximum record size: The maximum length of a record in bytes.
-
-    The maximum record size is calculated as `2^(x + 9)`.
-
-  * Object list depth: The depth of the object list tree.
-
-  * Compression level: The compression level.
-    The exact meaning depends on the compression algorithm, but usually
-    higher means better but slower compression.
-
-  * Compression algorithm: The default compression algorithm to use.
-
-.. table:: Configuration
+.. table:: Filesystem info
 
   +------+------+------+------+------+------+------+------+------+
-  | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 | Mirr. index | Mirr. count |                           |
-  +------+-------------+-------------+---------------------------+
-  |    8 |    Maximum record size    |        Block size         |
-  +------+---------------------------+---------------------------+
-  |   16 |     Compression level     |     Object list depth     |
-  +------+---------------------------+---------------------------+
-  |   24 |                 Compression algorithm                 |
+  |   64 |                     Configuration                     |
   +------+-------------------------------------------------------+
-  |   32 |                                                       |
-  +------+                                                       |
-  |   40 |                                                       |
-  +------+                                                       |
-  |   48 |                                                       |
-  +------+                                                       |
-  |   56 |                                                       |
+  |   72 |                   Total block count                   |
   +------+-------------------------------------------------------+
+  |   80 |                      LBA offset                       |
+  +------+-------------------------------------------------------+
+  |   88 |                      Block count                      |
+  +------+-------------------------------------------------------+
+  |   96 |                                                       |
+  +------+                                                       |
+  |  104 |                                                       |
+  +------+                          Key                          |
+  |  112 |                                                       |
+  +------+                                                       |
+  |  120 |                                                       |
+  +------+-------------------------------------------------------+
+  |  128 |                   Object list root                    |
+  +------+-------------------------------------------------------+
+  |  136 |                  Object bitmap root                   |
+  +------+-------------------------------------------------------+
+  |  144 |                  Allocation log head                  |
+  +------+-------------------------------------------------------+
+  |  156 |                                                       |
+  +------+                       Reserved                        |
+  |  ... |                                                       |
+  +------+-------------------------------------------------------+
+  |  256 |                                                       |
+  +------+              Free for use by filesystem               |
+  |  ... |                                                       |
+  +------+-------------------------------------------------------+
+
+* Configuration: configuration values for the filesystem.
+
+  .. table:: Configuration
+
+    +------+------+------+------+------+------+------+------+------+
+    | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+    +======+======+======+======+======+======+======+======+======+
+    |    0 |    Maximum record size    | Mirr. index | Mirr. count |
+    +------+---------------------------+-------------+-------------+
+    |    8 |     Compression level     |             | ObjLst Dpth |
+    +------+---------------------------+-------------+-------------+
+    |   16 |                 Compression algorithm                 |
+    +------+-------------------------------------------------------+
+    |   24 |                                                       |
+    +------+                                                       |
+    |   32 |                                                       |
+    +------+                                                       |
+    |   40 |                                                       |
+    +------+                                                       |
+    |   48 |                                                       |
+    +------+                                                       |
+    |   56 |                                                       |
+    +------+-------------------------------------------------------+
+
+    * Mirr. count: The amount of mirror volumes.
+      Useful to determine how many mirrors should be waited for before allowing
+      writes.
+
+    * Mirr. index: The index of this chain in the mirror list.
+      It simplifies loading code & prevents devices from being shuffled between
+      chains on each mount.
+
+    * Maximum record size: The maximum length of a record in bytes.
+
+      The maximum record size is calculated as `2^(x + 9)`.
+
+    * ObjLst Dpth: The depth of the object list tree.
+
+    * Compression level: The compression level.
+      The exact meaning depends on the compression algorithm, but usually
+      higher means better but slower compression.
+
+    * Compression algorithm: The default compression algorithm to use.
 
 .. table:: Compression algorithms
 
@@ -315,20 +317,8 @@ A header is placed at the start and end of a volume.
 * Object list root: Record tree containing a list of objects.
   The length of the tree depends on ObjD.
 
-* Object bitmap root: Record tree indicating status of each object [#]_.
-  Two bits are allocated per object.
-
-  * Used: whether the object is allocated.
-
-  * Zero: whether the object is entirely zeroed or not.
-
-.. table:: Object bitmap field
-
-  +------+------+------+
-  | Bit  |    1 |    0 |
-  +======+======+======+
-  |    0 | Zero | Used |
-  +------+------+------+
+* Object bitmap root: Record tree indicating whether an object is allocated.
+  One bit is used per object.
 
 .. [#] The bitmap allows much faster initialization of the object ID allocator.
 
@@ -347,61 +337,67 @@ A header is placed at the start and end of a volume.
 Record
 ~~~~~~
 
-A record represents a single unit of data.
+A record is a single unit of data.
+It consists of a header which is immediately followed by data.
 
-.. table:: Record
+.. table:: Record header
   :align: center
   :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                          LBA                          |
-  +------+-------------------------------------------------------+
+  |    0 | CAlg |                    |           Length          |
+  +------+------+--------------------+---------------------------+
   |    8 |                         Nonce                         |
-  +------+---------------------------+------+--------------------+
-  |   16 |        Hash (0-3)         | CAlg |    Data length     |
-  +------+---------------------------+------+--------------------+
-  |   24 |                      Hash (4-11)                      |
+  +------+-------------------------------------------------------+
+  |   16 |                                                       |
+  +------+                         Hash                          |
+  |   24 |                                                       |
   +------+-------------------------------------------------------+
 
-* LBA: The starting address of the data.
+* Length: Length of the data in bytes.
+
+* CAlg: The compression algorithm used on the data.
 
 * Nonce: Random integer used for encryption [#]_.
 
 .. [#] A nonce can be derived by incrementing the nonce value in the header and
    using that value.
 
-* Data length: The length of the *compressed* data.
-
-* CAlg: The compression algorithm used on the data.
-
 * Hash: The hash to verify the integrity of the *encrypted* data.
-  If the data length is 0, the hash *must* have a value of 0 [#]_.
-  If the hash is larger than 96 bits, it is truncated.
 
-.. [#] Zeroing the hash is necessary to have effective zero-optimization.
-
-When packign data for storage, the following operations must be performed in
+When packing data for storage, the following operations must be performed in
 order:
 
 1. Compression
 
 2. Encryption
 
-   When encrypting every block must be encrypted *in its entirety*.
-   This is to reduce/eliminate compression oracles.
+   If an encryption algorithm is used, any slack space *must* be filled with
+   random data to reduce or eliminate compression oracles.
 
 3. Hashing
 
-   Like encryption, every block must be included in its entirety
-   *except* when using XXH3, as it is not meant for cryptographic purposes.
+The header itself is *excluded* from packing.
 
-   In the case of XXH3, the data length is rounded up to the nearest multiple
-   of 64 bytes [#]_.
 
-   .. [#] This should allow the compiler to elide the code path to handle
-   the trailing, sub-64-byte block.
+Record reference
+~~~~~~~~~~~~~~~~
+
+A record reference is a 64-bit value with a LBA and a block count.
+
+.. table:: Record reference
+  
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |   Blocks    |                   LBA                   |
+  +------+-------------+-----------------------------------------+
+
+* Blocks: the length of the record in blocks, including the header.
+
+* LBA: the starting block address of the record.
 
 
 Record tree
@@ -420,6 +416,9 @@ The "missing" data is all zeroes [#]_.
 Object
 ~~~~~~
 
+An object represents a collection of data.
+It consists of multiple record trees.
+
 .. table:: Object
   :align: center
   :widths: grid
@@ -427,35 +426,17 @@ Object
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                                                       |
-  +------+                                                       |
-  |    8 |                                                       |
-  +------+                      Root record                      |
-  |   16 |                                                       |
-  +------+                                                       |
-  |   24 |                                                       |
+  |    0 |                         Root 0                        |
   +------+-------------------------------------------------------+
-  |   32 |                     Total length                      |
+  |    8 |                         Root 1                        |
   +------+-------------------------------------------------------+
-  |   40 |                      Block count                      |
+  |   16 |                         Root 2                        |
   +------+-------------------------------------------------------+
-  |   48 |                    Reference count                    |
-  +------+-------------------------------------------------------+
-  |   56 |                                                       |
+  |   24 |                         Root 3                        |
   +------+-------------------------------------------------------+
 
-* Root record: record pointing to the top of the record tree.
-
-* Total length: The total length of all data.
-  The depth of the tree is derived from this total length.
-
-* Block count: The total amount of blocks used by this object.
-
-* Reference count: The amount of references to this object.
-  If zero, the object is not referenced by anything [#]_.
-
-.. [#] If an object with no references but with a non-zero record is
-   found, it may safely be cleared.
+* Root 0 to 3: Record tree roots.
+  The number indicates the depth of the record tree.
 
 
 Object list
@@ -486,8 +467,8 @@ The allocation log keeps track of allocations and deallocations [#]_.
    The log can be rewritten at any points to compactify it.
 
 The log is kept track of as a linked list [#]_,
-where the first 32 bytes are a record pointing to the next node and all
-bytes after it are log entries.
+where the first 8 bytes are a record reference pointing to the next node
+and all bytes after it are log entries.
 The bottom of the stack denotes the start of the log.
 
 .. [#] A linked stack has the following useful properties:

@@ -1,8 +1,7 @@
 mod entry;
-mod object;
 
 use {
-	super::{Cache, Key},
+	super::Cache,
 	crate::{Background, Dev, Resource},
 };
 
@@ -21,11 +20,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				Ok(k) => k,
 				Err(t) => break Err(t),
 			};
-			let task = if key.test_flag(Key::FLAG_OBJECT) {
-				self.evict_object(key.id())
-			} else {
-				self.evict_entry(key)
-			};
+			let task = self.evict_entry(key);
 			if let Some(task) = task {
 				// Push to background to process in parallel
 				bg.add(task);

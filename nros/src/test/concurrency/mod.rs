@@ -116,7 +116,6 @@ fn read() {
 	run(&s, async {
 		let obj = s.create().await.unwrap();
 		// Write to at least 8 different leaves to ensure we exceed cache limits
-		obj.resize(1024 * 8).await.unwrap();
 		for i in 0..8 {
 			obj.write(i * 1024 + 1023, &[1]).await.unwrap();
 		}
@@ -148,7 +147,6 @@ fn write() {
 		let obj = s.create().await.unwrap();
 		// Write concurrently.
 		// Write to at least 8 different leaves to ensure we exceed cache limits
-		obj.resize(1024 * 8).await.unwrap();
 		(0..8)
 			.map(|i| obj.write(1024 * i + 1023, &[1]))
 			.collect::<FuturesUnordered<_>>()

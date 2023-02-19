@@ -1,10 +1,13 @@
 use {
 	super::{Allocator, Buf, Dev},
 	crate::{
-		cipher::{Cipher, HeaderCipher},
-		header::{Configuration, Header, MirrorCount, MirrorIndex},
+		data::{
+			cipher::Cipher,
+			fs_info::{Configuration, FsHeader, FsInfo, MirrorCount, MirrorIndex},
+			record::{Depth, RecordRef},
+		},
 		key_derivation, BlockSize, CipherType, Compression, Error, KeyDerivation, KeyDeriver,
-		KeyPassword, LoadConfig, MaxRecordSize, NewConfig, Record, Resource,
+		KeyPassword, LoadConfig, MaxRecordSize, NewConfig, Resource,
 	},
 	alloc::sync::Arc,
 	core::{cell::Cell, fmt, future, mem},
@@ -39,11 +42,11 @@ pub(crate) struct DevSet<D: Dev, R: Resource> {
 	/// The unique identifier of this filesystem.
 	uid: [u8; 16],
 
-	pub allocation_log_head: Cell<Record>,
+	pub allocation_log_head: Cell<RecordRef>,
 
-	pub object_list_root: Cell<Record>,
-	pub object_bitmap_root: Cell<Record>,
-	pub object_list_depth: Cell<u8>,
+	pub object_list_root: Cell<RecordRef>,
+	pub object_bitmap_root: Cell<RecordRef>,
+	pub object_list_depth: Cell<Depth>,
 
 	/// Resources for allocation & parallel processing.
 	pub resource: Arc<R>,
@@ -54,6 +57,7 @@ pub(crate) struct DevSet<D: Dev, R: Resource> {
 	/// Key to encrypt the header with.
 	header_key: Cell<[u8; 32]>,
 	key_derivation: Cell<KeyDerivation>,
+	key_hash: [u8; 2],
 
 	cipher: CipherType,
 	nonce: Cell<u64>,
@@ -150,6 +154,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			}
 		};
 
+		let key_hash = FsHeader::hash_key(&header_key);
+
 		Ok(Self {
 			devices,
 			block_size: config.block_size,
@@ -164,12 +170,13 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 			object_list_root: Default::default(),
 			object_bitmap_root: Default::default(),
-			object_list_depth: Default::default(),
+			object_list_depth: Depth::D0.into(),
 
 			cipher: config.cipher,
 
 			header_key: header_key.into(),
 			key_derivation: key_derivation.into(),
+			key_hash,
 
 			key,
 			nonce: Default::default(),
@@ -205,31 +212,34 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.map(|buf| {
 				// Try to decrypt header
 				let Ok(mut buf) = buf else { return None };
-				let cipher = Header::get_cipher(buf.get()).ok()?;
-				let kdf = Header::get_key_derivation(buf.get()).ok()?;
-				let header_key = header_key.get_or_insert_with(|| match (kdf, cipher) {
-					(_, CipherType::NoneXxh3) => [0; 32],
-					(KeyDerivation::None, _) => match (config.retrieve_key)(false).unwrap() {
-						KeyPassword::Key(k) => k,
-						KeyPassword::Password(_) => panic!("expected key"),
-					},
-					(KeyDerivation::Argon2id { p, t, m }, _) => {
-						match (config.retrieve_key)(true).unwrap() {
+
+				let (hdr, info) = buf.get_mut().split_at_mut(64);
+				let header = FsHeader::from_raw((&*hdr).try_into().unwrap());
+
+				let key = match header_key.as_ref() {
+					Some(h) => *h,
+					None if matches!(header.cipher(), Ok(CipherType::NoneXxh3)) => [0; 32],
+					None => match header.key_derivation().unwrap() {
+						KeyDerivation::None => match (config.retrieve_key)(false).unwrap() {
 							KeyPassword::Key(k) => k,
-							KeyPassword::Password(pwd) => {
-								key_derivation::argon2id(&pwd, &Header::get_uid(buf.get()), m, t, p)
+							KeyPassword::Password(_) => panic!("expected key"),
+						},
+						KeyDerivation::Argon2id { p, t, m } => {
+							match (config.retrieve_key)(true).unwrap() {
+								KeyPassword::Key(k) => k,
+								KeyPassword::Password(pwd) => loop {
+									let key = key_derivation::argon2id(&pwd, &header.uid, m, t, p);
+									if header.verify_key(&key) {
+										break key;
+									}
+								},
 							}
 						}
-					}
-				});
-				let cipher = HeaderCipher {
-					cipher: Cipher {
-						key: *header_key,
-						nonce: Header::get_nonce(buf.get()),
-						ty: Header::get_cipher(buf.get()).ok()?,
 					},
 				};
-				Header::decrypt(buf.get_mut(), cipher).ok()?;
+				assert!(header.verify_key(&key), "key doesn't match");
+				header_key = Some(key);
+				header.decrypt(&key, info).ok()?;
 				Some(buf)
 			})
 			.collect::<Vec<_>>()
@@ -246,26 +256,27 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			let [buf_a, buf_b] = bufs else { unreachable!() };
 			let buf = buf_a.as_ref().or(buf_b.as_ref()).expect("no valid header");
 
-			let mut hdr = Header::default();
-			hdr.as_mut()
-				.copy_from_slice(&buf.get()[..mem::size_of::<Header>()]);
+			let (hdr, info) = buf.get().split_at(64);
+
+			let hdr = FsHeader::from_raw(hdr.try_into().unwrap());
+			let (info, _) = FsInfo::from_raw_slice(info).unwrap();
 
 			// Add to mirror.
 			mirrors
-				.get_mut(usize::from(hdr.configuration.mirror_index().to_raw()))
+				.get_mut(usize::from(info.configuration.mirror_index().to_raw()))
 				.expect("todo: invalid mirror index")
-				.push((i, u64::from(hdr.lba_offset), u64::from(hdr.block_count)));
+				.push((i, u64::from(info.lba_offset), u64::from(info.block_count)));
 
-			header.get_or_insert(hdr);
+			header.get_or_insert((hdr, info));
 		}
-		let header = header.expect("no header");
+		let (header, info) = header.expect("no header");
 		let header_key = header_key.expect("no header key");
 
 		drop(headers);
 
-		assert_eq!(header.version, Header::VERSION, "header version mismatch");
+		assert_eq!(header.version, FsHeader::VERSION, "header version mismatch");
 
-		let mirc = header.configuration.mirror_count().to_raw();
+		let mirc = info.configuration.mirror_count().to_raw();
 		let rem_empty = mirrors.drain(usize::from(mirc)..).all(|c| c.is_empty());
 		assert!(rem_empty);
 
@@ -279,7 +290,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 				assert_eq!(lba_offset, next_lba, "gap in chain");
 				next_lba += block_count;
 			}
-			assert_eq!(next_lba, header.total_block_count, "gap in chain");
+			assert_eq!(next_lba, info.total_block_count, "gap in chain");
 		}
 
 		// TODO avoid conversion to Vec<Option<_>>
@@ -304,25 +315,28 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			})
 			.collect();
 
-		let hc = &header.configuration;
+		let hc = &info.configuration;
 
 		let s = Self {
 			devices,
 
-			block_size: hc.block_size(),
+			block_size: header.block_size(),
 			max_record_size: hc.max_record_size(),
 			compression: hc.compression_algorithm().unwrap(),
 			uid: header.uid,
-			block_count: header.total_block_count.into(),
+			block_count: info.total_block_count.into(),
 
-			object_list_root: header.object_list_root.into(),
-			object_bitmap_root: header.object_bitmap_root.into(),
-			allocation_log_head: header.allocation_log_head.into(),
+			object_list_root: info.object_list_root.into(),
+			object_bitmap_root: info.object_bitmap_root.into(),
+			allocation_log_head: info.allocation_log_head.into(),
 
 			cipher: header.cipher().unwrap(),
 			header_key: header_key.into(),
-			key: header.key,
+			key_hash: FsHeader::hash_key(&header_key),
+
+			key: info.key,
 			key_derivation: header.key_derivation().unwrap().into(),
+
 			object_list_depth: hc.object_list_depth().into(),
 
 			magic: header.magic,
@@ -571,24 +585,17 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.and_then(MirrorCount::from_raw)
 			.expect("too many mirrors");
 
+		let (header_raw, info_raw) = buf.get_mut().split_at_mut(64);
+
 		let mut conf = Configuration::default();
 		conf.set_mirror_count(mirc);
 		conf.set_mirror_index(chain);
-		conf.set_block_size(self.block_size());
 		conf.set_max_record_size(self.max_record_size());
 		conf.set_object_list_depth(self.object_list_depth.get());
 		conf.set_compression_level(0);
 		conf.set_compression_algorithm(self.compression());
-		let mut header = Header {
-			magic: self.magic,
-			version: Header::VERSION,
-			cipher: self.cipher.to_raw(),
-			_reserved: [0; 4],
-			key_derivation: self.key_derivation.get().to_raw(),
-			uid: self.uid,
-			nonce: self.nonce.get().into(),
-			hash: [0; 16],
 
+		let info = FsInfo {
 			configuration: conf,
 			lba_offset: node.block_offset.into(),
 			block_count: node.block_count.into(),
@@ -599,10 +606,26 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			object_bitmap_root: self.object_bitmap_root.get(),
 			allocation_log_head: self.allocation_log_head.get(),
 		};
+		info_raw[..mem::size_of::<FsInfo>()].copy_from_slice(info.as_ref());
 
-		let cipher = self.new_header_cipher();
-		let nonce = header.encrypt(buf.get_mut(), cipher);
-		self.nonce.set(nonce);
+		let (kdf, kdf_parameters) = self.key_derivation.get().to_raw();
+		let mut header = FsHeader {
+			magic: self.magic,
+			version: FsHeader::VERSION,
+			cipher: self.cipher.to_raw(),
+			block_size: self.block_size.to_raw(),
+			kdf,
+			kdf_parameters,
+			key_hash: self.key_hash,
+			_reserved: [0; 6],
+			uid: self.uid,
+			nonce: self.nonce.get().into(),
+			hash: [0; 16],
+		};
+		header.encrypt(&self.header_key(), info_raw);
+		header_raw.copy_from_slice(header.as_ref());
+
+		self.nonce.set(header.nonce.into());
 
 		Ok(buf)
 	}
@@ -651,25 +674,14 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		self.block_count
 	}
 
-	/// Construct a cipher.
-	///
-	/// If using [`CipherType::NoneXxh3`], the nonce will always be 0 to improve compression
-	/// efficiency.
-	pub fn new_cipher(&self) -> Cipher {
-		let nonce = match self.cipher {
-			CipherType::NoneXxh3 => 0,
-			_ => self.nonce.update(|x| x + 1),
-		};
-		Cipher { key: self.key, nonce, ty: self.cipher }
+	/// Get a cipher instance.
+	pub fn cipher(&self) -> Cipher {
+		Cipher { key: self.key, ty: self.cipher }
 	}
 
-	/// Construct a cipher.
-	///
-	/// # Warning
-	///
-	/// **Only use this cipher for decrypting data!**
-	pub fn cipher_with_nonce(&self, nonce: u64) -> Cipher {
-		Cipher { key: self.key, nonce, ty: self.cipher }
+	/// Generate a unique nonce.
+	pub fn gen_nonce(&self) -> u64 {
+		self.nonce.update(|x| x + 1)
 	}
 
 	/// Get the key used to encrypt the header.
@@ -690,17 +702,6 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		};
 		self.header_key.set(key);
 		self.key_derivation.set(kdf);
-	}
-
-	/// Construct a cipher for encrypting the header.
-	fn new_header_cipher(&self) -> HeaderCipher {
-		HeaderCipher {
-			cipher: Cipher {
-				key: self.header_key.get(),
-				nonce: self.nonce.update(|x| x + 1),
-				ty: self.cipher,
-			},
-		}
 	}
 }
 

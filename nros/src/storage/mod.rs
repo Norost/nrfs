@@ -3,7 +3,9 @@ pub mod dev;
 
 use {
 	crate::{
-		resource::Buf, BlockSize, Compression, Error, KeyDeriver, MaxRecordSize, Record, Resource,
+		data::record::{self, Depth, RecordRef},
+		resource::Buf,
+		BlockSize, Compression, Error, KeyDeriver, MaxRecordSize, Resource,
 	},
 	allocator::Allocator,
 	core::cell::{Cell, RefCell},
@@ -65,21 +67,18 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	}
 
 	/// Read a record.
-	pub async fn read(&self, record: &Record) -> Result<R::Buf, Error<D>> {
-		if record.length() == 0 {
+	pub async fn read(&self, record_ref: RecordRef) -> Result<R::Buf, Error<D>> {
+		if record_ref.blocks() == 0 {
 			return Ok(self.devices.resource.alloc());
 		}
 
-		let lba = u64::from(record.lba);
-		let len = record.length();
+		let lba = record_ref.lba();
+		let blocks = record_ref.blocks();
 
-		let blocks = self.block_size().min_blocks(len);
 		#[cfg(debug_assertions)]
-		self.allocator
-			.borrow()
-			.assert_alloc(lba, blocks.try_into().unwrap());
+		self.allocator.borrow().assert_alloc(lba, blocks.into());
 
-		let count = blocks << self.block_size().to_raw();
+		let count = usize::from(blocks) << self.block_size().to_raw();
 
 		// Attempt to read the record from any chain.
 		//
@@ -89,10 +88,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		let mut blacklist = Set256::default();
 		let mut last_err = None;
 		let (data, v) = loop {
-			let res = self
-				.devices
-				.read(lba.try_into().unwrap(), count, &blacklist)
-				.await;
+			let res = self.devices.read(lba, count, &blacklist).await;
 			let (mut data, chain) = match res {
 				Ok(Some(res)) => res,
 				Ok(None) => return Err(last_err.expect("no chains were tried")),
@@ -103,14 +99,13 @@ impl<D: Dev, R: Resource> Store<D, R> {
 				}
 			};
 
-			let cipher = self.devices.cipher_with_nonce(record.nonce());
+			let cipher = self.devices.cipher();
 			let max_rec_size = self.max_record_size();
 			let buf = self.resource().alloc();
-			let record = *record;
 			let entry_data = self
 				.resource()
 				.run(move || {
-					let buf = record.unpack::<R>(data.get_mut(), buf, max_rec_size, cipher);
+					let buf = record::unpack(data.get_mut(), buf, max_rec_size, cipher);
 					match buf {
 						Ok(buf) => Ok((buf, data)),
 						Err(e) => Err((e, data)),
@@ -133,7 +128,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		}
 
 		self.packed_bytes_read
-			.update(|x| x + record.length() as u64);
+			.update(|x| x + (u64::from(record_ref.blocks()) << self.block_size().to_raw()));
 		self.unpacked_bytes_read
 			.update(|x| x + u64::try_from(v.len()).unwrap());
 
@@ -141,11 +136,11 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	}
 
 	/// Write a record.
-	pub async fn write(&self, data: R::Buf) -> Result<(Record, R::Buf), Error<D>> {
+	pub async fn write(&self, data: R::Buf) -> Result<(RecordRef, R::Buf), Error<D>> {
 		// Calculate minimum size of buffer necessary for the compression algorithm
 		// to work.
 		let len = self.compression().max_output_size(data.len());
-		let max_blks = self.block_size().min_blocks(len as _);
+		let max_blks = self.block_size().min_blocks(32 + len);
 		let block_count = self.devices.block_count();
 
 		// Allocate and pack record.
@@ -159,38 +154,45 @@ impl<D: Dev, R: Resource> Store<D, R> {
 
 		if data_len == 0 {
 			// Return empty record.
-			return Ok((Record::default(), data));
+			return Ok((RecordRef::NONE, data));
 		}
 
-		let cipher = self.devices.new_cipher();
+		let cipher = self.devices.cipher();
+		let nonce = self.devices.gen_nonce();
 
-		let (mut rec, mut buf, data) = self
+		let (blks, mut buf, data) = self
 			.resource()
 			.run(move || {
-				let rec = Record::pack(data.get(), buf.get_mut(), compression, block_size, cipher);
-				(rec, buf, data)
+				let len = record::pack(
+					data.get(),
+					buf.get_mut(),
+					compression,
+					block_size,
+					cipher,
+					nonce,
+				);
+				(len, buf, data)
 			})
 			.await;
 
 		// Strip unused blocks from the buffer
-		let blks = self.block_size().min_blocks(rec.length());
-		buf.shrink(blks << self.block_size().to_raw());
+		buf.shrink(usize::from(blks) << self.block_size().to_raw());
 
 		// Allocate storage space.
 		let lba = self
 			.allocator
 			.borrow_mut()
-			.alloc(blks as _, block_count)
+			.alloc(blks.into(), block_count)
 			.ok_or(Error::NotEnoughSpace)?;
 
 		// Write buffer.
-		rec.lba = lba.into();
+		let rec = RecordRef::new(lba, blks);
 		self.devices
 			.write(lba.try_into().unwrap(), buf, Set256::set_all())
 			.await?;
 
 		self.packed_bytes_written
-			.update(|x| x + rec.length() as u64);
+			.update(|x| x + (u64::from(rec.blocks()) << self.block_size().to_raw()));
 		self.unpacked_bytes_written
 			.update(|x| x + u64::try_from(data_len).unwrap());
 
@@ -199,13 +201,11 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	}
 
 	/// Destroy a record.
-	pub fn destroy(&self, record: &Record) {
-		self.allocator.borrow_mut().free(
-			record.lba.into(),
-			self.block_size().min_blocks(record.length()) as _,
-		);
+	pub fn destroy(&self, record_ref: RecordRef) {
+		let blocks = u64::from(record_ref.blocks());
+		self.allocator.borrow_mut().free(record_ref.lba(), blocks);
 		self.packed_bytes_destroyed
-			.update(|x| x + record.length() as u64);
+			.update(|x| x + (blocks << self.block_size().to_raw()));
 	}
 
 	/// Finish the current transaction.
@@ -238,32 +238,32 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	}
 
 	/// Get the root record of the object list.
-	pub fn object_list_root(&self) -> Record {
+	pub fn object_list_root(&self) -> RecordRef {
 		self.devices.object_list_root.get()
 	}
 
 	/// Set the root record of the object list.
-	pub fn set_object_list_root(&self, root: Record) {
+	pub fn set_object_list_root(&self, root: RecordRef) {
 		self.devices.object_list_root.set(root)
 	}
 
 	/// Get the root record of the object bitmap.
-	pub fn object_bitmap_root(&self) -> Record {
+	pub fn object_bitmap_root(&self) -> RecordRef {
 		self.devices.object_bitmap_root.get()
 	}
 
 	/// Set the root record of the object bitmap.
-	pub fn set_object_bitmap_root(&self, root: Record) {
+	pub fn set_object_bitmap_root(&self, root: RecordRef) {
 		self.devices.object_bitmap_root.set(root)
 	}
 
 	/// Get the depth of the object list.
-	pub fn object_list_depth(&self) -> u8 {
+	pub fn object_list_depth(&self) -> Depth {
 		self.devices.object_list_depth.get()
 	}
 
 	/// Set the depth of the object list.
-	pub fn set_object_list_depth(&self, depth: u8) {
+	pub fn set_object_list_depth(&self, depth: Depth) {
 		self.devices.object_list_depth.set(depth)
 	}
 

@@ -25,7 +25,6 @@ fn write_flush_read_offset_0() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1000).await.unwrap();
 		obj.write(0, b"Hello, world!").await.unwrap();
 
 		let id = obj.id();
@@ -45,7 +44,6 @@ fn write_flush_read_offset_1000() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(2000).await.unwrap();
 		obj.write(1000, b"Hello, world!").await.unwrap();
 
 		let id = obj.id();
@@ -65,13 +63,11 @@ fn write_flush_read_offset_1024() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(2000).await.unwrap();
 		obj.write(1024, b"Hello, world!").await.unwrap();
 
 		let id = obj.id();
 		clear(&s).await;
 		let obj = s.get(id).await.unwrap();
-		assert_eq!(obj.len().await.unwrap(), 2000);
 
 		let mut buf = [0; b"Hello, world!".len()];
 		let l = obj.read(1024, &mut buf).await.unwrap();
@@ -89,7 +85,6 @@ fn write_flush_read_offset_1023() {
 		s.store.verify_cache_usage();
 
 		let obj = s.create().await.unwrap();
-		obj.resize(2000).await.unwrap();
 		s.store.verify_cache_usage();
 		obj.write(1023, b"Hello, world!").await.unwrap();
 		s.store.verify_cache_usage();
@@ -111,8 +106,6 @@ fn write_flush_read_offset_10p6() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-
-		obj.resize(2_000_000).await.unwrap();
 
 		let l = obj.write(1_000_000, &[1; 1000]).await.unwrap();
 		assert_eq!(l, 1000);
@@ -139,7 +132,6 @@ fn write_read_2p13() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1 << 13).await.unwrap();
 		obj.write(0, &[1; 1 << 13]).await.unwrap();
 		let mut buf = [0; 1 << 13];
 		obj.read(0, &mut buf).await.unwrap();
@@ -154,17 +146,14 @@ fn write_tx_read_many() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj_1 = s.create().await.unwrap();
-		obj_1.resize(2000).await.unwrap();
 		obj_1.write(1000, &[1; 1000]).await.unwrap();
 		s.finish_transaction().await.unwrap();
 
 		let obj_2 = s.create().await.unwrap();
-		obj_2.resize(64).await.unwrap();
 		obj_2.write(42, &[2; 2]).await.unwrap();
 		s.finish_transaction().await.unwrap();
 
 		let obj_3 = s.create().await.unwrap();
-		obj_3.resize(1).await.unwrap();
 		obj_3.write(0, &[3]).await.unwrap();
 		s.finish_transaction().await.unwrap();
 
@@ -194,7 +183,6 @@ fn write_many_depth_eq1() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1).await.unwrap();
 		for _ in 0..1000 {
 			obj.write(0, &[1]).await.unwrap();
 			clear(&s).await;
@@ -212,186 +200,8 @@ fn write_many_depth_gt1() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1 << 14).await.unwrap();
 		for _ in 0..1000 {
 			obj.write(0, &[1]).await.unwrap();
-			clear(&s).await;
-		}
-
-		Ok(())
-	});
-}
-
-#[test]
-fn shrink_written_object_0() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-		obj.resize(1 << 20).await.unwrap();
-		obj.write((1 << 20) - 1, &[1]).await.unwrap();
-		clear(&s).await;
-		obj.resize(0).await.unwrap();
-
-		Ok(())
-	});
-}
-
-#[test]
-fn shrink_written_object_1() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-
-		obj.resize(1 << 20).await.unwrap();
-		obj.write((1 << 18) - 5, &[2]).await.unwrap();
-
-		clear(&s).await;
-
-		obj.resize((1 << 18) - 4).await.unwrap();
-
-		let mut b = [0];
-		let l = obj.read((1 << 18) - 5, &mut b).await.unwrap();
-		assert_eq!(l, 1);
-		assert_eq!(b, [2]);
-
-		Ok(())
-	});
-}
-
-#[test]
-fn shrink_written_object_2() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-		obj.resize(1 << 20).await.unwrap();
-		obj.write((1 << 20) - 1, &[1]).await.unwrap();
-		obj.write((1 << 18) - 5, &[2]).await.unwrap();
-		clear(&s).await;
-		obj.resize((1 << 18) - 4).await.unwrap();
-		let mut b = [0];
-		let l = obj.read((1 << 18) - 5, &mut b).await.unwrap();
-		assert_eq!(l, 1);
-		assert_eq!(b, [2]);
-
-		Ok(())
-	});
-}
-
-#[test]
-fn shrink_written_object_3() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-		obj.resize(1 << 20).await.unwrap();
-		obj.write((1 << 20) - 1, &[1]).await.unwrap();
-		obj.write((1 << 18) - 5, &[2]).await.unwrap();
-		clear(&s).await;
-		obj.resize((1 << 18) - 6).await.unwrap();
-		let mut b = [5];
-		let l = obj.read((1 << 18) - 5, &mut b).await.unwrap();
-		// We shouldn't have read anything
-		assert_eq!(l, 0);
-		assert_eq!(b, [5]);
-
-		Ok(())
-	});
-}
-
-#[test]
-fn grow_grow() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-
-		obj.resize(1 << 15).await.unwrap();
-
-		obj.write((1 << 15) - (1 << 10), &[1]).await.unwrap();
-
-		obj.resize(1 << 25).await.unwrap();
-
-		obj.write((1 << 25) - (1 << 10) - 1, &[2, 2]).await.unwrap();
-
-		clear(&s).await;
-
-		let mut b = [0; 1];
-		obj.read((1 << 15) - (1 << 10), &mut b).await.unwrap();
-		assert_eq!(b, [1]);
-
-		let mut b = [0; 2];
-		obj.read((1 << 25) - (1 << 10) - 1, &mut b).await.unwrap();
-		assert_eq!(b, [2, 2]);
-
-		Ok(())
-	});
-}
-
-#[test]
-fn grow_write_shrink_flush_many() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-
-		for _ in 0..200 {
-			obj.resize(1 << 60).await.unwrap();
-			obj.write(0, &[1]).await.unwrap();
-			obj.resize(0).await.unwrap();
-			clear(&s).await;
-		}
-
-		Ok(())
-	});
-}
-
-/// Depth = 1
-#[test]
-fn grow_write_flush_shrink_flush_many_d1() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-
-		for _ in 0..200 {
-			obj.resize(1).await.unwrap();
-			obj.write(0, &[1]).await.unwrap();
-			clear(&s).await;
-			obj.resize(0).await.unwrap();
-			clear(&s).await;
-		}
-
-		Ok(())
-	});
-}
-
-/// Depth = 2
-#[test]
-fn grow_write_flush_shrink_flush_many_d2() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-
-		for _ in 0..200 {
-			obj.resize((1 << 10) + 1).await.unwrap();
-			obj.write(0, &[1]).await.unwrap();
-			clear(&s).await;
-			obj.resize(0).await.unwrap();
-			clear(&s).await;
-		}
-
-		Ok(())
-	});
-}
-
-/// Depth > 2
-#[test]
-fn grow_write_flush_shrink_flush_many_deep() {
-	let s = new_cap(MaxRecordSize::K1, 64, 4096);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-
-		for _ in 0..200 {
-			obj.resize(1 << 60).await.unwrap();
-			obj.write(0, &[1]).await.unwrap();
-			clear(&s).await;
-			obj.resize(0).await.unwrap();
 			clear(&s).await;
 		}
 
@@ -404,7 +214,6 @@ fn write_flush_many() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1).await.unwrap();
 
 		for _ in 0..200 {
 			obj.write(0, &[1]).await.unwrap();
@@ -421,7 +230,6 @@ fn write_zeros_all_small() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1024).await.unwrap();
 		obj.write(0, &[1; 1024]).await.unwrap();
 
 		obj.write_zeros(0, 1024).await.unwrap();
@@ -439,7 +247,6 @@ fn write_zeros_left_small() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1024).await.unwrap();
 		obj.write(0, &[1; 1024]).await.unwrap();
 
 		obj.write_zeros(0, 512).await.unwrap();
@@ -458,7 +265,6 @@ fn write_zeros_right_small() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1024).await.unwrap();
 		obj.write(0, &[1; 1024]).await.unwrap();
 
 		obj.write_zeros(512, 512).await.unwrap();
@@ -477,11 +283,10 @@ fn write_zeros_packed_large() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1 << 50).await.unwrap();
 		obj.write(0, &[1; 1 << 12]).await.unwrap();
 
 		obj.write_zeros(0, 1 << 50).await.unwrap();
-		let buf = &mut [1; 1 << 12];
+		let buf = &mut [2; 1 << 12];
 		obj.read(0, buf).await.unwrap();
 		assert_eq!(buf, &[0; 1 << 12]);
 
@@ -495,11 +300,9 @@ fn write_zeros_spread_large() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1 << 50).await.unwrap();
 		obj.write(1 << 10, &[1; 1 << 10]).await.unwrap();
 		obj.write(1 << 20, &[1; 1 << 10]).await.unwrap();
 		obj.write(1 << 30, &[1; 1 << 10]).await.unwrap();
-		obj.write(1 << 40, &[1; 1 << 10]).await.unwrap();
 
 		obj.write_zeros(0, 1 << 50).await.unwrap();
 
@@ -515,10 +318,6 @@ fn write_zeros_spread_large() {
 		obj.read(1 << 30, buf).await.unwrap();
 		assert_eq!(buf, &[0; 1 << 10]);
 
-		let buf = &mut [2; 1 << 10];
-		obj.read(1 << 40, buf).await.unwrap();
-		assert_eq!(buf, &[0; 1 << 10]);
-
 		Ok(())
 	});
 }
@@ -529,7 +328,6 @@ fn write_zeros_1() {
 	run(&s, async {
 		let obj = s.create().await.unwrap();
 
-		obj.resize(1 << 20).await.unwrap();
 		obj.write((1 << 18) - 5, &[2]).await.unwrap();
 
 		clear(&s).await;
@@ -550,30 +348,9 @@ fn write_zeros_1() {
 fn create_many() {
 	let s = new_cap(MaxRecordSize::K1, 1 << 16, 1 << 10);
 	run(&s, async {
-		for _ in 0..1024 * 4 + 1 {
+		for _ in 0..1024 * 8 + 1 {
 			s.create().await.unwrap();
 		}
-		Ok(())
-	});
-	block_on(s.unmount()).unwrap();
-}
-
-/// Ensure creating a large amount of objects at once with `create_many` works properly.
-#[test]
-fn create_many_batch() {
-	let s = new_cap(MaxRecordSize::K1, 1 << 16, 0);
-	run(&s, async {
-		s.create_many(1024 * 4 + 1).await.unwrap();
-		Ok(())
-	});
-}
-
-/// Ensure creating a large amount of objects at once with `create_many` works properly.
-#[test]
-fn create_many_batch_unmount() {
-	let s = new_cap(MaxRecordSize::K1, 1 << 16, 0);
-	run(&s, async {
-		s.create_many(1024 * 4 + 1).await.unwrap();
 		Ok(())
 	});
 	block_on(s.unmount()).unwrap();

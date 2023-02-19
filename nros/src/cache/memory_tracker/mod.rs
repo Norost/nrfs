@@ -2,11 +2,9 @@ mod lru;
 mod total_usage;
 
 use {
-	super::{Busy, Key, RefCount},
+	super::{entry::LruRef, IdKey},
 	crate::{waker_queue, Dev, MaxRecordSize, Resource, WakerQueue, WakerQueueTicket},
-	alloc::rc::Rc,
-	core::cell::RefCell,
-	std::task::Waker,
+	core::task::Waker,
 };
 
 pub use lru::Idx;
@@ -14,10 +12,7 @@ pub use lru::Idx;
 /// Estimated fixed cost for every cached entry.
 ///
 /// This is in addition to the amount of data stored by the entry.
-const ENTRY_COST: usize = 32;
-
-/// Estimated fixed cost for every cached object.
-const OBJECT_COST: usize = 128;
+pub(super) const ENTRY_COST: usize = 32;
 
 /// Memory usage tracking.
 #[derive(Debug)]
@@ -64,18 +59,15 @@ impl MemoryTracker {
 	///
 	/// This wakes all tasks waiting on the busy entry.
 	#[must_use]
-	fn finish_fetch(&mut self, busy: Rc<RefCell<Busy>>, size: usize) -> RefCount {
-		let mut b = busy.borrow_mut();
-		trace!("MemoryTracker::finish_fetch {:?} {}", &*b, size);
-		b.wake_all();
-		if b.refcount > 0 {
-			drop(b);
-			RefCount::Ref { busy }
+	fn soft_add(&mut self, key: IdKey, refcount: usize, size: usize) -> LruRef {
+		trace!("MemoryTracker::soft_add {:?} {}", refcount, size);
+		if refcount > 0 {
+			LruRef::Ref { refcount }
 		} else {
-			let lru_index = self.lru.add(b.key, size);
+			let lru_index = self.lru.add(key, size);
 			trace!(info "add {:?}", lru_index);
 			self.soft_wakers.wake_all();
-			RefCount::NoRef { lru_index }
+			LruRef::NoRef { lru_index }
 		}
 	}
 
@@ -83,10 +75,10 @@ impl MemoryTracker {
 	///
 	/// If the limit is exceeded, the calling task should yield as soon as possible
 	/// with [`Cache::memory_compensate_forced_grow`].
-	pub fn force_grow(&mut self, refcount: &RefCount, old_size: usize, new_size: usize) {
+	pub fn force_grow(&mut self, refcount: &LruRef, old_size: usize, new_size: usize) {
 		trace!("force_grow {} {}", old_size, new_size);
 		self.total.force_add(new_size - old_size);
-		if matches!(refcount, RefCount::NoRef { .. }) {
+		if matches!(refcount, LruRef::NoRef { .. }) {
 			self.lru.adjust(old_size, new_size);
 		}
 	}
@@ -94,27 +86,13 @@ impl MemoryTracker {
 	/// Decrease the memory usage of already present data.
 	///
 	/// This always succeeds immediately.
-	pub fn shrink(&mut self, refcount: &RefCount, old_size: usize, new_size: usize) {
+	pub fn shrink(&mut self, refcount: &LruRef, old_size: usize, new_size: usize) {
 		trace!("shrink {:?} {} -> {}", refcount, old_size, new_size);
 		debug_assert!(old_size >= new_size);
 		self.total.remove(old_size - new_size);
-		if matches!(refcount, RefCount::NoRef { .. }) {
+		if matches!(refcount, LruRef::NoRef { .. }) {
 			self.lru.adjust(old_size, new_size);
 			self.soft_wakers.wake_all();
-		}
-	}
-
-	/// Increase reference count to data by `count`.
-	fn incr_refcount(&mut self, refcount: &mut RefCount, size: usize, count: usize) {
-		trace!("incr_refcount {:?} {} +{}", refcount, size, count);
-		match refcount {
-			RefCount::Ref { busy } => busy.borrow_mut().refcount += count,
-			RefCount::NoRef { lru_index } => {
-				trace!(info "remove {:?}", lru_index);
-				let key = self.lru.remove(*lru_index, size);
-				let busy = Busy::with_refcount(key, count);
-				*refcount = RefCount::Ref { busy };
-			}
 		}
 	}
 
@@ -123,16 +101,14 @@ impl MemoryTracker {
 	/// # Panics
 	///
 	/// If there are no live references.
-	fn decr_refcount(&mut self, refcount: &mut RefCount, size: usize, count: usize) {
+	fn decr_refcount(&mut self, key: IdKey, refcount: &mut LruRef, size: usize, count: usize) {
 		trace!("decr_refcount {:?} {} -{}", refcount, size, count);
-		let RefCount::Ref { busy } = refcount else { panic!("no live references") };
-		let mut b = busy.borrow_mut();
-		b.refcount -= count;
-		if b.refcount == 0 {
-			let lru_index = self.lru.add(b.key, size);
+		let LruRef::Ref { refcount: c } = refcount else { panic!("no live references") };
+		*c -= count;
+		if *c == 0 {
+			let lru_index = self.lru.add(key, size);
 			trace!(info "add {:?}", lru_index);
-			drop(b);
-			*refcount = RefCount::NoRef { lru_index };
+			*refcount = LruRef::NoRef { lru_index };
 			self.soft_wakers.wake_all();
 		}
 	}
@@ -150,7 +126,7 @@ impl MemoryTracker {
 		&mut self,
 		max_record_size: MaxRecordSize,
 		waker: &Waker,
-	) -> Result<(Key, Idx), WakerQueueTicket<()>> {
+	) -> Result<(IdKey, Idx), WakerQueueTicket<()>> {
 		let mut do_evict = self.lru.has_excess();
 
 		// If there is not enough room to fetch even one entry, evict even if the LRU disagrees.
@@ -163,21 +139,15 @@ impl MemoryTracker {
 		}
 	}
 
-	/// Get a mutable reference to a key held by a node.
-	#[must_use]
-	pub fn get_key_mut(&mut self, handle: Idx) -> Option<&mut Key> {
-		self.lru.get_mut(handle)
-	}
-
 	/// Stop tracking *soft* usage of data.
 	#[must_use]
-	fn soft_remove(&mut self, refcount: &RefCount, size: usize) -> Rc<RefCell<Busy>> {
+	fn soft_remove(&mut self, refcount: &LruRef, size: usize) -> usize {
 		trace!("soft_remove {:?} {}", refcount, size);
 		match refcount {
-			RefCount::Ref { busy } => busy.clone(),
-			RefCount::NoRef { lru_index } => {
-				let key = self.lru.remove(*lru_index, size);
-				Busy::new(key)
+			&LruRef::Ref { refcount } => refcount,
+			&LruRef::NoRef { lru_index } => {
+				self.lru.remove(lru_index, size);
+				0
 			}
 		}
 	}
@@ -190,8 +160,8 @@ impl MemoryTracker {
 	}
 
 	/// Mark data as touched.
-	pub fn touch(&mut self, refcount: &RefCount) {
-		if let RefCount::NoRef { lru_index } = refcount {
+	pub fn touch(&mut self, refcount: &LruRef) {
+		if let LruRef::NoRef { lru_index } = refcount {
 			self.lru.touch(*lru_index);
 		}
 	}
@@ -212,54 +182,8 @@ impl MemoryTracker {
 	}
 }
 
-/// Object-specific impl
-impl MemoryTracker {
-	/// Mark fetch of object as finished.
-	///
-	/// This wakes all tasks waiting on the busy entry.
-	#[must_use]
-	pub fn finish_fetch_object(&mut self, busy: Rc<RefCell<Busy>>) -> RefCount {
-		self.finish_fetch(busy, OBJECT_COST)
-	}
-
-	/// Increase reference count to object by `count`.
-	pub(crate) fn incr_object_refcount(&mut self, refcount: &mut RefCount, count: usize) {
-		self.incr_refcount(refcount, OBJECT_COST, count)
-	}
-
-	/// Decrease reference count to object by `count`.
-	///
-	/// # Panics
-	///
-	/// If there are no live references.
-	pub(crate) fn decr_object_refcount(&mut self, refcount: &mut RefCount, count: usize) {
-		self.decr_refcount(refcount, OBJECT_COST, count)
-	}
-
-	/// Stop tracking *soft* usage of an object.
-	#[must_use]
-	pub(crate) fn soft_remove_object(&mut self, refcount: &RefCount) -> Rc<RefCell<Busy>> {
-		self.soft_remove(refcount, OBJECT_COST)
-	}
-
-	/// Stop tracking *hard* usage of an object.
-	///
-	/// Must be used in combination with [`Self::soft_remove_object`].
-	pub(crate) fn hard_remove_object(&mut self) {
-		self.hard_remove(OBJECT_COST)
-	}
-}
-
 /// Entry-specific impl
 impl MemoryTracker {
-	/// Mark fetch of entry as finished.
-	///
-	/// This wakes all tasks waiting on the busy entry.
-	#[must_use]
-	pub fn finish_fetch_entry(&mut self, busy: Rc<RefCell<Busy>>, length: usize) -> RefCount {
-		self.finish_fetch(busy, ENTRY_COST + length)
-	}
-
 	/// Increase reference count to entry by `count`.
 	///
 	/// # Panics
@@ -267,28 +191,12 @@ impl MemoryTracker {
 	/// If there are no live references.
 	pub(crate) fn decr_entry_refcount(
 		&mut self,
-		refcount: &mut RefCount,
+		key: IdKey,
+		refcount: &mut LruRef,
 		length: usize,
 		count: usize,
 	) {
-		self.decr_refcount(refcount, ENTRY_COST + length, count)
-	}
-
-	/// Stop tracking *soft* usage of an entry.
-	#[must_use]
-	pub(crate) fn soft_remove_entry(
-		&mut self,
-		refcount: &RefCount,
-		length: usize,
-	) -> Rc<RefCell<Busy>> {
-		self.soft_remove(refcount, ENTRY_COST + length)
-	}
-
-	/// Stop tracking *hard* usage of an entry.
-	///
-	/// Must be used in combination with [`Self::soft_remove_entry`].
-	pub(crate) fn hard_remove_entry(&mut self, length: usize) {
-		self.hard_remove(ENTRY_COST + length)
+		self.decr_refcount(key, refcount, ENTRY_COST + length, count)
 	}
 }
 
@@ -296,7 +204,7 @@ impl<D: Dev, R: Resource> super::Cache<D, R> {
 	/// Reserve the given amount of memory.
 	///
 	/// If it is not immediately available, this function will block.
-	async fn memory_reserve(&self, size: usize) {
+	pub(super) async fn memory_reserve(&self, size: usize) {
 		trace!("memory_reserve {}", size);
 		waker_queue::poll(move |cx| {
 			let mut data = self.data.borrow_mut();
@@ -315,18 +223,46 @@ impl<D: Dev, R: Resource> super::Cache<D, R> {
 		self.memory_reserve(ENTRY_COST + size).await
 	}
 
-	/// Reserve the given amount of memory for an object.
-	///
-	/// If it is not immediately available, this function will block.
-	pub(super) async fn memory_reserve_object(&self) {
-		self.memory_reserve(OBJECT_COST).await
-	}
-
 	/// Wait until the total memory usage drops below the limit.
 	///
 	/// If it is not immediately available, this function will block.
 	pub(super) async fn memory_compensate_forced_grow(&self) {
 		self.memory_reserve(0).await
+	}
+
+	#[must_use]
+	pub(super) fn memory_soft_add_entry(
+		&self,
+		key: IdKey,
+		refcount: usize,
+		length: usize,
+	) -> LruRef {
+		self.data
+			.borrow_mut()
+			.memory_tracker
+			.soft_add(key, refcount, ENTRY_COST + length)
+	}
+
+	#[must_use]
+	pub(super) fn memory_soft_remove_entry(&self, refcount: LruRef, length: usize) -> usize {
+		self.data
+			.borrow_mut()
+			.memory_tracker
+			.soft_remove(&refcount, ENTRY_COST + length)
+	}
+
+	pub(super) fn memory_hard_shrink(&self, amount: usize) {
+		self.data.borrow_mut().memory_tracker.total.remove(amount);
+	}
+
+	/// Stop tracking *hard* usage of an entry.
+	///
+	/// Must be used in combination with [`Self::soft_remove_entry`].
+	pub(super) fn memory_hard_remove_entry(&self, length: usize) {
+		self.data
+			.borrow_mut()
+			.memory_tracker
+			.hard_remove(ENTRY_COST + length)
 	}
 
 	/// Check if cache size matches real usage
@@ -335,27 +271,17 @@ impl<D: Dev, R: Resource> super::Cache<D, R> {
 		if !(cfg!(test) || cfg!(fuzzing)) {
 			return;
 		}
-		use super::{Buf, Present, Slot};
+		use super::{Buf, Entry};
 		let data = &mut *self.data.borrow_mut();
-		let real_usage = data.objects.values_mut().fold(0, |x, s| {
-			let mut y = 0;
-			if let Slot::Present(slot) = s {
-				if matches!(slot.refcount, RefCount::NoRef { .. }) {
-					y += OBJECT_COST;
-				}
-				y += slot
-					.data()
-					.iter()
-					.flat_map(|m| m.slots.values())
-					.flat_map(|s| match s {
-						Slot::Present(Present { data, refcount: RefCount::NoRef { .. } }) => {
-							Some(data)
-						}
-						_ => None,
-					})
-					.fold(0, |x, v| x + v.len() + ENTRY_COST);
-			}
-			x + y
+		let real_usage = data.objects.values_mut().fold(0, |x, obj| {
+			x + obj
+				.records
+				.values()
+				.flat_map(|s| match s {
+					Entry { data, lru_ref: LruRef::NoRef { .. } } => Some(data),
+					_ => None,
+				})
+				.fold(0, |x, v| x + v.len() + ENTRY_COST)
 		});
 		assert_eq!(
 			real_usage,

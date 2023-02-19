@@ -1,33 +1,45 @@
 use {
-	crate::{
-		BlockSize, CipherType, Compression, HeaderCipher, KeyDerivation, MaxRecordSize, Record,
+	super::{
+		cipher::{Cipher, DecryptError},
+		record::{Depth, RecordRef},
 	},
-	core::{fmt, mem},
+	crate::{BlockSize, CipherType, Compression, KeyDerivation, MaxRecordSize},
+	core::fmt,
 	endian::u64le,
 };
 
-#[derive(Default)]
 #[repr(C)]
-pub(crate) struct Header {
+pub(crate) struct FsHeader {
 	pub magic: [u8; 4],
 	pub version: u8,
+	pub block_size: u8,
 	pub cipher: u8,
-	pub _reserved: [u8; 4],
-	pub key_derivation: [u8; 14],
+	pub kdf: u8,
+	pub kdf_parameters: [u8; 8],
+	pub key_hash: [u8; 2],
+	pub _reserved: [u8; 6],
 	pub nonce: u64le,
 	pub uid: [u8; 16],
 	pub hash: [u8; 16],
+}
 
+raw!(FsHeader);
+
+#[repr(C)]
+pub(crate) struct FsInfo {
 	pub configuration: Configuration,
 	pub total_block_count: u64le,
 	pub lba_offset: u64le,
 	pub block_count: u64le,
+
 	pub key: [u8; 32],
 
-	pub object_list_root: Record,
-	pub object_bitmap_root: Record,
-	pub allocation_log_head: Record,
+	pub object_list_root: RecordRef,
+	pub object_bitmap_root: RecordRef,
+	pub allocation_log_head: RecordRef,
 }
+
+raw!(FsInfo);
 
 #[derive(Default)]
 #[repr(transparent)]
@@ -49,78 +61,67 @@ n2e! {
 	3 I3
 }
 
-raw!(Header);
-
-impl Header {
+impl FsHeader {
 	/// The version of the on-disk format.
-	pub const VERSION: u8 = 0;
+	pub const VERSION: u8 = 1;
 
 	pub fn cipher(&self) -> Result<CipherType, u8> {
 		CipherType::from_raw(self.cipher).ok_or(self.cipher)
 	}
 
-	pub fn get_cipher(data: &[u8]) -> Result<CipherType, u8> {
-		assert!(data.len() >= 512);
-		CipherType::from_raw(data[5]).ok_or(data[5])
+	pub fn block_size(&self) -> BlockSize {
+		BlockSize::from_raw(self.block_size & 0xf).expect("invalid block size")
 	}
 
 	pub fn key_derivation(&self) -> Result<KeyDerivation, u8> {
-		KeyDerivation::from_raw(&self.key_derivation).ok_or(self.key_derivation[0])
+		KeyDerivation::from_raw(self.kdf, &self.kdf_parameters).ok_or(self.kdf)
 	}
 
-	pub fn get_key_derivation(data: &[u8]) -> Result<KeyDerivation, u8> {
-		assert!(data.len() >= 512);
-		let kdf = data[10..24].try_into().unwrap();
-		KeyDerivation::from_raw(&kdf).ok_or(kdf[0])
+	/// Verify the key.
+	///
+	/// Returns `true` if the key *may* be able to decrypt the header.
+	pub fn verify_key(&self, key: &[u8; 32]) -> bool {
+		use poly1305::universal_hash::KeyInit;
+		let hasher = poly1305::Poly1305::new_from_slice(key).unwrap();
+		let hash = hasher.compute_unpadded(&[0; 16]);
+		let &[h0, h1, ..] = hash.as_slice() else { unreachable!() };
+		u16::from_ne_bytes([h0, h1]) == u16::from_ne_bytes(self.key_hash)
 	}
 
-	pub fn get_nonce(data: &[u8]) -> u64 {
-		assert!(data.len() >= 512);
-		u64::from_le_bytes(data[24..32].try_into().unwrap())
-	}
-
-	pub fn get_uid(data: &[u8]) -> [u8; 16] {
-		assert!(data.len() >= 512);
-		data[32..48].try_into().unwrap()
-	}
-
-	/// Attempt to decrypt the header data with the given key.
+	/// Encrypt filesystem info.
 	///
 	/// # Panics
 	///
-	/// If `header` length is smaller than 512.
-	pub fn decrypt(data: &mut [u8], cipher: HeaderCipher) -> Result<Self, ()> {
-		assert!(data.len() >= 512, "header too small");
-
-		let mut h = Self::default();
-		h.as_mut()[..64].copy_from_slice(&data[..64]);
-
-		cipher.decrypt(&h.hash, &mut data[64..])?;
-
-		h.as_mut()[64..].copy_from_slice(&data[64..mem::size_of::<Self>()]);
-
-		Ok(h)
+	/// If `data` is too small to represent a full header, i.e. it is smaller than 448 bytes.
+	pub fn encrypt(&mut self, key: &[u8; 32], data: &mut [u8]) {
+		assert!(data.len() >= 448, "data too small");
+		let cipher = Cipher { ty: self.cipher().unwrap(), key: *key };
+		self.hash = cipher.encrypt(self.nonce.into(), data);
+		self.nonce += 1;
 	}
 
-	/// Encrypt the header data with the given key.
-	///
-	/// Returns the new nonce.
+	/// Attempt to decrypt filesystem info.
 	///
 	/// # Panics
 	///
-	/// If `header` length is smaller than 512.
-	#[must_use = "nonce must be used"]
-	pub fn encrypt(&mut self, buf: &mut [u8], cipher: HeaderCipher) -> u64 {
-		assert!(buf.len() >= 512, "header too small");
+	/// If `data` is too small to represent a full header, i.e. it is smaller than 448 bytes.
+	pub fn decrypt<'d>(
+		&self,
+		key: &[u8; 32],
+		data: &'d mut [u8],
+	) -> Result<(FsInfo, &'d [u8]), DecryptError> {
+		assert!(data.len() >= 448, "data too small");
+		let cipher = Cipher { ty: self.cipher().unwrap(), key: *key };
+		cipher.decrypt(self.nonce.into(), &self.hash, data)?;
+		Ok(FsInfo::from_raw_slice(data).expect("data too small"))
+	}
 
-		buf[64..mem::size_of::<Self>()].copy_from_slice(&self.as_ref()[64..]);
-
-		let (nonce, hash) = cipher.encrypt(&mut buf[64..]);
-		(self.nonce, self.hash) = (nonce.into(), hash);
-
-		buf[..64].copy_from_slice(&self.as_ref()[..64]);
-
-		self.nonce.into()
+	pub fn hash_key(key: &[u8; 32]) -> [u8; 2] {
+		use poly1305::universal_hash::KeyInit;
+		let hash = poly1305::Poly1305::new_from_slice(key)
+			.unwrap()
+			.compute_unpadded(&[0; 16]);
+		hash[..2].try_into().unwrap()
 	}
 }
 
@@ -140,69 +141,61 @@ impl Configuration {
 	}
 
 	pub fn mirror_count(&self) -> MirrorCount {
-		MirrorCount::from_raw(self.get(4, 2) + 1).unwrap()
+		MirrorCount::from_raw(self.get(0, 2) + 1).unwrap()
 	}
 
 	pub fn set_mirror_count(&mut self, value: MirrorCount) {
-		self.set(4, 2, value.to_raw() - 1)
+		self.set(0, 2, value.to_raw() - 1)
 	}
 
 	pub fn mirror_index(&self) -> MirrorIndex {
-		MirrorIndex::from_raw(self.get(6, 2)).unwrap()
+		MirrorIndex::from_raw(self.get(2, 2)).unwrap()
 	}
 
 	pub fn set_mirror_index(&mut self, value: MirrorIndex) {
-		self.set(6, 2, value.to_raw())
-	}
-
-	pub fn block_size(&self) -> BlockSize {
-		BlockSize::from_raw(self.get(8, 4) + 9).unwrap()
-	}
-
-	pub fn set_block_size(&mut self, value: BlockSize) {
-		self.set(8, 4, value.to_raw() - 9)
+		self.set(2, 2, value.to_raw())
 	}
 
 	pub fn max_record_size(&self) -> MaxRecordSize {
-		MaxRecordSize::from_raw(self.get(12, 4) + 9).unwrap()
+		MaxRecordSize::from_raw(self.get(4, 4) + 9).unwrap()
 	}
 
 	pub fn set_max_record_size(&mut self, value: MaxRecordSize) {
-		self.set(12, 4, value.to_raw() - 9)
+		self.set(4, 4, value.to_raw() - 9)
 	}
 
-	pub fn object_list_depth(&self) -> u8 {
-		self.get(16, 4)
+	pub fn object_list_depth(&self) -> Depth {
+		self.get(8, 2).try_into().unwrap()
 	}
 
-	pub fn set_object_list_depth(&mut self, value: u8) {
-		self.set(16, 4, value)
+	pub fn set_object_list_depth(&mut self, value: Depth) {
+		self.set(8, 2, value.into())
 	}
 
 	pub fn compression_level(&self) -> u8 {
-		self.get(20, 4)
+		self.get(12, 4)
 	}
 
 	pub fn set_compression_level(&mut self, value: u8) {
-		self.set(20, 4, value)
+		self.set(12, 4, value)
 	}
 
 	pub fn compression_algorithm(&self) -> Result<Compression, u8> {
-		Compression::from_raw(self.0[3]).ok_or(self.0[3])
+		Compression::from_raw(self.0[2]).ok_or(self.0[2])
 	}
 
 	pub fn set_compression_algorithm(&mut self, value: Compression) {
-		self.0[3] = value.to_raw()
+		self.0[2] = value.to_raw()
 	}
 }
 
-impl fmt::Debug for Header {
+impl fmt::Debug for FsHeader {
 	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let mut f = f.debug_struct(stringify!(Header));
-		// TODO use Utf8Lossy when it is stabilized.
+		let mut f = f.debug_struct(stringify!(FsHeader));
 		f.field("magic", &String::from_utf8_lossy(&self.magic));
 		f.field("version", &self.version);
+		f.field("block_size", &self.block_size());
 		fmt_either(&mut f, "cipher", self.cipher());
 		fmt_either(&mut f, "key_derivation", self.key_derivation());
 		f.field(
@@ -214,6 +207,14 @@ impl fmt::Debug for Header {
 			"hash",
 			&format_args!("{:#34x}", &u128::from_le_bytes(self.hash)),
 		);
+		f.finish()
+	}
+}
+
+impl fmt::Debug for FsInfo {
+	#[no_coverage]
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let mut f = f.debug_struct(stringify!(FsInfo));
 		f.field("configuration", &self.configuration);
 		f.field("total_block_count", &self.total_block_count);
 		f.field("lba_offset", &self.lba_offset);
@@ -232,7 +233,6 @@ impl fmt::Debug for Configuration {
 		let mut f = f.debug_struct(stringify!(Configuration));
 		f.field("mirror_count", &self.mirror_count());
 		f.field("mirror_index", &self.mirror_index());
-		f.field("block_size", &self.block_size());
 		f.field("max_record_size", &self.max_record_size());
 		f.field("object_list_depth", &self.object_list_depth());
 		f.field("compression_level", &self.compression_level());

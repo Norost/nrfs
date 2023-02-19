@@ -1,4 +1,4 @@
-use super::super::Key;
+use super::IdKey;
 
 #[cfg(debug_assertions)]
 pub type Gen = u8;
@@ -16,7 +16,7 @@ const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
 #[derive(Debug)]
 pub(super) struct Lru {
 	/// Linked list for LRU entries
-	lru: LruList<Key>,
+	lru: LruList<IdKey>,
 	/// The maximum amount of total bytes to keep cached.
 	cache_max: usize,
 	/// The amount of cached bytes.
@@ -29,12 +29,12 @@ impl Lru {
 	}
 
 	/// Add a new entry to the LRU.
-	pub fn add(&mut self, key: Key, len: usize) -> Idx {
+	pub fn add(&mut self, key: IdKey, len: usize) -> Idx {
 		self.cache_size += len;
 		self.lru.insert(key)
 	}
 
-	pub fn remove(&mut self, index: Idx, len: usize) -> Key {
+	pub fn remove(&mut self, index: Idx, len: usize) -> IdKey {
 		self.cache_size -= len;
 		self.lru.remove(index)
 	}
@@ -56,7 +56,7 @@ impl Lru {
 	}
 
 	/// Get the key and handle of the last entry.
-	pub fn last(&self) -> Option<(Key, Idx)> {
+	pub fn last(&self) -> Option<(IdKey, Idx)> {
 		self.lru.last().map(|(k, &v)| (v, k))
 	}
 
@@ -69,11 +69,6 @@ impl Lru {
 	/// Move an entry to the back of the queue.
 	pub fn touch(&mut self, index: Idx) {
 		self.lru.promote(index);
-	}
-
-	/// Get a mutable reference to the key of an entry.
-	pub fn get_mut(&mut self, index: Idx) -> Option<&mut Key> {
-		self.lru.get_mut(index)
 	}
 }
 
@@ -151,11 +146,6 @@ impl<V> LruList<V> {
 			let node = self.nodes.get(self.tail).unwrap();
 			(self.tail, &node.value)
 		})
-	}
-
-	/// Get a mutable reference to a value by node index.
-	pub fn get_mut(&mut self, index: Idx) -> Option<&mut V> {
-		self.nodes.get_mut(index).map(|node| &mut node.value)
 	}
 
 	/// Insert a value at the front of the list.

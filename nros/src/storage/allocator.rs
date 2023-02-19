@@ -1,6 +1,10 @@
 use {
 	super::{Dev, Set256, Store},
-	crate::{resource::Buf, util, Error, Record, Resource},
+	crate::{
+		data::record::{self, RecordRef},
+		resource::Buf,
+		util, Error, Resource,
+	},
 	core::mem,
 	endian::u64le,
 	futures_util::stream::{FuturesUnordered, TryStreamExt},
@@ -34,7 +38,7 @@ pub(super) struct Allocator {
 	/// Previously allocated stack records.
 	///
 	/// Should be freed on log rewrite.
-	stack: Vec<Record>,
+	stack: Vec<RecordRef>,
 	/// Allocator statistics.
 	///
 	/// Used for debugging.
@@ -100,28 +104,24 @@ impl Allocator {
 
 		// Iterate stack from top to bottom
 		let mut record = store.devices.allocation_log_head.get();
-		while record.length() > 0 {
+		while record.blocks() > 0 {
 			// Append to stack for later ops
 			stack.push(record);
 
 			// Get record data
-			let data = store.read(&record).await?;
-			let lba = u64::from(record.lba);
-			let size = u64::try_from(data.len()).unwrap();
-			let end = usize::try_from(size).unwrap();
+			let data = store.read(record).await?;
+			let lba = record.lba();
 
 			// Add record itself
-			let record_blocks =
-				u64::try_from(store.block_size().min_blocks(record.length())).unwrap();
-			alloc_map.insert(lba..lba + record_blocks);
+			alloc_map.insert(lba..lba + u64::from(record.blocks()));
+
+			let (next_rec, data) = data.get().split_at(8);
 
 			// Add entries
-			let entry_mask = mem::size_of::<Entry>() - 1;
-			for i in (mem::size_of::<Record>()..(end + entry_mask) & !entry_mask).step_by(16) {
+			for entry_raw in data.chunks(16) {
 				// Get entry
-				let max_len = (end - i).min(mem::size_of::<Entry>());
 				let mut entry = Entry::default();
-				entry.as_mut()[..max_len].copy_from_slice(&data.get()[i..i + max_len]);
+				util::read(0, entry.as_mut(), entry_raw);
 
 				let (mut start, end) = (u64::from(entry.lba), u64::from(entry.lba + entry.size));
 
@@ -150,7 +150,7 @@ impl Allocator {
 			}
 
 			// Next record
-			record = util::get_record(data.get(), 0).unwrap_or_default();
+			util::read(0, record.as_mut(), next_rec);
 		}
 
 		trace!("==>  {:?}", &alloc_map);
@@ -289,8 +289,8 @@ impl Allocator {
 
 		// Deallocate all stack records of current log.
 		for record in self.stack.drain(..) {
-			let lba = u64::from(record.lba);
-			let blocks = store.block_size().min_blocks(record.length());
+			let lba = record.lba();
+			let blocks = record.blocks();
 			alloc_map.remove(lba..lba + u64::try_from(blocks).unwrap());
 			#[cfg(feature = "debug-trace-alloc")]
 			self.debug_alloc_traces.remove(&lba);
@@ -298,12 +298,12 @@ impl Allocator {
 
 		let mut iter = alloc_map.iter().peekable();
 		let rec_size = 1 << store.max_record_size().to_raw();
-		let entries_per_record = (rec_size - mem::size_of::<Record>()) / mem::size_of::<Entry>();
+		let entries_per_record = (rec_size - mem::size_of::<RecordRef>()) / mem::size_of::<Entry>();
 
 		// Perform writes concurrently to speed things up a bit.
 		let writes = FuturesUnordered::new();
 
-		let mut prev = Record::default();
+		let mut prev = RecordRef::default();
 		let mut buf = store.devices.resource.alloc();
 		while iter.peek().is_some() {
 			// Reference previous record
@@ -327,33 +327,29 @@ impl Allocator {
 				buf.len() > 0,
 				"buffer should have at least one log entry with non-zero size"
 			);
-			let len = store.block_size().round_up(buf.len());
+			let len = store.block_size().round_up(32 + buf.len());
 
 			// FIXME we should poll writes while waiting for an alloc,
 			// as it is possible all memory is used up by the current writes.
 			let mut b = store.devices.alloc(len).await?;
 
-			prev = Record::pack(
+			let blocks = record::pack(
 				buf.get(),
 				b.get_mut(),
 				store.compression(),
 				store.block_size(),
-				store.devices.new_cipher(),
+				store.devices.cipher(),
+				store.devices.gen_nonce(),
 			);
-			let len = store.block_size().round_up(prev.length().into());
-			b.shrink(len);
+			b.shrink(usize::from(blocks) << store.block_size().to_raw());
 
 			// Store record
-			let blocks = store
-				.block_size()
-				.min_blocks(len.try_into().unwrap())
-				.try_into()
-				.unwrap();
 			let lba = self
-				.alloc(blocks, store.devices.block_count())
+				.alloc(blocks.into(), store.devices.block_count())
 				.ok_or(Error::NotEnoughSpace)?;
-			prev.lba = lba.into();
 			writes.push(store.devices.write(lba, b, Set256::set_all()));
+
+			prev = RecordRef::new(lba, blocks);
 			self.stack.push(prev);
 		}
 
@@ -363,9 +359,9 @@ impl Allocator {
 
 		// Update alloc_map with *implicitly* recorded allocations for stack records.
 		for record in self.stack.iter() {
-			let lba = u64::from(record.lba);
-			let blocks = store.block_size().min_blocks(record.length());
-			alloc_map.insert(lba..lba + u64::try_from(blocks).unwrap());
+			let lba = record.lba();
+			let blocks = record.blocks();
+			alloc_map.insert(lba..lba + u64::from(blocks));
 		}
 
 		// Clear free & dirty ranges.

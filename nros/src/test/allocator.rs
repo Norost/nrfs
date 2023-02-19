@@ -21,7 +21,6 @@ fn write_remount_read() {
 
 	let id = block_on(s.run(async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1).await.unwrap();
 		obj.write(0, &[1]).await.unwrap();
 		Ok::<_, Error<_>>(obj.id())
 	}))
@@ -51,7 +50,6 @@ fn write_remount_write_read() {
 
 	let id = block_on(s.run(async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1).await.unwrap();
 		obj.write(0, &[1]).await.unwrap();
 		Ok::<_, Error<_>>(obj.id())
 	}))
@@ -65,7 +63,6 @@ fn write_remount_write_read() {
 	block_on(s.run(async {
 		let obj_1 = s.get(id).await.unwrap();
 		let obj_2 = s.create().await.unwrap();
-		obj_2.resize(1).await.unwrap();
 		obj_2.write(0, &[2]).await.unwrap();
 
 		let mut buf = [0];

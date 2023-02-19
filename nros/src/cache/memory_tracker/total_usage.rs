@@ -1,5 +1,5 @@
 use {
-	super::{ENTRY_COST, OBJECT_COST},
+	super::ENTRY_COST,
 	crate::{MaxRecordSize, WakerQueue, WakerQueueTicket},
 	core::task::Waker,
 };
@@ -98,7 +98,7 @@ impl TotalMemoryUsage {
 	///
 	/// This includes max record size, entry cost & object cost.
 	pub fn has_room_for_entry(&self, max_record_size: MaxRecordSize) -> bool {
-		let total = OBJECT_COST + ENTRY_COST + (1 << max_record_size.to_raw());
+		let total = ENTRY_COST + (1 << max_record_size.to_raw());
 		self.usage + total <= self.limit
 	}
 }

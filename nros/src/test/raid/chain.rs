@@ -24,7 +24,6 @@ fn equal_2() {
 
 		s.run(async {
 			let obj = s.create().await.unwrap();
-			obj.resize(1 << 15).await.unwrap();
 			obj.write(0, &[1; 1 << 15]).await.unwrap();
 			Ok::<_, Error<_>>(())
 		})

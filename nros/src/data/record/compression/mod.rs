@@ -2,7 +2,7 @@ mod lz4;
 mod none;
 
 use {
-	crate::{BlockSize, Resource},
+	crate::{resource::Buf, BlockSize},
 	core::fmt,
 };
 
@@ -31,11 +31,12 @@ impl Compression {
 	/// within record boundaries.
 	pub(crate) fn compress(
 		self,
+		header_size: usize,
 		data: &[u8],
 		buf: &mut [u8],
 		block_size: BlockSize,
 	) -> (Self, u32) {
-		if buf.len() <= 1 << block_size.to_raw() {
+		if header_size + buf.len() <= 1 << block_size.to_raw() {
 			// It isn't worth compressing this record as it'll take up a full block anyways.
 			return (Self::None, none::compress(data, buf));
 		}
@@ -44,21 +45,16 @@ impl Compression {
 			Self::Lz4 => lz4::compress(data, buf),
 		};
 		match res {
-			Some(n) if n < data.len() => (self, n as _),
+			Some(n) if header_size + n < data.len() => (self, n as _),
 			// Compression made the data larger, so just don't compress.
 			_ => (Self::None, none::compress(data, buf)),
 		}
 	}
 
-	pub(crate) fn decompress<R: Resource>(
-		self,
-		data: &[u8],
-		buf: &mut R::Buf,
-		max_size: usize,
-	) -> bool {
+	pub(crate) fn decompress<B: Buf>(self, data: &[u8], buf: &mut B, max_size: usize) -> bool {
 		match self {
-			Compression::None => none::decompress::<R>(data, buf, max_size),
-			Compression::Lz4 => lz4::decompress::<R>(data, buf, max_size),
+			Compression::None => none::decompress::<B>(data, buf, max_size),
+			Compression::Lz4 => lz4::decompress::<B>(data, buf, max_size),
 		}
 	}
 }

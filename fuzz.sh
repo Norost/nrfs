@@ -5,7 +5,7 @@ set -e
 TIMEOUT=30s
 MAX_LEN="${MAX_LEN:-8192}"
 MAX_RSS="${MAX_RSS:-512}"
-CMD="nice cargo fuzz run random_ops -s none -- -timeout=$TIMEOUT -max_len=$MAX_LEN -rss_limit_mb=$MAX_RSS"
+CMD="nice cargo fuzz run random_ops -s none -- -timeout=$TIMEOUT -max_len=$MAX_LEN -rss_limit_mb=$MAX_RSS -len_control=500"
 
 if [[ $# != 2 ]]
 then
