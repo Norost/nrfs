@@ -1,8 +1,7 @@
-mod busy;
 mod entry;
 mod evict;
 mod flush;
-mod memory_tracker;
+mod mem;
 mod object;
 mod tree;
 
@@ -14,9 +13,8 @@ use {
 		KeyDeriver, MaxRecordSize, Resource, Store,
 	},
 	alloc::collections::BTreeMap,
-	busy::Busy,
 	core::{
-		cell::{Cell, RefCell},
+		cell::{Cell, RefCell, RefMut},
 		fmt,
 		future::Future,
 		pin::pin,
@@ -24,7 +22,7 @@ use {
 	},
 	entry::{Entry, EntryRef},
 	futures_util::FutureExt,
-	memory_tracker::MemoryTracker,
+	mem::Mem,
 	object::{Key, ObjectData, RootIndex},
 	rangemap::RangeSet,
 	tree::Tree,
@@ -43,22 +41,20 @@ const RECORDREF_SIZE_P2: u8 = 3;
 const OBJECT_SIZE_P2: u8 = 5;
 
 /// Cache data.
-pub(crate) struct CacheData<B: Buf> {
+struct CacheData<B: Buf> {
 	/// Cached records of trees.
 	///
 	/// The key is the ID of the object.
 	/// Using separate hashmaps allows using only a prefix of the key.
 	objects: BTreeMap<u64, ObjectData<B>>,
-	/// Entries currently being fetched or actively in use by a task.
-	busy: BTreeMap<IdKey, Busy>,
-	/// Memory usage tracker.
-	memory_tracker: MemoryTracker,
 	/// Used object IDs.
 	used_objects_ids: RangeSet<u64>,
 	/// Evict tasks in progress.
 	evict_tasks_count: usize,
 	/// Task to wake if evict tasks reaches 0.
 	wake_after_evicts: Option<Waker>,
+	/// Memory management.
+	mem: Mem,
 }
 
 impl<B: Buf> CacheData<B> {
@@ -74,10 +70,10 @@ impl<B: Buf> fmt::Debug for CacheData<B> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(CacheData))
 			.field("objects", &self.objects)
-			.field("memory_tracker", &self.memory_tracker)
 			.field("used_objects_ids", &self.used_objects_ids)
 			.field("evict_tasks_count", &self.evict_tasks_count)
 			.field("wake_after_evicts", &self.wake_after_evicts)
+			.field("mem", &self.mem)
 			.finish()
 	}
 }
@@ -136,25 +132,27 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// Multiply by 4 since saving an object requires fetching an entry from
 		// the object list & bitmap consecutively, i.e. we need to be able to
 		// have 4 entries in the cache at any time.
-		let min_limit = (1 << store.max_record_size().to_raw())
+		let min_limit = (1 << store.max_rec_size().to_raw())
 			+ 32 // entry
 			+ 128; // obj
 		let total_limit = cache_size * 2 + min_limit * 4;
 		trace!(info "total usage limit: {}", total_limit);
 
 		let mut root_max_size = [0; 4];
-		root_max_size[0] = 1 << store.max_record_size().to_raw();
+		root_max_size[0] = 1 << store.max_rec_size().to_raw();
 		for i in 1..4 {
 			root_max_size[i] =
-				root_max_size[i - 1] << store.max_record_size().to_raw() - RECORDREF_SIZE_P2;
+				root_max_size[i - 1] << store.max_rec_size().to_raw() - RECORDREF_SIZE_P2;
 		}
 
 		let mut s = Self {
 			store,
 			data: RefCell::new(CacheData {
 				objects: Default::default(),
-				busy: Default::default(),
-				memory_tracker: MemoryTracker::new(cache_size, total_limit),
+				mem: Mem {
+					busy: Default::default(),
+					tracker: mem::MemoryTracker::new(cache_size, total_limit),
+				},
 				used_objects_ids: Default::default(),
 				evict_tasks_count: 0,
 				wake_after_evicts: None,
@@ -169,7 +167,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		//let bg = Background::default();
 		let mut used_objects_ids = RangeSet::new();
 		let bitmap = Tree::object_bitmap(&s);
-		let entries_per_leaf = 4 << s.max_record_size().to_raw();
+		let entries_per_leaf = 4 << s.max_rec_size().to_raw();
 
 		s.run(async {
 			for offset in 0..bitmap.max_offset() {
@@ -223,7 +221,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 	/// Allocate an object IDs.
 	fn alloc_id(&self) -> u64 {
-		let mut slf = self.data.borrow_mut();
+		let mut slf = self.data();
 		let id = slf
 			.used_objects_ids
 			.gaps(&(0..u64::MAX))
@@ -273,8 +271,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	}
 
 	/// The maximum record size used by the underlying [`Store`].
-	pub fn max_record_size(&self) -> MaxRecordSize {
-		self.store.max_record_size()
+	pub fn max_rec_size(&self) -> MaxRecordSize {
+		self.store.max_rec_size()
 	}
 
 	/// Readjust cache size.
@@ -287,7 +285,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	pub fn resize_cache(&self, global_max: usize) -> Result<(), Error<D>> {
 		self.data
 			.borrow_mut()
-			.memory_tracker
+			.mem
+			.tracker
 			.set_soft_limit(global_max);
 		Ok(())
 	}
@@ -308,8 +307,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let data = self.data.borrow();
 		Statistics {
 			storage: self.store.statistics(),
-			soft_usage: data.memory_tracker.soft_usage(),
-			hard_usage: data.memory_tracker.hard_usage(),
+			soft_usage: data.mem.tracker.soft_usage(),
+			hard_usage: data.mem.tracker.hard_usage(),
 			used_objects: data
 				.used_objects_ids
 				.iter()
@@ -331,7 +330,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 	/// Amount of entries in a parent record as a power of two.
 	fn entries_per_parent_p2(&self) -> u8 {
-		self.max_record_size().to_raw() - RECORDREF_SIZE_P2
+		self.max_rec_size().to_raw() - RECORDREF_SIZE_P2
 	}
 
 	fn resource(&self) -> &R {
@@ -340,7 +339,15 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 	/// The maximum amount of entries the object list can contain with its current depth.
 	fn object_list_len(&self) -> u64 {
-		Tree::object_list(self).max_offset() << self.max_record_size().to_raw() - OBJECT_SIZE_P2
+		Tree::object_list(self).max_offset() << self.max_rec_size().to_raw() - OBJECT_SIZE_P2
+	}
+
+	fn data(&self) -> RefMut<'_, CacheData<R::Buf>> {
+		self.data.borrow_mut()
+	}
+
+	fn mem(&self) -> RefMut<'_, Mem> {
+		RefMut::map(self.data(), |d| &mut d.mem)
 	}
 }
 
@@ -363,7 +370,7 @@ pub struct Statistics {
 impl<B: Buf> Drop for CacheData<B> {
 	fn drop(&mut self) {
 		if std::thread::panicking() {
-			//eprintln!("state: {:#?}", self);
+			eprintln!("state: {:#?}", self);
 		}
 	}
 }

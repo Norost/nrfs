@@ -15,7 +15,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				.data
 				.borrow_mut()
 				.memory_tracker
-				.evict_next(self.max_record_size(), cx.waker())
+				.evict_next(self.max_rec_size(), cx.waker())
 			{
 				Ok(k) => k,
 				Err(t) => break Err(t),

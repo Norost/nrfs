@@ -24,7 +24,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 
 		assert!(offset < self.max_offset(), "offset out of range");
 
-		let ((p_depth, p_offset, index), parent_tree) = if depth == self.depth() {
+		let ((p_depth, p_offset, index), p_tree) = if depth == self.depth() {
 			// Store in object root
 			assert_eq!(offset, 0, "root record can only be at offset 0");
 			match self.root {
@@ -45,7 +45,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			(self.parent_key_index(offset, depth), self)
 		};
 
-		let entry = parent_tree.get(p_depth, p_offset).await?;
+		let entry = p_tree.get(p_depth, p_offset).await?;
 
 		let mut old_record_ref = RecordRef::default();
 		util::read(index, old_record_ref.as_mut(), entry.get());
@@ -54,7 +54,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			info "replace {:?} -> {:?} @ ({:#x} {:?} {})",
 			record_ref,
 			old_record_ref,
-			parent_tree.id(),
+			p_tree.id(),
 			p_depth,
 			p_offset,
 		);
@@ -66,10 +66,10 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		}
 
 		// Destroy old record
-		parent_tree.cache.store.destroy(old_record_ref);
+		p_tree.cache.store.destroy(old_record_ref);
 
 		// Store new record
-		entry.write(index, record_ref.as_ref()).await;
+		entry.write(index, record_ref.as_ref());
 
 		Ok(())
 	}

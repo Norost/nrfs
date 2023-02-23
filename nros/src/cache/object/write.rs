@@ -37,7 +37,7 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 		if range.start() == range.end() {
 			// We need to slice one record twice
 			let entry = self.get(*range.start()).await?;
-			entry.write(first_offset, data).await;
+			entry.write(first_offset, data);
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
 			let mut data = data;
@@ -50,17 +50,16 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 			// Don't bother if we can write out an entire record at once.
 			if let Some(first_key) = first_key {
 				let d;
-				(d, data) =
-					data.split_at((1 << self.cache.max_record_size().to_raw()) - first_offset);
+				(d, data) = data.split_at((1 << self.cache.max_rec_size().to_raw()) - first_offset);
 
 				let entry = self.get(first_key).await?;
-				entry.write(first_offset, d).await;
+				entry.write(first_offset, d);
 			}
 
 			// Copy middle records |xxxxxxxx|
 			for offset in range {
 				let d;
-				(d, data) = data.split_at(1 << self.cache.max_record_size().to_raw());
+				(d, data) = data.split_at(1 << self.cache.max_rec_size().to_raw());
 
 				let end = d.len() - d.iter().rev().position(|&b| b != 0).unwrap_or(d.len());
 				let mut buf = self.cache.resource().alloc();
@@ -74,7 +73,7 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 			if last_offset > 0 {
 				debug_assert_eq!(data.len(), last_offset);
 				let entry = self.get(last_key).await?;
-				entry.write(0, data).await;
+				entry.write(0, data);
 			}
 		}
 

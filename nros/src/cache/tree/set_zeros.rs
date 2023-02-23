@@ -63,11 +63,9 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 					let k = self.id_key(d, co);
 					if rec != RecordRef::NONE || self.has_dirty(&entry, k.key) {
 						drop(entry);
-						entry = if let Some(entry) = self.cache.wait_entry(k).await {
-							entry
-						} else {
-							self.cache.busy_insert(k, 0);
-							self.fetch(d, co, rec).await?
+						entry = match self.cache.wait_entry(k).await {
+							Some(e) => e,
+							None => self.fetch(d, co, rec).await?,
 						};
 						depth = d;
 						continue 'y;
@@ -99,7 +97,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	}
 
 	/// Check if the entry *with the given key* is or has any descendants that are dirty.
-	fn has_dirty(&self, entry: &EntryRef<'a, D, R>, key: Key) -> bool {
+	fn has_dirty(&self, entry: &EntryRef<'a, R::Buf>, key: Key) -> bool {
 		trace!("has_dirty {:?}", key);
 		let mut offt = key.offset();
 		let mut end_offt = offt + 1;

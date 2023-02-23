@@ -9,7 +9,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		&self,
 		depth: Depth,
 		offset: u64,
-	) -> Result<EntryRef<'a, D, R>, Error<D>> {
+	) -> Result<EntryRef<'a, R::Buf>, Error<D>> {
 		let key = self.id_key(depth, offset);
 		trace!("get {:?}", key);
 
@@ -22,7 +22,9 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		// 5. Presto!
 
 		// 1. Try to get the target entry directly.
-		if let Some(entry) = self.cache.wait_entry(key).await {
+		//let mut resv = self.cache.memory_reserve_entry().await;
+		let mut resv = self.cache.memory_reserve_none();
+		if let Ok(entry) = self.cache.wait_entry(key, resv).await {
 			return Ok(entry);
 		}
 
@@ -35,7 +37,8 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			if d < self.depth() {
 				let (p_d, p_offt, p_index) = self.parent_key_index(offt, d);
 				let k = self.id_key(p_d, p_offt);
-				if let Some(entry) = self.cache.wait_entry(k).await {
+				let resv = self.cache.memory_reserve_none();
+				if let Ok(entry) = self.cache.wait_entry(k, resv).await {
 					let mut rec_ref = RecordRef::default();
 					util::read(p_index, rec_ref.as_mut(), entry.get());
 					break rec_ref;

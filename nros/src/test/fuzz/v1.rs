@@ -338,10 +338,10 @@ fn F() {
 		9985,
 		[
 			Create,
-			Write { idx: 0xa1, offset: 0x6f6f986f, amount: 0x6f6f },
-			Read { idx: 0x91, offset: 0x6f6f9191, amount: 0x6f6f },
-			Read { idx: 0x91, offset: 0x6f919191, amount: 0x6f6f },
-			Write { idx: 0x91, offset: 0x6f919191, amount: 0x6f6f },
+			Write { idx: 0, offset: 0x6f6f986f, amount: 0x6f6f },
+			Read { idx: 0, offset: 0x6f6f9191, amount: 0x6f6f },
+			Read { idx: 0, offset: 0x6f919191, amount: 0x6f6f },
+			Write { idx: 0, offset: 0x6f919191, amount: 0x6f6f },
 		],
 	)
 	.run()

@@ -31,7 +31,7 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 
 		let end = offset.saturating_add(len);
 
-		let rec_size_p2 = self.cache.max_record_size().to_raw();
+		let rec_size_p2 = self.cache.max_rec_size().to_raw();
 
 		let (offt, index) = util::divmod_p2(offset, rec_size_p2);
 		let (end_offt, end_index) = util::divmod_p2(end, rec_size_p2);

@@ -23,7 +23,7 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 	/// If no root can address the given offset.
 	///
 	/// If `offset >= 2**55`
-	pub async fn get(&self, offset: u64) -> Result<EntryRef<'a, D, R>, Error<D>> {
+	pub async fn get(&self, offset: u64) -> Result<EntryRef<'a, R::Buf>, Error<D>> {
 		trace!("get {:#x} {:?}", self.id, offset);
 
 		let (root, offt) = self

@@ -12,7 +12,10 @@ pub(super) use {
 };
 
 use {
-	super::{Buf, Cache, Dev, Error, IdKey, Resource, Tree, OBJECT_BITMAP_ID, OBJECT_LIST_ID},
+	super::{
+		memory_tracker::ENTRY_COST, Buf, Cache, Dev, Error, IdKey, Resource, Tree,
+		OBJECT_BITMAP_ID, OBJECT_LIST_ID,
+	},
 	crate::{
 		data::record::{Depth, RecordRef},
 		util,
@@ -47,13 +50,13 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 		trace!("dealloc {:#x}", self.id);
 		self.write_zeros(0, u64::MAX).await?;
 		self.cache.object_set_allocated(self.id, false).await?;
-		self.cache.data.borrow_mut().dealloc_id(self.id);
+		self.cache.data().dealloc_id(self.id);
 		Ok(())
 	}
 
 	/// Determine start & end offsets inside records.
 	fn calc_record_offsets(&self, offset: u64, length: usize) -> (usize, usize) {
-		let mask = (1 << self.cache.max_record_size().to_raw()) - 1;
+		let mask = (1 << self.cache.max_rec_size().to_raw()) - 1;
 		let start = offset & mask;
 		let end = (offset + u64::try_from(length).unwrap()) & mask;
 		(start.try_into().unwrap(), end.try_into().unwrap())
@@ -63,9 +66,9 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 	///
 	/// Ranges are used for efficient iteration.
 	fn calc_range(&self, offset: u64, length: usize) -> RangeInclusive<u64> {
-		let start_key = offset >> self.cache.max_record_size().to_raw();
+		let start_key = offset >> self.cache.max_rec_size().to_raw();
 		let end_key =
-			(offset + u64::try_from(length).unwrap()) >> self.cache.max_record_size().to_raw();
+			(offset + u64::try_from(length).unwrap()) >> self.cache.max_rec_size().to_raw();
 		start_key..=end_key
 	}
 
@@ -75,7 +78,7 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 	fn offset_to_tree(&self, offset: u64) -> Option<(RootIndex, u64)> {
 		let mut sum = 0;
 		for (i, size) in (RootIndex::I0..=RootIndex::I3).zip(self.cache.root_max_size) {
-			let size = size >> self.cache.max_record_size().to_raw();
+			let size = size >> self.cache.max_rec_size().to_raw();
 			if offset < sum + size {
 				return Some((i, offset - sum));
 			}
@@ -113,19 +116,18 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		// Reserve memory.
 		let count = 1 + usize::from(cur_bitmap_depth != new_bitmap_depth);
-		self.memory_reserve((super::memory_tracker::ENTRY_COST + 8) * count)
-			.await;
+		let mut resv = self.memory_reserve((ENTRY_COST + 8) * count).await;
 
 		// Fixup list and bitmap depth.
-		let add_entry = |id, root: RecordRef, depth| {
+		let mut add_entry = |id, root: RecordRef, depth| {
 			let mut buf = self.resource().alloc();
 			let root = util::slice_trim_zeros_end(root.as_ref());
 			buf.extend_from_slice(root);
 
-			self.memory_hard_shrink(8 - buf.len());
+			let r = resv.split(ENTRY_COST + buf.len());
 
 			let key = Key::new(RootIndex::I0, depth, 0);
-			let mut entry = self.entry_insert(IdKey { id, key }, buf, 0);
+			let mut entry = self.entry_insert(IdKey { id, key }, buf, 0, r);
 			entry.dirty_records.insert(key);
 		};
 
@@ -161,13 +163,13 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	pub(super) fn calc_bitmap_depth(&self, obj_list_depth: Depth) -> Depth {
 		// Determine highest valid *byte* offset of object bitmap.
 		let offt = 1u64 << self.entries_per_parent_p2() * (obj_list_depth as u8);
-		let offt = offt << self.max_record_size().to_raw();
+		let offt = offt << self.max_rec_size().to_raw();
 		let offt = offt / (32 * 8); // 32 byte objects + 1 bit per object
 		let offt = offt - 1;
 
 		// Determine depth from byte offset
 		let mut depth = Depth::D0;
-		let mut offt = offt >> self.max_record_size().to_raw();
+		let mut offt = offt >> self.max_rec_size().to_raw();
 		while offt > 0 {
 			depth = depth.next();
 			offt >>= self.entries_per_parent_p2();
@@ -180,13 +182,13 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		trace!("object_set_allocated {:#x} {}", id, value);
 
 		let (offt, bit) = util::divmod_p2(id, 3);
-		let (offt, index) = util::divmod_p2(offt, self.max_record_size().to_raw());
+		let (offt, index) = util::divmod_p2(offt, self.max_rec_size().to_raw());
 		let entry = Tree::object_bitmap(self).get(Depth::D0, offt).await?;
 
 		let mut b = *entry.get().get(index).unwrap_or(&0);
 		b &= !(1 << bit);
 		b |= u8::from(value) << bit;
-		entry.write(index, &[b]).await;
+		entry.write(index, &[b]);
 		Ok(())
 	}
 }

@@ -100,7 +100,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			};
 
 			let cipher = self.devices.cipher();
-			let max_rec_size = self.max_record_size();
+			let max_rec_size = self.max_rec_size();
 			let buf = self.resource().alloc();
 			let entry_data = self
 				.resource()
@@ -229,7 +229,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		self.devices.block_size()
 	}
 
-	pub fn max_record_size(&self) -> MaxRecordSize {
+	pub fn max_rec_size(&self) -> MaxRecordSize {
 		self.devices.max_record_size()
 	}
 
@@ -275,7 +275,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 					allocation: self.allocator.borrow().statistics,
 					block_size: self.block_size(),
 					compression: self.compression(),
-					max_record_size: self.max_record_size(),
+					max_record_size: self.max_rec_size(),
 					$($f: self.$f.get(),)*
 				}
 			}

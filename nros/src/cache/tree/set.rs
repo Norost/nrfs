@@ -13,16 +13,11 @@ impl<'a, D: Dev, R: Resource> super::Tree<'a, D, R> {
 		util::trim_zeros_end(&mut data);
 
 		if let Some(entry) = self.cache.wait_entry(key).await {
-			// If the entry is already present, overwrite it.
-			entry.replace(data).await;
+			entry.replace(data);
 		} else {
-			// Otherwise insert a new entry.
-
-			self.cache.busy_insert(key, 0);
-			self.cache.memory_reserve_entry(data.len()).await;
-			let refcount = self.cache.busy_remove(key);
-
-			let mut entry = self.cache.entry_insert(key, data, refcount);
+			self.cache.mem().busy.incr(key);
+			self.cache.mem_empty_to_max().await;
+			let mut entry = self.cache.entry_insert(key, data);
 			entry.dirty_records.insert(key.key);
 		}
 

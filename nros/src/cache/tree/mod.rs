@@ -44,15 +44,15 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	}
 
 	/// Get the maximum record size.
-	fn max_record_size(&self) -> MaxRecordSize {
-		self.cache.max_record_size()
+	fn max_rec_size(&self) -> MaxRecordSize {
+		self.cache.max_rec_size()
 	}
 
 	/// Calculate the upper offset limit for cached entries.
 	///
 	/// The offset is *exclusive*, i.e. `[0; max_offset)`.
 	pub(super) fn max_offset(&self) -> u64 {
-		1 << (self.max_record_size().to_raw() - RECORDREF_SIZE_P2) * (self.depth() as u8)
+		1 << (self.max_rec_size().to_raw() - RECORDREF_SIZE_P2) * (self.depth() as u8)
 	}
 
 	/// Get the depth of this tree.
@@ -79,7 +79,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 	/// If the depth is at the maximum (`D3`).
 	fn parent_key_index(&self, offset: u64, depth: Depth) -> (Depth, u64, usize) {
 		let offt = offset << RECORDREF_SIZE_P2;
-		let (offt, index) = util::divmod_p2(offt, self.max_record_size().to_raw());
+		let (offt, index) = util::divmod_p2(offt, self.max_rec_size().to_raw());
 		(depth.next(), offt, index)
 	}
 
@@ -93,7 +93,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		let &RootLocation::Object { id, .. } = &self.root
 			else { panic!("can't get key & offset of object of special tree") };
 		let offt = (id << OBJECT_SIZE_P2) + (8 * self.root() as u64);
-		let (offt, index) = util::divmod_p2(offt, self.max_record_size().to_raw());
+		let (offt, index) = util::divmod_p2(offt, self.max_rec_size().to_raw());
 		(Depth::D0, offt, index)
 	}
 

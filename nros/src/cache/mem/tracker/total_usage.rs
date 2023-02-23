@@ -62,13 +62,14 @@ impl TotalMemoryUsage {
 		}
 	}
 
+	/// # Panics
+	///
+	/// If the limit would be excceeded.
 	pub fn force_add(&mut self, amount: usize) {
 		debug_assert!(amount <= self.limit, "amount exceeds limit");
 		self.usage += amount;
 		trace!(info "{}/{}", self.usage, self.limit);
-		if self.usage > self.limit {
-			trace!(info "over hard limit!");
-		}
+		assert!(self.usage <= self.limit, "limit exceeded");
 	}
 
 	/// Remove memory from the usage.

@@ -297,7 +297,7 @@ impl Allocator {
 		}
 
 		let mut iter = alloc_map.iter().peekable();
-		let rec_size = 1 << store.max_record_size().to_raw();
+		let rec_size = 1 << store.max_rec_size().to_raw();
 		let entries_per_record = (rec_size - mem::size_of::<RecordRef>()) / mem::size_of::<Entry>();
 
 		// Perform writes concurrently to speed things up a bit.

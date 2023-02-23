@@ -61,7 +61,7 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 			{
 				let b;
 				(b, buf) =
-					buf.split_at_mut((1 << self.cache.max_record_size().to_raw()) - first_offset);
+					buf.split_at_mut((1 << self.cache.max_rec_size().to_raw()) - first_offset);
 				let d = self.get(first_key).await?;
 				copy(b, d.get().get(first_offset..).unwrap_or(&[]));
 			}
@@ -69,7 +69,7 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 			// Copy middle records |xxxxxxxx|
 			for key in range {
 				let b;
-				(b, buf) = buf.split_at_mut(1 << self.cache.max_record_size().to_raw());
+				(b, buf) = buf.split_at_mut(1 << self.cache.max_rec_size().to_raw());
 				let d = self.get(key).await?;
 				copy(b, d.get());
 			}

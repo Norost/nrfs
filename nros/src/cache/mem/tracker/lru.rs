@@ -8,9 +8,9 @@ pub type Gen = ();
 pub type Idx = arena::Handle<Gen>;
 
 #[cfg(debug_assertions)]
-const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
+pub const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
 #[cfg(not(debug_assertions))]
-const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
+pub const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
 
 /// Cache LRU queue, with tracking per byte used.
 #[derive(Debug)]

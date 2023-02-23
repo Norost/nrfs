@@ -116,70 +116,78 @@ record tree is used for:
 Resizing
 ........
 
-Resizing a record tree may cause its height to change.
-However, the tree on disk still has the old height, so one cannot trivially
-replace or substitute the root node.
+Since resizing record trees while allowing concurrent reads & writes has proven
+to be exceptionally difficult & error-prone the trees used by objects cannot
+be resized.
 
-When resizing there are two cases to consider:
+The trees used by the object list and bitmap can be resized however, since:
 
-* Growing, where the depth may increase and records must be added.
-* Shrinking, where the depth may decrease and records must be removed.
-
-If the depth increases a single record is added on top of the current root
-record.
-When this record is flushed it will automatically create a new record on top of
-it until the new root is reached.
-
-If the depth decreases all records outside the current range are either removed
-or trimmed.
-The current root is immediately moved to the new root.
-While this root record may include redundant data and be redundantly flushed
-this will automatically be resolved and should not be an issue in practice.
-To aid this process `Pseudo-objects`_ are used.
+* growing the tree merely involves moving the root to a new record, then
+  waiting for the new record to be flushed.
+* shrinking does not require zeroing any records, as by the time shrinking
+  is possible all the unused objects & bits are already zeroed.
 
 
 Cache object & entry states
 ---------------------------
 
-In the cache, each object & entry can be in any of four states:
+In the cache, each entry can be in any of three states:
 
 ::
 
-       +-------------+         +-------------+
-       |             |         |             |
-  -->--+ Not present +---->----+  Fetching   |
-       |             |         |   (Busy)    |
-       +------+------+         +------+------+
-              |                       |
-              ^                       v
-              |                       |
-       +------+------+         +------+------+
-       |             +----<----+             |
-       |  Flushing   |         |   Present   |
-       |   (Busy)    +---->----+             |
-       +-------------+         +-------------+
+         /----------------<----------------\
+         |                                 |
+     +---+--+     +---------------+     +--+---+
+  ->-+ None +--<--+ Busy  (ready) +-->--+ Idle |
+     +---+--+     +-------+-------+     +--+---+
+         |                |                |
+         ^                ^                v
+         |                |                |
+         |       +--------+--------+       |
+         \--->---+ Busy (wait mem) +-------/
+                 +-----------------+
 
-Every entry is in the "not present" state by default.
+Every entry is in the None state by default.
 
-Entries that are being flushed are inaccessible for reading or writing.
-This simplifies the flushing logic & should have little to no impact on
-performance as an entry is flushed when it is either:
+When trying to use an entry memory must be reserved first.
+Every entry hence transitions first to Busy (wait mem).
+When the memory has been reserved the entry can move to the Busy (ready) state.
 
-* Being evicted, in which case it likely will not be accessed soon anyways.
-* Being flushed without eviction, which may happen during transaction commit
-  during which no other operations may take place.
+Entries in the Busy (ready) state are assumed to be maximally sized.
+This simplifies modifying them as no extra memory needs to be reserved [#]_.
 
-The root of objects are also cached alongside the entries for each object and
-are subject to the same mechanism.
+An entry can transition directly from the Idle to None state if it does not
+need to be flushed.
+If it does need to be flushed it can skip the Busy (ready) state if no task
+needs the entry afterwards.
 
-To simplify things, Flushing and Fetching are combined into a single "Busy"
-state.
+Entries that are in the Idle state are not currently being used.
+They count towards both the hard and soft limit.
+Their exact size is used for memory accounting as no task will attempt to
+grow the entry.
 
+To simplify the implementation, there are effectively two distinct state
+machines:
 
-Pseudo-objects
---------------
+* The first pertains to memory being reserved.
 
+  ::
 
+           /------------<------------\
+           |                         |
+       +---+---+     +-----+     +---+---+
+    ->-+ Empty +-<->-+ Max +-<->-+ Exact |
+       +-------+     +-----+     +-------+
+
+* The second pertains to entry availability.
+
+  ::
+
+           /------------<-------------\
+           |                          |
+       +---+---+     +------+     +---+---+
+    ->-+ None  +-->--+ Wait +-->--+ Ready |
+       +-------+     +------+     +-------+
 
 
 Resilvering
@@ -205,8 +213,3 @@ Filesystem
 
 Directory
 ^^^^^^^^^
-
-::
-
-  +----------
-  |
