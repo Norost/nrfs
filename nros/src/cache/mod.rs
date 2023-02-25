@@ -1,3 +1,4 @@
+mod busy;
 mod entry;
 mod evict;
 mod flush;
@@ -12,7 +13,7 @@ use {
 		data::record::Depth, resource::Buf, storage, util, Background, BlockSize, Dev, Error,
 		KeyDeriver, MaxRecordSize, Resource, Store,
 	},
-	alloc::collections::BTreeMap,
+	alloc::collections::{BTreeMap, BTreeSet},
 	core::{
 		cell::{Cell, RefCell, RefMut},
 		fmt,
@@ -23,7 +24,7 @@ use {
 	entry::{Entry, EntryRef},
 	futures_util::FutureExt,
 	mem::Mem,
-	object::{Key, ObjectData, RootIndex},
+	object::{Key, RootIndex},
 	rangemap::RangeSet,
 	tree::Tree,
 };
@@ -42,11 +43,12 @@ const OBJECT_SIZE_P2: u8 = 5;
 
 /// Cache data.
 struct CacheData<B: Buf> {
-	/// Cached records of trees.
-	///
-	/// The key is the ID of the object.
-	/// Using separate hashmaps allows using only a prefix of the key.
-	objects: BTreeMap<u64, ObjectData<B>>,
+	/// Cached records.
+	records: BTreeMap<IdKey, Entry<B>>,
+	/// Records that are dirty.
+	dirty: BTreeSet<IdKey>,
+	/// Busy records.
+	busy: busy::BusyMap,
 	/// Used object IDs.
 	used_objects_ids: RangeSet<u64>,
 	/// Evict tasks in progress.
@@ -69,7 +71,9 @@ impl<B: Buf> fmt::Debug for CacheData<B> {
 	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(CacheData))
-			.field("objects", &self.objects)
+			.field("records", &self.records)
+			.field("dirty", &self.dirty)
+			.field("busy", &self.busy)
 			.field("used_objects_ids", &self.used_objects_ids)
 			.field("evict_tasks_count", &self.evict_tasks_count)
 			.field("wake_after_evicts", &self.wake_after_evicts)
@@ -125,18 +129,9 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		trace!("new {}", cache_size);
 
 		// TODO don't hardcode, make user-configurable.
-		//
-		// Minimum limit is (max record size + entry fixed cost + object fixed cost) * 2,
-		// which is the cost of having exactly one maximum-size entry.
-		//
-		// Multiply by 4 since saving an object requires fetching an entry from
-		// the object list & bitmap consecutively, i.e. we need to be able to
-		// have 4 entries in the cache at any time.
-		let min_limit = (1 << store.max_rec_size().to_raw())
-			+ 32 // entry
-			+ 128; // obj
-		let total_limit = cache_size * 2 + min_limit * 4;
-		trace!(info "total usage limit: {}", total_limit);
+		let soft_limit = cache_size >> store.max_rec_size().to_raw();
+		let hard_limit = soft_limit * 2 + 1;
+		trace!(info "soft/hard limit: {}/{}", soft_limit, hard_limit);
 
 		let mut root_max_size = [0; 4];
 		root_max_size[0] = 1 << store.max_rec_size().to_raw();
@@ -148,11 +143,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let mut s = Self {
 			store,
 			data: RefCell::new(CacheData {
-				objects: Default::default(),
-				mem: Mem {
-					busy: Default::default(),
-					tracker: mem::MemoryTracker::new(cache_size, total_limit),
-				},
+				records: Default::default(),
+				dirty: Default::default(),
+				busy: Default::default(),
+				mem: Mem::new(soft_limit, hard_limit),
 				used_objects_ids: Default::default(),
 				evict_tasks_count: 0,
 				wake_after_evicts: None,
@@ -173,7 +167,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			for offset in 0..bitmap.max_offset() {
 				let entry = bitmap.get(Depth::D0, offset).await?;
 				let mut id = offset * entries_per_leaf;
-				for &byte in entry.get() {
+				for &byte in entry.as_slice() {
 					for k in 0..8 {
 						if (byte >> k) & 1 != 0 {
 							trace!(info "id {:#x} in use", id);
@@ -283,11 +277,8 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	///
 	/// If `global_max < write_max`.
 	pub fn resize_cache(&self, global_max: usize) -> Result<(), Error<D>> {
-		self.data
-			.borrow_mut()
-			.mem
-			.tracker
-			.set_soft_limit(global_max);
+		let soft_limit = global_max >> self.max_rec_size().to_raw();
+		self.data().mem.set_soft_limit(soft_limit);
 		Ok(())
 	}
 
@@ -302,14 +293,12 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 	/// Get statistics for this sesion.
 	pub fn statistics(&self) -> Statistics {
-		self.verify_cache_usage();
-
-		let data = self.data.borrow();
+		let d = self.data();
 		Statistics {
 			storage: self.store.statistics(),
-			soft_usage: data.mem.tracker.soft_usage(),
-			hard_usage: data.mem.tracker.hard_usage(),
-			used_objects: data
+			soft_usage: d.mem.soft_count() << self.max_rec_size().to_raw(),
+			hard_usage: d.mem.hard_count() << self.max_rec_size().to_raw(),
+			used_objects: d
 				.used_objects_ids
 				.iter()
 				.fold(0, |x, r| r.end - r.start + x),

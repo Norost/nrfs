@@ -127,67 +127,33 @@ The trees used by the object list and bitmap can be resized however, since:
 * shrinking does not require zeroing any records, as by the time shrinking
   is possible all the unused objects & bits are already zeroed.
 
+Memory use accounting
+.....................
 
-Cache object & entry states
----------------------------
+Various schemes have been attempted to accurately gauge memory usage,
+but in the end a simple scheme that assumes all records use the same
+amount of memory regardless of real size was adopted.
 
-In the cache, each entry can be in any of three states:
+While this will lead to the cache being vastly underutilized in many cases,
+the cache of the VFS and possibly the (DMA) cache of the disk drivers should
+compensate for this.
 
-::
+Hard limit
+``````````
 
-         /----------------<----------------\
-         |                                 |
-     +---+--+     +---------------+     +--+---+
-  ->-+ None +--<--+ Busy  (ready) +-->--+ Idle |
-     +---+--+     +-------+-------+     +--+---+
-         |                |                |
-         ^                ^                v
-         |                |                |
-         |       +--------+--------+       |
-         \--->---+ Busy (wait mem) +-------/
-                 +-----------------+
+The hard limit ensures the cache won't use up all system memory under heavy
+load. When there is no more room to insert an entry, a task blocks until memory
+is available again.
 
-Every entry is in the None state by default.
+Soft limit
+``````````
 
-When trying to use an entry memory must be reserved first.
-Every entry hence transitions first to Busy (wait mem).
-When the memory has been reserved the entry can move to the Busy (ready) state.
+The soft limit is the target size of the cache.
+If exceeded tasks won't block but entries will begin being evicted in the
+background.
 
-Entries in the Busy (ready) state are assumed to be maximally sized.
-This simplifies modifying them as no extra memory needs to be reserved [#]_.
-
-An entry can transition directly from the Idle to None state if it does not
-need to be flushed.
-If it does need to be flushed it can skip the Busy (ready) state if no task
-needs the entry afterwards.
-
-Entries that are in the Idle state are not currently being used.
-They count towards both the hard and soft limit.
-Their exact size is used for memory accounting as no task will attempt to
-grow the entry.
-
-To simplify the implementation, there are effectively two distinct state
-machines:
-
-* The first pertains to memory being reserved.
-
-  ::
-
-           /------------<------------\
-           |                         |
-       +---+---+     +-----+     +---+---+
-    ->-+ Empty +-<->-+ Max +-<->-+ Exact |
-       +-------+     +-----+     +-------+
-
-* The second pertains to entry availability.
-
-  ::
-
-           /------------<-------------\
-           |                          |
-       +---+---+     +------+     +---+---+
-    ->-+ None  +-->--+ Wait +-->--+ Ready |
-       +-------+     +------+     +-------+
+The soft limit must be strictly lower than the hard limit to ensure there is
+always room for new entries.
 
 
 Resilvering

@@ -1,4 +1,3 @@
-mod data;
 mod get;
 mod key;
 mod read;
@@ -6,16 +5,10 @@ mod set;
 mod write;
 mod write_zeros;
 
-pub(super) use {
-	data::ObjectData,
-	key::{Key, RootIndex},
-};
+pub(super) use key::{Key, RootIndex};
 
 use {
-	super::{
-		memory_tracker::ENTRY_COST, Buf, Cache, Dev, Error, IdKey, Resource, Tree,
-		OBJECT_BITMAP_ID, OBJECT_LIST_ID,
-	},
+	super::{Buf, Cache, Dev, Error, IdKey, Resource, Tree, OBJECT_BITMAP_ID, OBJECT_LIST_ID},
 	crate::{
 		data::record::{Depth, RecordRef},
 		util,
@@ -97,7 +90,7 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 
 impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Grow the object list, i.e. add one level.
-	pub(super) async fn grow_object_list<'a>(&'a self) -> Result<(), Error<D>> {
+	pub(super) async fn grow_object_list(&self) -> Result<(), Error<D>> {
 		trace!("grow_object_list");
 		// Steps:
 		// * take the top-level record.
@@ -114,30 +107,28 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let cur_bitmap_depth = self.object_bitmap_depth.get();
 		let new_bitmap_depth = self.calc_bitmap_depth(new_list_depth);
 
-		// Reserve memory.
-		let count = 1 + usize::from(cur_bitmap_depth != new_bitmap_depth);
-		let mut resv = self.memory_reserve((ENTRY_COST + 8) * count).await;
-
 		// Fixup list and bitmap depth.
-		let mut add_entry = |id, root: RecordRef, depth| {
+		let add_entry = |id, root: RecordRef, depth| async move {
+			let key = IdKey { id, key: Key::new(RootIndex::I0, depth, 0) };
+			self.data().busy.incr(key);
+
+			self.mem_hard_add().await;
 			let mut buf = self.resource().alloc();
 			let root = util::slice_trim_zeros_end(root.as_ref());
 			buf.extend_from_slice(root);
 
-			let r = resv.split(ENTRY_COST + buf.len());
-
-			let key = Key::new(RootIndex::I0, depth, 0);
-			let mut entry = self.entry_insert(IdKey { id, key }, buf, 0, r);
-			entry.dirty_records.insert(key);
+			let mut entry = self.entry_insert(key, buf);
+			entry.dirty.insert(key);
 		};
 
 		// List
-		self.store.set_object_list_depth(new_list_depth);
 		add_entry(
 			OBJECT_LIST_ID,
 			self.store.object_list_root(),
 			new_list_depth,
-		);
+		)
+		.await;
+		self.store.set_object_list_depth(new_list_depth);
 		self.store.set_object_list_root(RecordRef::NONE);
 
 		// Bitmap
@@ -146,15 +137,13 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				OBJECT_BITMAP_ID,
 				self.store.object_bitmap_root(),
 				new_bitmap_depth,
-			);
+			)
+			.await;
 			self.store.set_object_bitmap_root(RecordRef::NONE);
 		}
 
 		self.store.set_object_list_depth(new_list_depth);
 		self.object_bitmap_depth.set(new_bitmap_depth);
-
-		#[cfg(test)]
-		self.verify_cache_usage();
 
 		Ok(())
 	}
@@ -183,12 +172,13 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		let (offt, bit) = util::divmod_p2(id, 3);
 		let (offt, index) = util::divmod_p2(offt, self.max_rec_size().to_raw());
-		let entry = Tree::object_bitmap(self).get(Depth::D0, offt).await?;
+		let mut entry = Tree::object_bitmap(self).get(Depth::D0, offt).await?;
 
-		let mut b = *entry.get().get(index).unwrap_or(&0);
-		b &= !(1 << bit);
-		b |= u8::from(value) << bit;
-		entry.write(index, &[b]);
+		let b = &mut [0];
+		entry.read(index, b);
+		b[0] &= !(1 << bit);
+		b[0] |= u8::from(value) << bit;
+		entry.write(index, b);
 		Ok(())
 	}
 }

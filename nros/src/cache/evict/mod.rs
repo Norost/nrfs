@@ -11,12 +11,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// This is a background task and does not finish.
 	pub(super) async fn evict_excess<'a: 'b, 'b>(&'a self, bg: &'b Background<'a, D>) -> ! {
 		let task = crate::waker_queue::poll(move |cx| loop {
-			let (key, _) = match self
-				.data
-				.borrow_mut()
-				.memory_tracker
-				.evict_next(self.max_rec_size(), cx.waker())
-			{
+			let key = match self.data().mem.evict_next(cx.waker()) {
 				Ok(k) => k,
 				Err(t) => break Err(t),
 			};

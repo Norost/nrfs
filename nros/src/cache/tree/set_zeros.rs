@@ -3,7 +3,7 @@ use {
 		super::{Depth, EntryRef, Key},
 		Tree,
 	},
-	crate::{data::record::RecordRef, resource::Buf, util, Dev, Error, Resource},
+	crate::{data::record::RecordRef, util, Dev, Error, Resource},
 };
 
 impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
@@ -57,7 +57,7 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 
 				for i in i..1 << self.cache.entries_per_parent_p2() {
 					let mut rec = RecordRef::NONE;
-					util::read(i * 8, rec.as_mut(), entry.get());
+					entry.read(i * 8, rec.as_mut());
 
 					let co = o << self.cache.entries_per_parent_p2() | u64::try_from(i).unwrap();
 					let k = self.id_key(d, co);
@@ -101,12 +101,11 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 		trace!("has_dirty {:?}", key);
 		let mut offt = key.offset();
 		let mut end_offt = offt + 1;
-		let root = key.root();
 
 		for d in (Depth::D0..=key.depth()).rev() {
-			let key = Key::new(root, d, offt);
-			let end_key = Key::new(root, d, end_offt);
-			if entry.dirty_records.range(key..end_key).next().is_some() {
+			let key = self.id_key(d, offt);
+			let end_key = self.id_key(d, end_offt);
+			if entry.dirty.range(key..end_key).next().is_some() {
 				return true;
 			}
 			offt <<= self.cache.entries_per_parent_p2();

@@ -1,4 +1,4 @@
-use crate::{data::record::Depth, resource::Buf, util, Dev, Error, Resource};
+use crate::{data::record::Depth, util, Dev, Error, Resource};
 
 impl<'a, D: Dev, R: Resource> super::Tree<'a, D, R> {
 	/// Set a leaf record's data directly.
@@ -12,13 +12,12 @@ impl<'a, D: Dev, R: Resource> super::Tree<'a, D, R> {
 
 		util::trim_zeros_end(&mut data);
 
-		if let Some(entry) = self.cache.wait_entry(key).await {
+		if let Some(mut entry) = self.cache.wait_entry(key).await {
 			entry.replace(data);
 		} else {
-			self.cache.mem().busy.incr(key);
-			self.cache.mem_empty_to_max().await;
+			self.cache.mem_hard_add().await;
 			let mut entry = self.cache.entry_insert(key, data);
-			entry.dirty_records.insert(key.key);
+			entry.dirty.insert(key);
 		}
 
 		Ok(())

@@ -2,8 +2,7 @@ use {
 	super::{RootLocation, Tree},
 	crate::{
 		data::record::{Depth, RecordRef},
-		resource::Buf,
-		util, Dev, Error, Resource,
+		Dev, Error, Resource,
 	},
 };
 
@@ -45,10 +44,10 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 			(self.parent_key_index(offset, depth), self)
 		};
 
-		let entry = p_tree.get(p_depth, p_offset).await?;
+		let mut entry = p_tree.get(p_depth, p_offset).await?;
 
 		let mut old_record_ref = RecordRef::default();
-		util::read(index, old_record_ref.as_mut(), entry.get());
+		entry.read(index, old_record_ref.as_mut());
 
 		trace!(
 			info "replace {:?} -> {:?} @ ({:#x} {:?} {})",

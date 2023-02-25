@@ -1,5 +1,3 @@
-use super::IdKey;
-
 #[cfg(debug_assertions)]
 pub type Gen = u8;
 #[cfg(not(debug_assertions))]
@@ -11,66 +9,6 @@ pub type Idx = arena::Handle<Gen>;
 pub const IDX_NONE: Idx = Idx::from_raw(usize::MAX, u8::MAX);
 #[cfg(not(debug_assertions))]
 pub const IDX_NONE: Idx = Idx::from_raw(usize::MAX, ());
-
-/// Cache LRU queue, with tracking per byte used.
-#[derive(Debug)]
-pub(super) struct Lru {
-	/// Linked list for LRU entries
-	lru: LruList<IdKey>,
-	/// The maximum amount of total bytes to keep cached.
-	cache_max: usize,
-	/// The amount of cached bytes.
-	cache_size: usize,
-}
-
-impl Lru {
-	pub fn new(max_size: usize) -> Self {
-		Self { lru: Default::default(), cache_max: max_size, cache_size: 0 }
-	}
-
-	/// Add a new entry to the LRU.
-	pub fn add(&mut self, key: IdKey, len: usize) -> Idx {
-		self.cache_size += len;
-		self.lru.insert(key)
-	}
-
-	pub fn remove(&mut self, index: Idx, len: usize) -> IdKey {
-		self.cache_size -= len;
-		self.lru.remove(index)
-	}
-
-	/// Get the amount of bytes cached.
-	pub fn size(&self) -> usize {
-		self.cache_size
-	}
-
-	/// Whether there is an excess of cached data.
-	pub fn has_excess(&self) -> bool {
-		self.cache_size > self.cache_max
-	}
-
-	/// Set the maximum amount of cached data the LRU should keep
-	/// before `Self::has_excess` returns `true`.
-	pub fn set_cache_max(&mut self, size: usize) {
-		self.cache_max = size
-	}
-
-	/// Get the key and handle of the last entry.
-	pub fn last(&self) -> Option<(IdKey, Idx)> {
-		self.lru.last().map(|(k, &v)| (v, k))
-	}
-
-	/// Adjust the data usage of a node.
-	pub fn adjust(&mut self, old_size: usize, new_size: usize) {
-		self.cache_size += new_size;
-		self.cache_size -= old_size;
-	}
-
-	/// Move an entry to the back of the queue.
-	pub fn touch(&mut self, index: Idx) {
-		self.lru.promote(index);
-	}
-}
 
 #[derive(Debug)]
 struct Node<V> {
@@ -85,7 +23,7 @@ struct Node<V> {
 /// It only keeps track of nodes and their ordering based on usage.
 /// Insertions and removals need to be done manually.
 #[derive(Debug)]
-struct LruList<V> {
+pub struct LruList<V> {
 	/// The most recently used node, if any.
 	head: Idx,
 	/// The least recently used node, if any.
@@ -115,18 +53,6 @@ impl<V> LruList<V> {
 		idx
 	}
 
-	/// Promote a node to the top of the list.
-	///
-	/// # Panics
-	///
-	/// If the node at the index does not exist.
-	pub fn promote(&mut self, index: Idx) {
-		self.remove_list(index);
-		self.push_front(index);
-		#[cfg(test)]
-		self.assert_valid();
-	}
-
 	/// Remove a node from the list.
 	///
 	/// # Panics
@@ -146,6 +72,11 @@ impl<V> LruList<V> {
 			let node = self.nodes.get(self.tail).unwrap();
 			(self.tail, &node.value)
 		})
+	}
+
+	/// Get the amount of live nodes.
+	pub fn len(&self) -> usize {
+		self.nodes.len()
 	}
 
 	/// Insert a value at the front of the list.

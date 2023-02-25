@@ -47,15 +47,19 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 
 		// Check if we just need to zero out the middle of a single record.
 		if Some(root) == end_root && offt == end_offt {
-			let entry = tree(root).get(Depth::D0, offt).await?;
-			entry.write_zeros(index, end_index - index);
+			tree(root)
+				.get(Depth::D0, offt)
+				.await?
+				.write_zeros(index, end_index - index);
 			return Ok(len);
 		}
 
 		// Trim leftmost record.
 		if index != 0 {
-			let entry = tree(root).get(Depth::D0, offt).await?;
-			entry.write_zeros(index, (1 << rec_size_p2) - index);
+			tree(root)
+				.get(Depth::D0, offt)
+				.await?
+				.write_zeros(index, (1 << rec_size_p2) - index);
 			offt += 1;
 		}
 
@@ -74,8 +78,10 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 			// Trim rightmost record.
 			// If end_index is 0, it needs to remain untouched.
 			if end_index != 0 {
-				let entry = tree(er).get(Depth::D0, end_offt).await?;
-				entry.write_zeros(0, end_index);
+				tree(er)
+					.get(Depth::D0, end_offt)
+					.await?
+					.write_zeros(0, end_index);
 			}
 		}
 

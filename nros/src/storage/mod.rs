@@ -137,6 +137,11 @@ impl<D: Dev, R: Resource> Store<D, R> {
 
 	/// Write a record.
 	pub async fn write(&self, data: R::Buf) -> Result<(RecordRef, R::Buf), Error<D>> {
+		assert!(
+			data.len() <= 1 << self.max_rec_size().to_raw(),
+			"data len is greater than max record size"
+		);
+
 		// Calculate minimum size of buffer necessary for the compression algorithm
 		// to work.
 		let len = self.compression().max_output_size(data.len());

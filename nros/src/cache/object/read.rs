@@ -1,6 +1,6 @@
 use {
 	super::{Dev, Object, Resource},
-	crate::{resource::Buf, Error},
+	crate::Error,
 };
 
 impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
@@ -34,21 +34,11 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 		let range = self.calc_range(offset, buf.len());
 		let (first_offset, last_offset) = self.calc_record_offsets(offset, buf.len());
 
-		/// Copy from record to first half of `buf` and fill remainder with zeroes.
-		#[track_caller]
-		fn copy(buf: &mut [u8], data: &[u8]) {
-			buf[..data.len()].copy_from_slice(data);
-			buf[data.len()..].fill(0);
-		}
-
 		let buf_len = buf.len();
 
 		if range.start() == range.end() {
 			// We need to slice one record twice
-			let b = self.get(*range.start()).await?;
-
-			let b = b.get().get(first_offset..).unwrap_or(&[]);
-			copy(buf, &b[..buf.len().min(b.len())]);
+			self.get(*range.start()).await?.read(first_offset, buf);
 		} else {
 			// We need to slice the first & last record once and operate on the others in full.
 			let mut buf = buf;
@@ -62,25 +52,21 @@ impl<'a, D: Dev, R: Resource> Object<'a, D, R> {
 				let b;
 				(b, buf) =
 					buf.split_at_mut((1 << self.cache.max_rec_size().to_raw()) - first_offset);
-				let d = self.get(first_key).await?;
-				copy(b, d.get().get(first_offset..).unwrap_or(&[]));
+				self.get(first_key).await?.read(first_offset, b);
 			}
 
 			// Copy middle records |xxxxxxxx|
 			for key in range {
 				let b;
 				(b, buf) = buf.split_at_mut(1 << self.cache.max_rec_size().to_raw());
-				let d = self.get(key).await?;
-				copy(b, d.get());
+				self.get(key).await?.read(0, b);
 			}
 
 			// Copy end record |xxxx----|
 			// Don't bother if there's nothing to copy
 			if last_offset > 0 {
 				debug_assert_eq!(buf.len(), last_offset);
-				let d = self.get(last_key).await?;
-				let max_len = d.len().min(buf.len());
-				copy(buf, &d.get()[..max_len]);
+				self.get(last_key).await?.read(0, buf);
 			}
 		}
 

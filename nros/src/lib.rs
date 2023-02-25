@@ -160,7 +160,6 @@ use {
 	core::{fmt, future::Future},
 	key_derivation::KeyDerivation,
 	storage::{DevSet, Store},
-	waker_queue::{WakerQueue, WakerQueueTicket},
 };
 
 type Background<'a, D> = background::Background<'a, Result<(), Error<D>>>;

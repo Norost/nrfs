@@ -1,6 +1,6 @@
 use {
-	super::super::{mem::BusyState, Cache, Entry, IdKey, Tree},
-	crate::{resource::Buf, util, Dev, Error, Resource},
+	super::super::{Cache, IdKey, Tree},
+	crate::{util, Dev, Error, Resource},
 	core::{future::Future, pin::Pin},
 };
 
@@ -13,29 +13,26 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		trace!("evict_entry {:?}", key);
 
 		// Take entry
-		let (Entry { data, lru_idx }, is_dirty) = self.entry_remove(key);
+		let (data, is_dirty) = self.entry_remove(key);
 
 		// If the entry is not dirty, just remove it.
 		if !is_dirty {
 			trace!(info "not dirty");
-			self.mem()
-				.exact_to_empty(self.max_rec_size(), lru_idx, data.len());
+			self.mem().hard_del();
 			return None;
 		}
 
 		self.data().evict_tasks_count += 1;
 
-		let first = self.mem().busy.incr(key);
-		assert!(matches!(first, BusyState::New), "not in idle state");
+		let first = self.data().busy.incr(key);
+		assert!(first, "evicted entry was referenced");
 
 		Some(util::box_fut(async move {
 			trace!("evict_entry::(background) {:?}", key);
 
 			let (record_ref, data) = self.store.write(data).await?;
-
-			self.mem()
-				.exact_to_empty(self.max_rec_size(), lru_idx, data.len());
 			drop(data);
+			self.mem().hard_del();
 
 			// Store in parent.
 			let tree = match key.id {
@@ -47,18 +44,19 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				.await?;
 
 			// If any tasks are waiting on this entry we have to fetch the entry again.
-			if !self.mem().busy.decr(key) {
+			if !self.data().busy.decr(key) {
 				trace!(info "keep");
 				// Reserve memory & fetch entry.
-				let reserve = self.mem_empty_to_max().await;
+				self.data().busy.incr(key);
+				self.mem_hard_add().await;
 				let data = self.store.read(record_ref).await?;
+				self.data().busy.wake(key);
 				self.entry_insert(key, data);
-				self.mem().busy.mark_ready(key);
 			}
 
-			self.entry_unmark_dirty(key);
-
 			let mut data = self.data();
+			data.dirty.remove(&key);
+
 			data.evict_tasks_count -= 1;
 			if data.evict_tasks_count == 0 {
 				data.wake_after_evicts.take().map(|w| w.wake());

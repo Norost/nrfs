@@ -82,12 +82,8 @@ fn write_flush_read_offset_1024() {
 fn write_flush_read_offset_1023() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
-		s.store.verify_cache_usage();
-
 		let obj = s.create().await.unwrap();
-		s.store.verify_cache_usage();
 		obj.write(1023, b"Hello, world!").await.unwrap();
-		s.store.verify_cache_usage();
 
 		let id = obj.id();
 		clear(&s).await;

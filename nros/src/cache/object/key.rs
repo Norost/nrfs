@@ -20,11 +20,14 @@ use {
 pub struct Key(u64);
 
 impl Key {
+	/// The maximum valid offset.
+	pub const MAX_OFFSET: u64 = (1 << 55) - 1;
+
 	/// # Panics
 	///
-	/// If offset is out of range, i.e. larger than `2**55`.
+	/// If offset is out of range, i.e. equal to or larger than `2**55`.
 	pub fn new(root: RootIndex, depth: Depth, offset: u64) -> Self {
-		assert!(offset <= 1 << 55, "offset out of range");
+		assert!(offset < 1 << 55, "offset out of range");
 		Self((root as u64) << 62 | (depth as u64) << 60 | offset)
 	}
 

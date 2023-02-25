@@ -1,99 +1,93 @@
-mod busy;
-mod tracker;
+mod lru;
 
-pub(super) use busy::BusyState;
-pub use tracker::{Idx, IDX_NONE};
+pub use lru::{Idx, IDX_NONE};
 
 use {
 	super::IdKey,
-	crate::{waker_queue, MaxRecordSize},
+	crate::waker_queue::{self, WakerQueue, WakerQueueTicket},
+	core::task::Waker,
 };
 
 /// Memory management.
 #[derive(Debug)]
-pub struct Mem {
-	/// Entries currently being fetched or actively in use by a task.
-	pub busy: busy::BusyMap,
-	/// Memory usage tracker.
-	pub tracker: tracker::MemoryTracker,
+pub(super) struct Mem {
+	/// Amount of entries beyond which tasks will block.
+	hard_limit: usize,
+	/// Current amount of reserved & used slots.
+	hard_count: usize,
+	/// Tasks waiting for an entry slot to become free.
+	hard_wakers: WakerQueue<()>,
+	/// Amount of entries beyond which entries will be evicted.
+	soft_limit: usize,
+	/// LRU tracker for unreferenced entries.
+	lru: lru::LruList<IdKey>,
+	/// Tasks to wake if there are more entries to evict.
+	soft_wakers: WakerQueue<()>,
 }
 
 impl Mem {
-	/// Move an entry from the Max to the Empty state.
-	pub fn max_to_empty(&mut self, max_rec_size: MaxRecordSize) {
-		trace!("mem_max_to_empty");
-		self.tracker.hard_del(mem_max(max_rec_size));
+	pub fn new(soft_limit: usize, hard_limit: usize) -> Self {
+		Self {
+			hard_limit,
+			hard_count: 0,
+			hard_wakers: Default::default(),
+			soft_limit,
+			lru: Default::default(),
+			soft_wakers: Default::default(),
+		}
 	}
 
-	/// Move an entry from the Exact to the Empty state.
-	pub fn exact_to_empty(&mut self, max_rec_size: MaxRecordSize, idx: Idx, size: usize) -> IdKey {
-		trace!("mem_exact_to_empty {}", size);
-		self.tracker.hard_del(size);
-		self.tracker.soft_del(idx, size)
+	#[must_use = "LRU idx"]
+	pub fn soft_add(&mut self, key: IdKey) -> Idx {
+		trace!("soft_add {:?}", key);
+		self.soft_wakers.wake_all();
+		self.lru.insert(key)
 	}
 
-	/// Move an entry from the Max to Exact state.
-	pub fn max_to_exact(&mut self, max_rec_size: MaxRecordSize, key: IdKey, size: usize) -> Idx {
-		trace!("mem_max_to_exact {}", size);
-		self.tracker.hard_del(mem_max(max_rec_size) - size);
-		self.tracker.soft_add(key, size)
+	pub fn soft_del(&mut self, idx: Idx) -> IdKey {
+		trace!("soft_del {:?}", idx);
+		self.lru.remove(idx)
+	}
+
+	pub fn hard_del(&mut self) {
+		trace!("hard_del");
+		self.hard_count -= 1;
+		self.hard_wakers.wake_next();
+	}
+
+	pub fn evict_next(&mut self, waker: &Waker) -> Result<IdKey, WakerQueueTicket<()>> {
+		(self.lru.len() > self.soft_limit)
+			.then(|| self.lru.last())
+			.flatten()
+			.map(|(_, k)| *k)
+			.ok_or_else(|| self.soft_wakers.push(waker.clone(), ()))
+	}
+
+	pub fn hard_count(&self) -> usize {
+		self.hard_count
+	}
+
+	pub fn soft_count(&self) -> usize {
+		self.lru.len()
+	}
+
+	pub fn set_soft_limit(&mut self, value: usize) {
+		self.soft_limit = value;
+		self.soft_wakers.wake_next();
 	}
 }
 
 impl<D: crate::Dev, R: crate::Resource> super::Cache<D, R> {
-	async fn mem_hard_add(&self, amount: usize) {
-		waker_queue::poll(
-			move |cx| match self.mem().tracker.hard_add(amount, cx.waker()) {
-				Some(t) => Err(t),
-				None => Ok(()),
-			},
-		)
+	pub async fn mem_hard_add(&self) {
+		trace!("hard_add");
+		waker_queue::poll(|cx| {
+			let mut mem = self.mem();
+			if mem.hard_count < mem.hard_limit {
+				mem.hard_count += 1;
+				return Ok(());
+			}
+			Err(mem.hard_wakers.push(cx.waker().clone(), ()))
+		})
 		.await
 	}
-
-	/// Reserve memory for transitioning an entry from Empty to the Max state.
-	///
-	/// Since memory may not be immediately available this function may block.
-	pub(super) async fn mem_empty_to_max(&self) {
-		trace!("mem_empty_to_max");
-		self.mem_hard_add(mem_max(self.max_rec_size())).await;
-	}
-
-	/// Move an entry from the Exact to Max state.
-	///
-	/// Since memory may not be immediately available this function may block.
-	pub(super) async fn mem_idle_to_busy(&self, idx: Idx, size: usize) {
-		trace!("mem_idle_to_busy {}", size);
-		self.mem().tracker.soft_del(idx, size);
-		self.mem_hard_add(mem_max(self.max_rec_size()) - size).await;
-	}
-
-	/// Check if cache size matches real usage
-	#[track_caller]
-	pub(super) fn verify_cache_usage(&self) {
-		if !(cfg!(test) || cfg!(fuzzing)) {
-			return;
-		}
-		let data = &*self.data();
-		let real_usage = data.objects.iter().fold(0, |x, (&id, obj)| {
-			x + obj
-				.records
-				.iter()
-				.filter(|&(&key, _)| !data.mem.busy.has(IdKey { id, key }))
-				.fold(0, |x, (_, d)| x + v.data.len() + tracker::ENTRY_COST)
-		});
-		assert_eq!(
-			real_usage,
-			data.mem.tracker.lru.size(),
-			"cache size mismatch"
-		);
-		assert!(
-			data.mem.tracker.lru.size() <= data.mem.tracker.total.usage(),
-			"lru size larger than total usage"
-		);
-	}
-}
-
-fn mem_max(max_rec_size: MaxRecordSize) -> usize {
-	tracker::ENTRY_COST + (1 << max_rec_size.to_raw())
 }
