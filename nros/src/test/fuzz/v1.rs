@@ -331,3 +331,49 @@ fn write_zeros_missing_end() {
 	)
 	.run()
 }
+
+#[test]
+fn bitmap_grow_race_use_after_free() {
+	Test::new(
+		0,
+		[
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Create,
+			Write { idx: 0x57, offset: 0x8000ffff, amount: 0xff2c },
+			Create,
+			Destroy { idx: 0xff },
+			Destroy { idx: 0x57 },
+		],
+	)
+	.run()
+}

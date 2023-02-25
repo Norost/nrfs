@@ -107,12 +107,16 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		let cur_bitmap_depth = self.object_bitmap_depth.get();
 		let new_bitmap_depth = self.calc_bitmap_depth(new_list_depth);
 
+		self.mem_hard_add().await;
+		if cur_bitmap_depth != new_bitmap_depth {
+			self.mem_hard_add().await;
+		}
+
 		// Fixup list and bitmap depth.
-		let add_entry = |id, root: RecordRef, depth| async move {
+		let add_entry = |id, root: RecordRef, depth| {
 			let key = IdKey { id, key: Key::new(RootIndex::I0, depth, 0) };
 			self.data().busy.incr(key);
 
-			self.mem_hard_add().await;
 			let mut buf = self.resource().alloc();
 			let root = util::slice_trim_zeros_end(root.as_ref());
 			buf.extend_from_slice(root);
@@ -126,8 +130,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			OBJECT_LIST_ID,
 			self.store.object_list_root(),
 			new_list_depth,
-		)
-		.await;
+		);
 		self.store.set_object_list_depth(new_list_depth);
 		self.store.set_object_list_root(RecordRef::NONE);
 
@@ -137,8 +140,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 				OBJECT_BITMAP_ID,
 				self.store.object_bitmap_root(),
 				new_bitmap_depth,
-			)
-			.await;
+			);
 			self.store.set_object_bitmap_root(RecordRef::NONE);
 		}
 

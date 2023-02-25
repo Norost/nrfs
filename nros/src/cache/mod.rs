@@ -130,7 +130,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		// TODO don't hardcode, make user-configurable.
 		let soft_limit = cache_size >> store.max_rec_size().to_raw();
-		let hard_limit = soft_limit * 2 + 1;
+		let hard_limit = soft_limit * 2 + 1 + 1; // 1 to ensure operation + 1 for grow_object_list
 		trace!(info "soft/hard limit: {}/{}", soft_limit, hard_limit);
 
 		let mut root_max_size = [0; 4];
