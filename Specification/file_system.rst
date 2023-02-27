@@ -76,74 +76,7 @@ data can be placed directly on a directory's heap.
 Directory
 ---------
 
-A directory is a special type of file that points to other files.
-
-It consists of three objects [#]_, where ID is the ID of the first object:
-
-* The first object at ID + 0 contains the header and directory entries.
-* The second object at ID + 1 contains the hashmap and allocation log.
-* The third object at ID + 2 contains the heap.
-
-::
-
-                   +-----------+
-           +-------+ Directory +-------+
-          /        +-----+-----+        \
-         /               |               \
-  +-----+-----+    +-----+-----+    +-----+-----+
-  |   Items   |    |  Hashmap  |    |   Heap    |
-  +===========+    +===========+    +===========+
-  |  Header   |    |  Entry 0  |    |    ...    |
-  +-----------+    +-----------+    +-----------+
-  |  Item 0   |    |  Entry 1  |
-  +-----------+    +-----------+
-  |  Item 1   |    |    ...    |
-  +-----------+    +-----------+
-  |    ...    |    | Heap log  |
-  +-----------+    +-----------+
-  | Item log  |
-  +-----------+
-
-.. [#]
-
-  The directory's data is split so each object can grow without needing to
-  shift directory, hashmap, heap data or leave large holes.
-  Fixing the ID's offsets allows loading them concurrently.
-
-  To allow efficient iteration while modifying the directory,
-  by adding and/or removing items,
-  items aren't stored directly in the hashmap but are stored separately.
-
-A hashmap [#]_ is used to index file in constant time.
-
-.. [#]
-
-  Hashmaps are used as they are relatively simple to implement.
-  They also scale and perform well.
-  Two situations were considered:
-
-  * A large directory is iterated.
-  * A large directory where random entries are accessed.
-
-  The following data structures were considered:
-
-  * Plain array.
-    These have notoriously poor performance in both cases.
-  * BTree.
-    These have good performance in general and are commonly used, but
-    are relatively difficult to implement and suffer from indirection.
-  * Hashmap. These have good performance in general.
-    They are not commonly used as they require a contiguous region of storage.
-    However, the underlying object storage makes this practical.
-    The main drawbacks are:
-
-    * O(n) worst-case lookup.
-      This is not expected to be a problem in the general case, especially
-      with a cryptographic hash.
-    * Growing is slow, as it requires a full reallocation.
-      This may result in performance hiccups when growing an extremely large
-      directory, though this is not expected to be a problem for all but the
-      largest directories (millions of entries).
+A directory is an object that contains or contains pointers to other objects.
 
 Every directory begins with a variable-sized byte header.
 
@@ -154,34 +87,33 @@ Every directory begins with a variable-sized byte header.
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |        Entry count        | MLen | HAlg | ELen | HLen |
-  +------+---------------------------+------+------+------+------+
-  |    8 |                           |      Entry capacity       |
-  +------+---------------------------+---------------------------+
+  |    0 |          Allocation log offset          | ILen | HLen |
+  +------+-----------------------------------------+------+------+
+  |    8 |            Group list offset            | Group count |
+  +------+-----------------------------------------+-------------+
   |   16 |                                                       |
-  +------+                          Key                          |
-  |   24 |                                                       |
-  +------+-------------------------------------------------------+
-  |   32 |                      Extensions                       |
-  +------+-------------------------------------------------------+
-  |  ... |                          ...                          |
+  +------+                      Extensions                       |
+  |  ... |                                                       |
   +------+-------------------------------------------------------+
 
-HLen and ELen are in units of 8 bytes.
-MLen represents a power of 2.
+* HLen: Length of the directory header, in units of 8 bytes.
 
-Extensions define metadata to be attached to entries.
-Each extension is prefixed with a 4 byte header.
+* ILen: Length of each item, in units of 8 bytes.
 
-Hash algorithms are [#]_:
+* Allocation log offset: Offset in the directory object of the allocation log.
 
-* 0: No hash
-* 1: SipHash13 with Robin Hood hashing
+* Group count: The size of the group list.
 
-.. [#]
+* Group list offset: Offset in the directory object of the group list.
 
-   If the hashing algorithm isn't known the table can still be iterated as a
-   fallback (i.e. assume "No hash").
+* Extensions: Extra attributes & other data defined in the object.
+
+  If any extensions are not recognized, the directory *must* be treated as
+  immutable.
+
+
+Extensions
+~~~~~~~~~~
 
 .. table:: Extension header
   :align: center
@@ -197,175 +129,183 @@ Hash algorithms are [#]_:
   |  N+2 |    Data     |
   +------+-------------+
 
-.. table:: Item / entry header if KLen <= 27
+* NLen: Length of the name of the extension.
+
+* DLen: Length of the data associated with the extension.
+
+* Name: Name of the extension.
+
+* Data: Data associated with the extension.
+
+
+Directory group
+~~~~~~~~~~~~~~~
+
+Every group has a size of ``32 + item_len * 256`` bytes.
+
+.. table:: Group pointer
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                  Key (0 to 6)                  | KLen |
-  +------+------------------------------------------------+------+
-  |    8 |                     Key (7 to 14)                     |
-  +------+-------------------------------------------------------+
-  |   16 |                    Key (15 to 22)                     |
-  +------+---------------------------+---------------------------+
-  |   24 |            ...            |      Key (23 to 26)       |
-  +------+---------------------------+---------------------------+
+  |    0 |             |                 Offset                  |
+  +------+-------------+-----------------------------------------+
 
-.. table:: Item / entry header if KLen > 27
-  :align: center
-  :widths: grid
+* Offset: Offset in the directory object to the group.
+  If 0, the group is not allocated.
+
+.. table:: Group pointer
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                                                | KLen |
-  +------+------------------------------------------------+------+
-  |    8 |                      Key offset                       |
-  +------+-------------------------------------------------------+
-  |   16 |                          Hash                         |
-  +------+---------------------------+---------------------------+
-  |   24 |            ...            |                           |
-  +------+---------------------------+---------------------------+
+  |    0 |             |                 Offset                  |
+  +------+-------------+-----------------------------------------+
 
-* KLen: The length of the key.
-  If it 0, the entry is unused.
-
-* Key: The key string.
-  Only valid if KLen is 27 or less [#]_.
-
-* Key offset: Pointer to the key in the heap
-  Only valid if KLen is larger than 27.
-
-* Hash: The 64-bit hash of the key.
-  Only valid if KLen is larger than 27.
-
-.. [#]
-
-  Embedding the key avoids an indirection.
-
-  The maximum length of the embedded key is based on data from a Devuan
-  desktop:
-
-  * Total amount of files: 18094927
-
-  ================ ======= ================ ============
-  File name length  Count  Cumulative count Cumulative %
-  ================ ======= ================ ============
-                 1   47985            47986         0.27
-                 2  292412           340398         1.88
-                 3  271133           611531         3.38
-                 4  383093           994624         5.50
-                 5 1459539          2454163        13.56
-                 6 4328975          6783138        37.49
-                 7  797426          7580564        41.89
-                 8 1324312          8904876        49.21
-                 9 1129762         10034638        55.46
-                10  726535         10761173        59.47
-                11  818181         11579354        63.99
-                12  718414         12297768        67.96
-                13  518331         12816099        70.83
-                14  504373         13320472        73.61
-                15  422600         13743072        75.95
-                16  381073         14124145        78.06
-                17  375204         14499349        80.13
-                18  450636         14949985        82.62
-                19  284422         15234407        84.19
-                20  248121         15482528        85.56
-  ================ ======= ================ ============
+* 
 
 
 Directory item
 ~~~~~~~~~~~~~~
 
-.. table:: Directory item with object ID.
-  :align: center
-  :widths: grid
+Each item has a fixed length, defined in the directory header.
+
+.. table:: Item
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
   |    0 |                                                       |
-  +------+                                                       |
+  +------+                         Name                          |
   |    8 |                                                       |
-  +------+                        Header                         |
-  |   16 |                                                       |
-  +------+--------------------+------+                           |
-  |   24 |                    | Type |                           |
-  +------+--------------------+------+---------------------------+
-  |   32 |                       Object ID                       |
   +------+-------------------------------------------------------+
-  |   40 |                                                       |
-  +------+                    Extension data                     |
+  |   16 |                                                       |
+  +------+                         Data                          |
+  |   24 |                                                       |
+  +------+-------------------------------------------------------+
+  |   32 |                                                       |
+  +------+                       Metadata                        |
   |  ... |                                                       |
   +------+-------------------------------------------------------+
 
-.. table:: Directory item with embedded data.
-  :align: center
-  :widths: grid
+* Name: The name of the item.
 
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |                                                       |
-  +------+                                                       |
-  |    8 |                                                       |
-  +------+                        Header                         |
-  |   16 |                                                       |
-  +------+-------------+------+------+                           |
-  |   24 | Data length |      | Type |                           |
-  +------+-------------+------+------+---------------------------+
-  |   32 |                      Data offset                      |
-  +------+-------------------------------------------------------+
-  |   40 |                                                       |
-  +------+                    Extension data                     |
-  |  ... |                                                       |
-  +------+-------------------------------------------------------+
+  .. table:: Item name if NLen <= 15
 
-* Type: The type of the entry [#]_.
+    +------+------+------+------+------+------+------+------+------+
+    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+    +======+======+======+======+======+======+======+======+======+
+    |    0 |                 Name (0 to 6)                  | NLen |
+    +------+------------------------------------------------+------+
+    |    8 |                    Name (7 to 14)                     |
+    +------+-------------------------------------------------------+
 
-.. [#] 
+  .. table:: Item name if NLen > 15
+    :align: center
+    :widths: grid
 
-   KLen may be zero while having a non-zero type if an entry was removed while
-   still having a live reference.
+    +------+------+------+------+------+------+------+------+------+
+    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+    +======+======+======+======+======+======+======+======+======+
+    |    0 |                 Name (0 to 6)                  | NLen |
+    +------+-----------------------------------------+------+------+
+    |    8 |              Name offset                | Name (7-9)  |
+    +------+-----------------------------------------+-------------+
 
-   This makes it easier to support ``unlink()`` on UNIX systems.
+  * NLen: The length of the key.
+    If it 0, the item is unused.
 
-* Object ID: The ID of the corresponding object.
-  Only valid if the type is Directory, File or Symbolic Link.
+  * Name: The key string.
+    Bytes 7 to 14 are only valid if NLen is 15 or less [#]_.
 
-* Data offset: The offset of the entry's data in the heap.
-  Only valid if the type is Embedded File or Embedded Symbolic Link.
+  * Name offset: Pointer to the key in the heap
+    Only valid if NLen is larger than 15.
 
-* Data length: The offset of the entry's data in the heap.
-  Only valid if the type is Embedded File or Embedded Symbolic Link.
+  .. [#]
 
-* Extension data: Optional metadata associated with the entry.
-  See Extensions_.
+    Embedding the key avoids an indirection.
 
+    The maximum length of the embedded key is based on data from a Devuan
+    desktop:
+
+    * Total amount of files: 18094927
+
+    ================ ======= ================ ============
+    File name length  Count  Cumulative count Cumulative %
+    ================ ======= ================ ============
+                   1   47985            47986         0.27
+                   2  292412           340398         1.88
+                   3  271133           611531         3.38
+                   4  383093           994624         5.50
+                   5 1459539          2454163        13.56
+                   6 4328975          6783138        37.49
+                   7  797426          7580564        41.89
+                   8 1324312          8904876        49.21
+                   9 1129762         10034638        55.46
+                  10  726535         10761173        59.47
+                  11  818181         11579354        63.99
+                  12  718414         12297768        67.96
+                  13  518331         12816099        70.83
+                  14  504373         13320472        73.61
+                  15  422600         13743072        75.95
+                  16  381073         14124145        78.06
+                  17  375204         14499349        80.13
+                  18  450636         14949985        82.62
+                  19  284422         15234407        84.19
+                  20  248121         15482528        85.56
+    ================ ======= ================ ============
+
+    Some bytes of the key are kept embedded even with NLen > 15 to speed up
+    lookups.
+
+* Data: Data associated with the item.
+
+  .. table:: Item data for file & symlink types.
+
+    +------+------+------+------+------+------+------+------+------+
+    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+    +======+======+======+======+======+======+======+======+======+
+    |    0 |                   Object ID                    | Type |
+    +------+------------------------------------------------+------+
+    |    8 |                        Length                         |
+    +------+-------------------------------------------------------+
+
+  .. table:: Item data for embedded file & symlink types.
+
+    +------+------+------+------+------+------+------+------+------+
+    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+    +======+======+======+======+======+======+======+======+======+
+    |    0 |                 Offset                  |      | Type |
+    +------+-----------------------------------------+------+------+
+    |    8 |                                         |   Length    |
+    +------+-----------------------------------------+-------------+
+
+  .. table:: Item data for directory types.
+
+    +------+------+------+------+------+------+------+------+------+
+    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+    +======+======+======+======+======+======+======+======+======+
+    |    0 |                   Object ID                    | Type |
+    +------+----------------------------------+-------------+------+
+    |    8 |                                  |     Item count     |
+    +------+----------------------------------+--------------------+
+
+  * Type: The type of the item.
+    The value of the other data fields depend on the type.
+
+  * Object ID: The ID of the object.
+
+  * Length: The length of the file or symlink in bytes.
+
+  * Item count: The amount of items in the directory.
+
+* Metadata: Metadata associated with the item.
+  The contents & length of this field depends on the extensions defined in the
+  directory header.
+  See _Extensions.
 
 Hashmap entry
 ~~~~~~~~~~~~~
-
-.. table:: Hashmap entry
-  :align: center
-  :widths: grid
-
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |                                                       |
-  +------+                                                       |
-  |    8 |                                                       |
-  +------+                        Header                         |
-  |   16 |                                                       |
-  +------+---------------------------+                           |
-  |   24 |           Index           |                           |
-  +------+---------------------------+---------------------------+
-
-* Index: the index of the corresponding directory item.
-
-If the key is heap-allocated, the same allocation is shared with the directory
-item.
 
 
 Allocation log
@@ -463,7 +403,7 @@ It is expressed in microseconds, which gives it a range of ~585000 years.
 The timestamp is relative to the UNIX epoch.
 
 .. table:: Extension data
-  :align: center
+             :align: center
   :widths: grid
 
   +------+------+------+
@@ -481,3 +421,92 @@ The timestamp is relative to the UNIX epoch.
   +======+======+======+======+======+======+======+======+======+
   |    0 |                       Timestamp                       |
   +------+-------------------------------------------------------+
+
+
+Hashmap
+~~~~~~~
+
+name: "hmap"
+
+The hashmap [#]_ extension adds a data structure to speed up lookup operations.
+
+It uses SipHash13 with Robin Hood hashing.
+
+.. [#]
+
+  Hashmaps are used as they are relatively simple to implement.
+  They also scale and perform well.
+  Two situations were considered:
+
+  * A large directory is iterated.
+  * A large directory where random entries are accessed.
+
+  The following data structures were considered:
+
+  * Plain array.
+    These have notoriously poor performance in both cases.
+  * BTree.
+    These have good performance in general and are commonly used, but
+    are relatively difficult to implement and suffer from indirection.
+  * Hashmap. These have good performance in general.
+    They are not commonly used as they require a contiguous region of storage.
+    However, the underlying object storage makes this practical.
+    The main drawbacks are:
+
+    * O(n) worst-case lookup.
+      This is not expected to be a problem in the general case, especially
+      with a cryptographic hash.
+    * Growing is slow, as it requires a full reallocation.
+      This may result in performance hiccups when growing an extremely large
+      directory, though this is not expected to be a problem for all but the
+      largest directories (millions of entries).
+
+
+.. table:: Extension data
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                                                       |
+  +------+                          Key                          |
+  |    8 |                                                       |
+  +------+-----------------------------------------+-------------+
+  |   16 |                 Offset                  | Properties  |
+  +------+-----------------------------------------+-------------+
+
+.. table:: Properties
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+------+------+
+  | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                    |           Hashmap size           |
+  +------+--------------------+----------------------------------+
+  |    8 |                                                       |
+  +------+-------------------------------------------------------+
+
+* Key: The key to use with the hash function.
+
+* Hashmap size: The size of the hashmap as a power of 2.
+
+* Offset: The offset of the hashmap in the directory object.
+
+
+.. table:: Hashmap entry
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |               Hash               |     Item index     |
+  +------+----------------------------------+--------------------+
+
+* Hash: The lower 40 bits of the hash.
+
+* Item index: the index of the corresponding directory item.
+  This value is 1-based, i.e. index 1 refers to the first item.
+  if the index is 0, the entry is unused.
