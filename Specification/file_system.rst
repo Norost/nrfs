@@ -21,6 +21,12 @@ For GUID partition tables the following GUID is used to identify NRFS partitions
   f752bf42-7b96-4c3a-9685-ad8497dca74c
 
 
+Magic string
+------------
+
+The magic string in the NROS header is ``NRFS``.
+
+
 File types
 ----------
 
