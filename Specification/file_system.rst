@@ -154,7 +154,7 @@ Every group has a size of ``32 + item_len * 256`` bytes.
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                  Offset                 |      | Cnt  |
+  |    0 |                  Offset                 | Flgs | Cnt  |
   +------+-----------------------------------------+------+------+
 
 * Offset: Offset in the directory object to the group.
@@ -162,6 +162,19 @@ Every group has a size of ``32 + item_len * 256`` bytes.
 
 * Cnt: Amount of allocated items minus 1.
   Only valid if offset is not 0.
+
+* Flgs: Flags
+
+  .. table:: Flags
+
+  +------+------+------+------+------+------+------+------+------+
+  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+======+======+
+  |    0 |                                                | Dngl |
+  +------+------------------------------------------------+------+
+
+  * Dngl: If 1, there are dangling items, i.e. items without a name.
+    These should be cleaned up if not referenced.
 
 .. table:: Group
 
