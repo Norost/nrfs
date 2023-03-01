@@ -160,16 +160,28 @@ Every group has a size of ``32 + item_len * 256`` bytes.
 * Offset: Offset in the directory object to the group.
   If 0, the group is not allocated.
 
-.. table:: Group pointer
+.. table:: Group
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |             |                 Offset                  |
-  +------+-------------+-----------------------------------------+
+  |    0 |                                                       |
+  +------+                                                       |
+  |    8 |                                                       |
+  +------+                        Bitmap                         |
+  |   16 |                                                       |
+  +------+                                                       |
+  |   24 |                                                       |
+  +------+-------------------------------------------------------+
+  |   32 |                                                       |
+  +------+                         Items                         |
+  |  ... |                                                       |
+  +------+-------------------------------------------------------+
 
-* 
+* Bitmap: Bitmap indicated used item slots.
+  1 means used.
 
+* Items: List of items.
 
 Directory item
 ~~~~~~~~~~~~~~
