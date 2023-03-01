@@ -1,8 +1,12 @@
 use {
-	super::{ext, Dev, Dir, DirData, Key},
-	crate::{DataHeader, DirRef, Error, FileRef, Name, Nrfs, SymRef, UnknownRef},
+	super::{ext, Dev, Dir, DirData, Index, Name, Offset},
+	crate::{DataHeader, DirRef, Error, FileRef, Nrfs, ObjectId, SymRef, UnknownRef},
 	core::cell::RefMut,
 };
+
+pub(super) const OFFT_NAME: u16 = 0;
+pub(super) const OFFT_DATA: u16 = 16;
+pub(super) const OFFT_META: u16 = 32;
 
 const TY_NONE: u8 = 0;
 const TY_DIR: u8 = 1;
@@ -11,82 +15,17 @@ const TY_SYM: u8 = 3;
 const TY_EMBED_FILE: u8 = 4;
 const TY_EMBED_SYM: u8 = 5;
 
-/// A single directory item.
-#[derive(Debug)]
-pub(crate) struct Item {
-	/// The type of this item.
-	///
-	/// May be set to a value other than [`Type::None`] if the item is or was dangling,
-	/// e.g. due to live references.
-	pub ty: Type,
-	/// Other item data.
-	pub data: ItemData,
-	/// The index of this item in the item list.
-	pub index: u32,
-}
-
 #[derive(Debug)]
 /// Other item data.
 pub struct ItemData {
-	/// The key of this item.
-	pub(super) key: Option<Key>,
+	/// The name of this item.
+	///
+	/// `None` if dangling.
+	pub(super) name: Option<Box<Name>>,
 	/// `unix` extension data.
 	pub ext_unix: Option<ext::unix::Entry>,
 	/// `mtime` extension data.
 	pub ext_mtime: Option<ext::mtime::Entry>,
-}
-
-impl Item {
-	/// Convert [`Self`] to raw data.
-	///
-	/// # Panics
-	///
-	/// If the type is [`Type::Unknown`].
-	/// Unknown types have unknown data and cannot be serialized.
-	pub(super) fn to_raw(&self, dir: &DirData, buf: &mut [u8]) {
-		// Set type
-		buf[28..28 + 12].copy_from_slice(&self.ty.to_raw());
-
-		// Set key
-		if let Some(key) = &self.data.key {
-			buf[..28].copy_from_slice(&key.to_raw());
-		}
-
-		// Set unix info
-		dir.unix_offset
-			.map(usize::from)
-			.and_then(|o| self.data.ext_unix.map(|e| (o, e)))
-			.map(|(o, e)| buf[o..o + 8].copy_from_slice(&e.into_raw()));
-
-		// Get mtime info
-		dir.mtime_offset
-			.map(usize::from)
-			.and_then(|o| self.data.ext_mtime.map(|e| (o, e)))
-			.map(|(o, e)| buf[o..o + 8].copy_from_slice(&e.into_raw()));
-	}
-
-	/// Create an [`Item`] from raw data.
-	pub(super) fn from_raw(dir: &DirData, data: &[u8], index: u32) -> Item {
-		// Get type
-		let ty = Type::from_raw(&data[28..28 + 12].try_into().unwrap());
-
-		// Get key
-		let key = Key::from_raw(&data[..28].try_into().unwrap());
-
-		// Get unix info
-		let ext_unix = dir
-			.unix_offset
-			.map(usize::from)
-			.map(|o| ext::unix::Entry::from_raw(data[o..o + 8].try_into().unwrap()));
-
-		// Get mtime info
-		let ext_mtime = dir
-			.mtime_offset
-			.map(usize::from)
-			.map(|o| ext::mtime::Entry::from_raw(data[o..o + 8].try_into().unwrap()));
-
-		Item { ty, data: ItemData { key, ext_unix, ext_mtime }, index }
-	}
 }
 
 /// The type of an item.
@@ -95,23 +34,23 @@ pub(crate) enum Type {
 	/// No type, i.e. invalid.
 	None,
 	/// Directory.
-	Dir { id: u64 },
+	Dir { id: ObjectId, item_count: [u8; 3] },
 	/// File with data in an object.
-	File { id: u64 },
+	File { id: ObjectId, length: u64 },
 	/// Symlink with data in an object.
-	Sym { id: u64 },
+	Sym { id: ObjectId, length: u64 },
 	/// File with embedded data.
-	EmbedFile { offset: u64, length: u16 },
+	EmbedFile { offset: Offset, length: u16 },
 	/// Symlink with embedded data.
-	EmbedSym { offset: u64, length: u16 },
+	EmbedSym { offset: Offset, length: u16 },
 	/// Unrecognized type.
 	Unknown(u8),
 }
 
 impl Type {
 	/// Convert this type to raw data for storage.
-	pub(super) fn to_raw(&self) -> [u8; 12] {
-		let mut buf = [0; 12];
+	pub(super) fn to_raw(&self) -> [u8; 16] {
+		let mut buf = [0; 16];
 
 		// Set type
 		buf[0] = match self {
@@ -127,12 +66,17 @@ impl Type {
 		// Set other data.
 		match self {
 			Self::None => {}
-			Self::Dir { id } | Self::File { id } | Self::Sym { id } => {
-				buf[4..].copy_from_slice(&id.to_le_bytes());
+			Self::Dir { id, item_count } => {
+				buf[1..8].copy_from_slice(&id.to_raw());
+				buf[8..11].copy_from_slice(item_count);
+			}
+			Self::File { id, length } | Self::Sym { id, length } => {
+				buf[1..8].copy_from_slice(&id.to_raw());
+				buf[8..].copy_from_slice(&length.to_le_bytes());
 			}
 			Self::EmbedFile { offset, length } | Self::EmbedSym { offset, length } => {
-				buf[2..4].copy_from_slice(&length.to_le_bytes());
-				buf[4..].copy_from_slice(&offset.to_le_bytes());
+				buf[2..8].copy_from_slice(&offset.to_raw());
+				buf[8..10].copy_from_slice(&length.to_le_bytes());
 			}
 			Self::Unknown(n) => panic!("unknown type {:?}", n),
 		};
@@ -141,18 +85,20 @@ impl Type {
 	}
 
 	/// Create a [`Type`] from raw data.
-	pub(super) fn from_raw(data: &[u8; 12]) -> Self {
-		let &[ty, _, a, b, id_or_offset @ ..] = data;
-		let length = u16::from_le_bytes([a, b]);
-		let id @ offset = u64::from_le_bytes(id_or_offset);
+	pub(super) fn from_raw(data: &[u8; 16]) -> Self {
+		let id = ObjectId::from_raw(data[1..8].try_into().unwrap());
+		let offset = Offset::from_raw(data[2..8].try_into().unwrap());
+		let len64 = u64::from_le_bytes(data[8..].try_into().unwrap());
+		let len16 = len64 as u16;
+		let item_count = data[8..11].try_into().unwrap();
 
-		match ty {
+		match data[0] {
 			TY_NONE => Self::None,
-			TY_DIR => Self::Dir { id },
-			TY_FILE => Self::File { id },
-			TY_SYM => Self::Sym { id },
-			TY_EMBED_FILE => Self::EmbedFile { offset, length },
-			TY_EMBED_SYM => Self::EmbedSym { offset, length },
+			TY_DIR => Self::Dir { id, item_count },
+			TY_FILE => Self::File { id, length: len64 },
+			TY_SYM => Self::Sym { id, length: len64 },
+			TY_EMBED_FILE => Self::EmbedFile { offset, length: len16 },
+			TY_EMBED_SYM => Self::EmbedSym { offset, length: len16 },
 			ty => Self::Unknown(ty),
 		}
 	}
@@ -168,24 +114,28 @@ pub enum ItemRef<'a, D: Dev> {
 }
 
 impl<'a, D: Dev> ItemRef<'a, D> {
-	/// Construct an item from raw entry data and the corresponding directory.
+	/// Construct an item.
 	///
 	/// # Panics
 	///
 	/// If the type is [`Type::None`].
-	pub(super) async fn new(dir: &Dir<'a, D>, item: &Item) -> Result<ItemRef<'a, D>, Error<D>> {
-		Ok(match item.ty {
+	pub(super) async fn new(
+		dir: &Dir<'a, D>,
+		ty: Type,
+		index: Index,
+	) -> Result<ItemRef<'a, D>, Error<D>> {
+		Ok(match ty {
 			Type::None => panic!("can't reference none type"),
-			Type::File { id } => Self::File(FileRef::from_obj(dir, id, item.index)),
-			Type::Sym { id } => Self::Sym(SymRef::from_obj(dir, id, item.index)),
+			Type::File { id, length } => Self::File(FileRef::from_obj(dir, id, length, index)),
+			Type::Sym { id, length } => Self::Sym(SymRef::from_obj(dir, id, length, index)),
 			Type::EmbedFile { offset, length } => {
-				Self::File(FileRef::from_embed(dir, offset, length, item.index))
+				Self::File(FileRef::from_embed(dir, offset, length, index))
 			}
 			Type::EmbedSym { offset, length } => {
-				Self::Sym(SymRef::from_embed(dir, offset, length, item.index))
+				Self::Sym(SymRef::from_embed(dir, offset, length, index))
 			}
-			Type::Dir { id } => Self::Dir(DirRef::load(dir, item.index, id).await?),
-			Type::Unknown(_) => Self::Unknown(UnknownRef::new(dir, item.index)),
+			Type::Dir { id, item_count } => Self::Dir(DirRef::load(dir, index, id).await?),
+			Type::Unknown(_) => Self::Unknown(UnknownRef::new(dir, index)),
 		})
 	}
 
@@ -193,10 +143,8 @@ impl<'a, D: Dev> ItemRef<'a, D> {
 	pub async fn data(&self) -> Result<ItemData, Error<D>> {
 		// Root dir doesn't have a parent, so it has no attributes.
 		// TODO we should store attrs in filesystem header.
-		if let Self::Dir(d) = self {
-			if d.id == 0 {
-				return Ok(ItemData { key: None, ext_unix: None, ext_mtime: None });
-			}
+		if matches!(self, Self::Dir(d) if d.id == ObjectId::ROOT) {
+			return Ok(ItemData { name: None, ext_unix: None, ext_mtime: None });
 		}
 
 		let fs = self.fs();
@@ -205,35 +153,13 @@ impl<'a, D: Dev> ItemRef<'a, D> {
 		Ok(item.data)
 	}
 
-	/// Get the key / name of this item.
-	///
-	/// `data` must be returned from [`data`].
-	///
-	/// # Note
-	///
-	/// May be [`None`] if the entry is dangling.
-	pub async fn key(&self, data: &ItemData) -> Result<Option<Box<Name>>, Error<D>> {
-		Ok(match data.key {
-			None => None,
-			Some(Key::Embed { len, data }) => {
-				let data = <&Name>::try_from(&data[..len.get().into()]).expect("invalid name len");
-				Some(Box::from(data))
-			}
-			Some(Key::Heap { len, offset, .. }) => {
-				let mut buf = vec![0; len.get().into()];
-				self.parent_dir().read_heap(offset, &mut buf).await?;
-				Some(Box::<Name>::try_from(buf.into_boxed_slice()).expect("invalid name len"))
-			}
-		})
-	}
-
 	/// Set `unix` extension data.
 	///
 	/// Returns `false` if the extension is not enabled for the parent directory.
 	pub async fn set_ext_unix(&self, data: &ext::unix::Entry) -> Result<bool, Error<D>> {
 		trace!("set_ext_unix {:?}", data);
 		// Root dir has no attributes.
-		if matches!(self, Self::Dir(d) if d.id == 0) {
+		if matches!(self, Self::Dir(d) if d.id == ObjectId::ROOT) {
 			return Ok(false);
 		}
 		let index = self.data_header().parent_index;
@@ -246,7 +172,7 @@ impl<'a, D: Dev> ItemRef<'a, D> {
 	pub async fn set_ext_mtime(&self, data: &ext::mtime::Entry) -> Result<bool, Error<D>> {
 		trace!("set_ext_mtime {:?}", data);
 		// Root dir has no attributes.
-		if matches!(self, Self::Dir(d) if d.id == 0) {
+		if matches!(self, Self::Dir(d) if d.id == ObjectId::ROOT) {
 			return Ok(false);
 		}
 		let index = self.data_header().parent_index;
@@ -257,7 +183,7 @@ impl<'a, D: Dev> ItemRef<'a, D> {
 	///
 	/// May be `None` if this item is the parent directory.
 	pub fn parent(&self) -> Option<DirRef<'a, D>> {
-		if matches!(self, Self::Dir(d) if d.id == 0) {
+		if matches!(self, Self::Dir(d) if d.id == ObjectId::ROOT) {
 			return None;
 		}
 		let id = self.data_header().parent_id;

@@ -82,9 +82,9 @@ use {
 		future::Future,
 		marker::PhantomData,
 		mem,
-		ops::{Deref, DerefMut, Index, IndexMut},
+		ops::{self, Deref, DerefMut, IndexMut},
 	},
-	dir::{DirData, ItemRef},
+	dir::{DirData, Index, ItemRef, ObjectId, Offset},
 	file::FileData,
 };
 
@@ -121,7 +121,7 @@ impl Files {
 	}
 }
 
-impl Index<Idx> for Files {
+impl ops::Index<Idx> for Files {
 	type Output = FileData;
 
 	fn index(&self, index: Idx) -> &Self::Output {
@@ -145,7 +145,7 @@ struct NrfsData {
 	/// Directories with live references.
 	///
 	/// Indexed by ID.
-	directories: BTreeMap<u64, DirData>,
+	directories: BTreeMap<ObjectId, DirData>,
 }
 
 /// NRFS filesystem manager.
@@ -260,10 +260,15 @@ impl<D: Dev> Nrfs<D> {
 	}
 
 	/// Get a reference to a [`DirData`] structure.
-	fn dir_data(&self, id: u64) -> RefMut<'_, DirData> {
+	fn dir_data(&self, id: ObjectId) -> RefMut<'_, DirData> {
 		RefMut::map(self.data.borrow_mut(), |fs| {
 			fs.directories.get_mut(&id).expect("no DirData with id")
 		})
+	}
+
+	/// Get an object.
+	async fn get(&self, id: ObjectId) -> Result<nros::Object<'_, D, nros::StdResource>, Error<D>> {
+		Ok(self.storage.get(id.into()).await?)
 	}
 }
 
@@ -295,7 +300,7 @@ pub struct DirRef<'a, D: Dev> {
 	/// Filesystem object containing the directory.
 	fs: &'a Nrfs<D>,
 	/// ID of the directory object.
-	id: u64,
+	id: ObjectId,
 }
 
 /// Raw [`DirRef`] data.
@@ -305,7 +310,7 @@ pub struct DirRef<'a, D: Dev> {
 #[must_use = "value must be used to avoid reference leaks"]
 pub struct RawDirRef {
 	/// ID of the directory object.
-	id: u64,
+	id: ObjectId,
 }
 
 impl<'a, D: Dev> RawRef<'a, D> for DirRef<'a, D> {
@@ -552,39 +557,11 @@ pub struct Statistics {
 	pub object_store: nros::Statistics,
 }
 
-/// Write an exact amount of data.
-///
-/// Fails if not all data could be written.
-async fn write_all<'a, D: Dev>(
-	obj: &nros::Tree<'a, D, nros::StdResource>,
-	offset: u64,
-	data: &[u8],
-) -> Result<(), Error<D>> {
-	let l = obj.write(offset, data).await?;
-	#[cfg(test)]
-	debug_assert_eq!(l, data.len());
-	(l == data.len()).then_some(()).ok_or(Error::Truncated)
-}
-
-/// Write an exact amount of data.
-///
-/// This function automatically grows the object if it can't contain the data.
-async fn write_grow<'a, D: Dev>(
-	obj: &nros::Tree<'a, D, nros::StdResource>,
-	offset: u64,
-	data: &[u8],
-) -> Result<(), Error<D>> {
-	if obj.len().await? < offset + data.len() as u64 {
-		obj.resize(offset + data.len() as u64).await?;
-	}
-	write_all(&obj, offset, data).await
-}
-
 /// Read an exact amount of data.
 ///
 /// Fails if the buffer could not be filled.
 async fn read_exact<'a, D: Dev>(
-	obj: &nros::Tree<'a, D, nros::StdResource>,
+	obj: &nros::Object<'a, D, nros::StdResource>,
 	offset: u64,
 	buf: &mut [u8],
 ) -> Result<(), Error<D>> {
@@ -603,17 +580,17 @@ struct DataHeader {
 	///
 	/// Not applicable if the ID of the object is 0,
 	/// i.e. it is the root directory.
-	parent_id: u64,
-	/// Index in the parent directory.
+	parent_id: ObjectId,
+	/// Offset in the parent directory.
 	///
 	/// Not applicable if the ID of the object is 0,
 	/// i.e. it is the root directory.
-	parent_index: u32,
+	parent_index: Index,
 }
 
 impl DataHeader {
 	/// Create a new header.
-	fn new(parent_id: u64, parent_index: u32) -> Self {
+	fn new(parent_id: ObjectId, parent_index: Index) -> Self {
 		Self { reference_count: 1, parent_id, parent_index }
 	}
 }
