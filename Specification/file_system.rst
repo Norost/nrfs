@@ -227,7 +227,7 @@ Each item has a fixed length, defined in the directory header.
     +======+======+======+======+======+======+======+======+======+
     |    0 |                 Name (0 to 6)                  | NLen |
     +------+-----------------------------------------+------+------+
-    |    8 |              Name offset                | Name (7-9)  |
+    |    8 |              Name offset                | Name (7-8)  |
     +------+-----------------------------------------+-------------+
 
   * NLen: The length of the key.
