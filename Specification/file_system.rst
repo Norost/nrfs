@@ -322,44 +322,45 @@ Each item has a fixed length, defined in the directory header.
   directory header.
   See _Extensions.
 
-Hashmap entry
-~~~~~~~~~~~~~
-
 
 Allocation log
 ~~~~~~~~~~~~~~
 
-After the hashmap comes an allocation log.
+The allocation log tracks used space in the directory object with byte-level
+granulity.
+
+It is a linked list to allow fast updates without rewriting the entire log.
+
 Each entry in the log indicates a single allocation or deallocation.
 
+.. table:: Heap log
+  :align: center
+  :widths: grid
+
+  +------+------+------+------+------+------+------+
+  | Byte |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+
+  |    0 |             Next log offset             |
+  +------+-----------------------------------------+
+  |    6 |               Entry count               |
+  +------+-----------------------------------------+
+
 .. table:: Heap log entry
   :align: center
   :widths: grid
 
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |                        Offset                         |
-  +------+-------------------------------------------------------+
-  |    8 |                        Length                         |
-  +------+-------------------------------------------------------+
+  +------+------+------+------+------+------+------+
+  | Byte |    5 |    4 |    3 |    2 |    1 |    0 |
+  +======+======+======+======+======+======+======+
+  |    0 |                 Offset                  |
+  +------+-----------------------------------------+
+  |    6 |                 Length                  |
+  +------+-----------------------------------------+
 
-.. table:: Heap log entry
-  :align: center
-  :widths: grid
-
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |          Length           |          Offset           |
-  +------+---------------------------+---------------------------+
-
-Each log entry inverts the status of the range covered (i.e. ``xor``).
-Each log entry indicates either an allocation or deallocation,
-never both partially.
-The length of each entry may never be 0.
-
-The size of the log is determined by the total size of the map object.
+Each entry inverts the status of the range covered (i.e. ``xor``).
+Each entry indicates either an allocation or deallocation, never both
+partially.
+The length of an entry may never be 0.
 
 Unallocated regions **must** be zeroed [#]_.
 
