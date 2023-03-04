@@ -5,7 +5,8 @@ Features
 --------
 
 * Out of band deduplication (+ copy-on-write).
-* Up to `2^32 - 1` entries per directory, indexed using a hashmap.
+* Up to `2^24 - 1` entries per directory
+  * Optionally indexed with a hashmap.
 * File names up to 255 bytes long.
 * Extensions per directory.
 * Embedding small files inside directories.
@@ -31,8 +32,6 @@ File types
 ----------
 
 .. table:: File types
-  :align: center
-  :widths: grid
 
   +------+-----------------------------+
   |  ID  |         Description         |
@@ -51,7 +50,7 @@ File types
   +------+-----------------------------+
 
 Remaining IDs are free for use by extensions.
-Entries with unrecognized IDs may be shown and moved but no other operations
+Entries with unrecognized IDs may be shown but no other operations
 may be performed on them.
 
 
@@ -72,6 +71,13 @@ Tools can scan for duplicate files and make a CoW copy [#]_.
 .. [#] On UNIX systems this is achieved with ``cp --reflink``.
 
 
+Filesystem Header
+-----------------
+
+The filesystem header contains directory extensions enabled on this filesystem.
+See the Extensions_ section for more information.
+
+
 Embedded data
 -------------
 
@@ -82,35 +88,48 @@ data can be placed directly on a directory's heap.
 Directory
 ---------
 
-A directory is an object that contains or contains pointers to other objects.
+A directory is an object that contains a list of items.
+Each item describes another object.
 
-Every directory begins with a variable-sized byte header.
+Directories may consist of multiple objects.
+The main object contains the directory header and the item list.
+Other objects are used for the heap and by extensions.
 
-.. table:: Header
-  :align: center
-  :widths: grid
+::
 
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |          Allocation log offset          | ILen | HLen |
-  +------+-----------------------------------------+------+------+
-  |    8 |            Group list offset            | Group count |
-  +------+-----------------------------------------+-------------+
-  |   16 |                                                       |
-  +------+                      Extensions                       |
-  |  ... |                                                       |
-  +------+-------------------------------------------------------+
+  +-----------+         +------+
+  |           +---->----+ Heap |
+  | Directory +-----+   +------+
+  |           +--+  |
+  +-----------+  |  |   +---------+
+                 |  +->-+ Hashmap |
+                 v      +---------+
+                ...
 
-* HLen: Length of the directory header, in units of 8 bytes.
+Every directory begins with a 128 byte header.
 
-* ILen: Length of each item, in units of 8 bytes.
+.. table:: Directory header
 
-* Allocation log offset: Offset in the directory object of the allocation log.
+  ====== =====
+  Offset Field
+  ====== =====
+       0 Blocks used
+       4 Highest block
+       8 Heap ID
+      16 Heap length
+      24 Heap allocated
+      32 Extensions
+  ====== =====
 
-* Group count: The size of the group list.
+* Blocks used: The total amount of blocks in use.
 
-* Group list offset: Offset in the directory object of the group list.
+* Highest block: The highest block in use.
+
+* Heap ID: ID of the heap object.
+
+* Heap length: Highest byte allocated on the heap.
+
+* Heap allocated: Total amount of bytes in use on the heap.
 
 * Extensions: Extra attributes & other data defined in the object.
 
@@ -121,271 +140,123 @@ Every directory begins with a variable-sized byte header.
 Extensions
 ~~~~~~~~~~
 
-.. table:: Extension header
-  :align: center
-  :widths: grid
+.. table:: Directory extension
 
-  +------+------+------+
-  | Byte |    1 |    0 |
-  +======+======+======+
-  |    0 | DLen | NLen |
-  +------+------+------+
-  |    2 |    Name     |
-  +------+-------------+
-  |  N+2 |    Data     |
-  +------+-------------+
+  ====== =====
+  Offset Field
+  ====== =====
+       0 Idx
+       1 Data
+  ====== =====
 
-* NLen: Length of the name of the extension.
+* Idx: Index of the extension in the filesystem header, starting from 1.
 
-* DLen: Length of the data associated with the extension.
-
-* Name: Name of the extension.
+  0 is reserved and is followed by no data.
+  255 is reserved and must not be used.
 
 * Data: Data associated with the extension.
+  Length is defined in the filesystem header.
 
 
-Directory group
-~~~~~~~~~~~~~~~
+Item list
+~~~~~~~~~
 
-Every group has a size of ``32 + item_len * 256`` bytes.
+The item list is divided in blocks of 16 bytes each.
+Blocks are chained to form a single item.
+The low bit of the first byte of each block indicates whether the block is part
+of a chain.
+The high 7 bits of the first byte are free to use.
 
-.. table:: Group pointer
+
+Item
+~~~~
+
+An item describes a single object.
+Each item starts with a name,
+then data,
+then additional data defined by extensions.
+
+The first byte of a name block indicates the amount of name bytes.
+If 16, the name occupies multiple blocks.
+
+After the name block(s) there is a single data block.
+There are three formats for the data block.
+
+.. table:: Item data for file & symlink types.
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                  Offset                 | Flgs | Cnt  |
-  +------+-----------------------------------------+------+------+
-
-* Offset: Offset in the directory object to the group.
-  If 0, the group is not allocated.
-
-* Cnt: Amount of allocated items minus 1.
-  Only valid if offset is not 0.
-
-* Flgs: Flags
-
-  .. table:: Flags
-
-  +------+------+------+------+------+------+------+------+------+
-  | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+======+======+
-  |    0 |                                                | Dngl |
+  |    0 |                   Object ID                    | Type |
   +------+------------------------------------------------+------+
+  |    8 |                        Length                         |
+  +------+-------------------------------------------------------+
 
-  * Dngl: If 1, there are dangling items, i.e. items without a name.
-    These should be cleaned up if not referenced.
-
-.. table:: Group
+.. table:: Item data for embedded file & symlink types.
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                                                       |
-  +------+                                                       |
-  |    8 |                                                       |
-  +------+                        Bitmap                         |
-  |   16 |                                                       |
-  +------+                                                       |
-  |   24 |                                                       |
-  +------+-------------------------------------------------------+
-  |   32 |                                                       |
-  +------+                         Items                         |
-  |  ... |                                                       |
-  +------+-------------------------------------------------------+
+  |    0 |                     Offset                     | Type |
+  +------+-----------------------------------------+------+------+
+  |    8 |                                         |   Length    |
+  +------+-----------------------------------------+-------------+
 
-* Bitmap: Bitmap indicated used item slots.
-  1 means used.
-
-* Items: List of items.
-
-Directory item
-~~~~~~~~~~~~~~
-
-Each item has a fixed length, defined in the directory header.
-
-.. table:: Item
+.. table:: Item data for directory types.
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |                                                       |
-  +------+                         Name                          |
-  |    8 |                                                       |
-  +------+-------------------------------------------------------+
-  |   16 |                                                       |
-  +------+                         Data                          |
-  |   24 |                                                       |
-  +------+-------------------------------------------------------+
-  |   32 |                                                       |
-  +------+                       Metadata                        |
-  |  ... |                                                       |
-  +------+-------------------------------------------------------+
+  |    0 |                   Object ID                    | Type |
+  +------+----------------------------------+-------------+------+
+  |    8 |                                  |     Item count     |
+  +------+----------------------------------+--------------------+
 
-* Name: The name of the item.
+* Type (high 7 bits): The type of the item.
+  The value of the other data fields depend on the type.
 
-  .. table:: Item name if NLen <= 15
+* Object ID: The ID of the object.
 
-    +------+------+------+------+------+------+------+------+------+
-    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-    +======+======+======+======+======+======+======+======+======+
-    |    0 |                 Name (0 to 6)                  | NLen |
-    +------+------------------------------------------------+------+
-    |    8 |                    Name (7 to 14)                     |
-    +------+-------------------------------------------------------+
+* Offset: Offset of the data on the heap.
 
-  .. table:: Item name if NLen > 15
-    :align: center
-    :widths: grid
+* Length: The length of the file or symlink in bytes.
 
-    +------+------+------+------+------+------+------+------+------+
-    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-    +======+======+======+======+======+======+======+======+======+
-    |    0 |                 Name (0 to 6)                  | NLen |
-    +------+-----------------------------------------+------+------+
-    |    8 |              Name offset                | Name (7-8)  |
-    +------+-----------------------------------------+-------------+
+* Item count: The amount of items in the directory.
 
-  * NLen: The length of the key.
-    If it 0, the item is unused.
-
-  * Name: The key string.
-    Bytes 7 to 14 are only valid if NLen is 15 or less [#]_.
-
-  * Name offset: Pointer to the key in the heap
-    Only valid if NLen is larger than 15.
-
-  .. [#]
-
-    Embedding the key avoids an indirection.
-
-    The maximum length of the embedded key is based on data from a Devuan
-    desktop:
-
-    * Total amount of files: 18094927
-
-    ================ ======= ================ ============
-    File name length  Count  Cumulative count Cumulative %
-    ================ ======= ================ ============
-                   1   47985            47986         0.27
-                   2  292412           340398         1.88
-                   3  271133           611531         3.38
-                   4  383093           994624         5.50
-                   5 1459539          2454163        13.56
-                   6 4328975          6783138        37.49
-                   7  797426          7580564        41.89
-                   8 1324312          8904876        49.21
-                   9 1129762         10034638        55.46
-                  10  726535         10761173        59.47
-                  11  818181         11579354        63.99
-                  12  718414         12297768        67.96
-                  13  518331         12816099        70.83
-                  14  504373         13320472        73.61
-                  15  422600         13743072        75.95
-                  16  381073         14124145        78.06
-                  17  375204         14499349        80.13
-                  18  450636         14949985        82.62
-                  19  284422         15234407        84.19
-                  20  248121         15482528        85.56
-    ================ ======= ================ ============
-
-    Some bytes of the key are kept embedded even with NLen > 15 to speed up
-    lookups.
-
-* Data: Data associated with the item.
-
-  .. table:: Item data for file & symlink types.
-
-    +------+------+------+------+------+------+------+------+------+
-    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-    +======+======+======+======+======+======+======+======+======+
-    |    0 |                   Object ID                    | Type |
-    +------+------------------------------------------------+------+
-    |    8 |                        Length                         |
-    +------+-------------------------------------------------------+
-
-  .. table:: Item data for embedded file & symlink types.
-
-    +------+------+------+------+------+------+------+------+------+
-    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-    +======+======+======+======+======+======+======+======+======+
-    |    0 |                 Offset                  |      | Type |
-    +------+-----------------------------------------+------+------+
-    |    8 |                                         |   Length    |
-    +------+-----------------------------------------+-------------+
-
-  .. table:: Item data for directory types.
-
-    +------+------+------+------+------+------+------+------+------+
-    | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
-    +======+======+======+======+======+======+======+======+======+
-    |    0 |                   Object ID                    | Type |
-    +------+----------------------------------+-------------+------+
-    |    8 |                                  |     Item count     |
-    +------+----------------------------------+--------------------+
-
-  * Type: The type of the item.
-    The value of the other data fields depend on the type.
-
-  * Object ID: The ID of the object.
-
-  * Length: The length of the file or symlink in bytes.
-
-  * Item count: The amount of items in the directory.
-
-* Metadata: Metadata associated with the item.
-  The contents & length of this field depends on the extensions defined in the
-  directory header.
-  See _Extensions.
-
-
-Allocation log
-~~~~~~~~~~~~~~
-
-The allocation log tracks used space in the directory object with byte-level
-granulity.
-
-It is a linked list to allow fast updates without rewriting the entire log.
-
-Each entry in the log indicates a single allocation or deallocation.
-
-.. table:: Heap log
-  :align: center
-  :widths: grid
-
-  +------+------+------+------+------+------+------+
-  | Byte |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+
-  |    0 |             Next log offset             |
-  +------+-----------------------------------------+
-  |    6 |               Entry count               |
-  +------+-----------------------------------------+
-
-.. table:: Heap log entry
-  :align: center
-  :widths: grid
-
-  +------+------+------+------+------+------+------+
-  | Byte |    5 |    4 |    3 |    2 |    1 |    0 |
-  +======+======+======+======+======+======+======+
-  |    0 |                 Offset                  |
-  +------+-----------------------------------------+
-  |    6 |                 Length                  |
-  +------+-----------------------------------------+
-
-Each entry inverts the status of the range covered (i.e. ``xor``).
-Each entry indicates either an allocation or deallocation, never both
-partially.
-The length of an entry may never be 0.
-
-Unallocated regions **must** be zeroed [#]_.
-
-.. [#] Requiring unallocating regions to be zeroed improves compression
-   efficiency and simplifies implementations.
+After the data block comes an arbitrary amount of extension data.
 
 
 Extensions
 ----------
+
+Extensions specify additional functionality for directories.
+Extension information is stored in the filesystem header.
+
+.. table:: Extension header
+
+  ====== =====
+  Offset Field
+  ====== =====
+       0 NLen
+       1 DLen
+       2 FLen
+       3 Refcount
+      10 Name
+    10+N FData
+  ====== =====
+
+* NLen: Length of the name of the extension.
+
+* DLen: Length of the directory item data associated with the extension.
+
+* FLen: Length of FData
+
+* Refcount: Amount of directories using this extension.
+
+* Name: Name of the extension.
+
+* FData: Additional data directly in the filesystem header.
+
 
 UNIX
 ~~~~
@@ -394,9 +265,7 @@ name: "unix"
 
 The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
 
-.. table:: Extension data
-  :align: center
-  :widths: grid
+.. table:: Directory header data
 
   +------+------+------+
   | Byte |    1 |    0 |
@@ -404,9 +273,7 @@ The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
   |    0 |   Offset    |
   +------+-------------+
 
-.. table:: Entry data
-  :align: center
-  :widths: grid
+.. table:: Item & filesystem header data
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -415,16 +282,14 @@ The UNIX extension adds a 16 bit field and 24-bit UID & GID to all entries.
   +------+--------------------+--------------------+-------------+
 
 .. table:: Permissions
-  :align: center
-  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |   User WX   |     Group RWX      |     Global RWX     |
-  +------+-------------+--------------------+-------------+------+
-  |    8 |                                                | U. R |
-  +------+------------------------------------------------+------+
+  |    0 | U. X |     Group RWX      |     Global RWX     |      |
+  +------+------+--------------------+-------------+------+------+
+  |    8 |                                         |   User RW   |
+  +------+-----------------------------------------+-------------+
 
 
 Modification time
@@ -432,14 +297,12 @@ Modification time
 
 name: "mtime"
 
-The modification time extension adds a signed 64-bit time stamp to all entries.
+The modification time extension adds a signed 63-bit time stamp to all entries.
 
-It is expressed in microseconds, which gives it a range of ~585000 years.
+It is expressed in microseconds, which gives it a range of ~242500 years.
 The timestamp is relative to the UNIX epoch.
 
-.. table:: Extension data
-             :align: center
-  :widths: grid
+.. table:: Directory header data
 
   +------+------+------+
   | Byte |    1 |    0 |
@@ -447,9 +310,7 @@ The timestamp is relative to the UNIX epoch.
   |    0 |   Offset    |
   +------+-------------+
 
-.. table:: Entry data
-  :align: center
-  :widths: grid
+.. table:: Item & filesystem header data
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -457,9 +318,11 @@ The timestamp is relative to the UNIX epoch.
   |    0 |                       Timestamp                       |
   +------+-------------------------------------------------------+
 
+**Note**: The low bit is unused.
 
-Hashmap
-~~~~~~~
+
+Hashmap (WIP)
+~~~~~~~~~~~~~
 
 name: "hmap"
 
@@ -498,8 +361,6 @@ It uses SipHash13 with Robin Hood hashing.
 
 
 .. table:: Extension data
-  :align: center
-  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -512,8 +373,6 @@ It uses SipHash13 with Robin Hood hashing.
   +------+-----------------------------------------+-------------+
 
 .. table:: Properties
-  :align: center
-  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Bit  |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -531,8 +390,6 @@ It uses SipHash13 with Robin Hood hashing.
 
 
 .. table:: Hashmap entry
-  :align: center
-  :widths: grid
 
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
@@ -545,3 +402,18 @@ It uses SipHash13 with Robin Hood hashing.
 * Item index: the index of the corresponding directory item.
   This value is 1-based, i.e. index 1 refers to the first item.
   if the index is 0, the entry is unused.
+
+
+Free list (WIP)
+~~~~~~~~~~~~~~~
+
+*TODO*
+
+
+Examples
+--------
+
+Directory with "unix" & "mtime" extension
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+*TODO*

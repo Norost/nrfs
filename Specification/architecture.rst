@@ -176,6 +176,19 @@ Finally, the headers are written.
 Filesystem
 ~~~~~~~~~~
 
+Since the filesystem has been built on top of the object store, which already
+implements a cache, it has been designed to be as "cacheless", i.e. no cached
+data about each file/directory/... must be explictly kept around.
+This is to simplify implementations.
+
+In particular, when reading data the VFS can cache it more efficiently than the
+filesystem driver.
+When writing data another caching layer on top of the object store is unlikely
+to be useful as data is written through anyways.
 
 Directory
 ^^^^^^^^^
+
+The specification of the directory itself has been kept as minimal as
+practically viable to allow incremental improvements with extensions while
+avoid legacy baggage as much as possible.
