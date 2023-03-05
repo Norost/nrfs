@@ -1,147 +1,76 @@
 use {
-	super::{super::TransferError, Dir, Index, Name, Offset},
-	crate::{Dev, Error, ObjectId},
+	super::{
+		super::{DirNewItem, TransferError},
+		Dir, FindResult, Name,
+	},
+	crate::{item::ItemData, Dev, Error},
 };
 
 impl<'a, D: Dev> Dir<'a, D> {
 	/// Move an entry to another directory.
-	pub async fn transfer(
+	///
+	/// The returned value can be used to update cached data.
+	pub(crate) async fn item_transfer<'n>(
 		&self,
-		name: &Name,
-		to_dir: ObjectId,
-		to_name: &Name,
-	) -> Result<Result<(), TransferError>, Error<D>> {
-		trace!("transfer {:?} {:?} {:?}", name, to_dir, to_name);
+		from_index: u32,
+		to_dir: &Dir<'a, D>,
+		to_name: &'n Name,
+	) -> Result<Result<u32, TransferError>, Error<D>> {
+		trace!(
+			"transfer {:#x} {} -> {:#x} {:?}",
+			self.key.id,
+			from_index,
+			to_dir.key.id,
+			to_name
+		);
 
-		todo!();
-		/*
-		// 1. Find the entry + item to transfer.
-		// 2. (if embedded) allocate on heap in other dir & update item.
-		// 3. Try to insert entry + item in other dir.
-		// 4. (if embedded) copy to other dir & deallocate in current.
-		// 5. Remove entry + item in this dir.
-		// 6. Transfer child, if present.
+		let mut from_hdr = self.header().await?;
 
-		if self.id == to_dir {
-			// Don't transfer, rename instead.
-			return Ok(match self.rename(name, to_name).await? {
-				Ok(()) => Ok(()),
-				Err(RenameError::NotFound) => Err(TransferError::NotFound),
-				Err(RenameError::Duplicate) => Err(TransferError::Duplicate),
-			});
-		}
-
-		let to_dir = Dir::new(self.fs, to_dir);
-
-		let from_map = self.hashmap().await?;
-
-		// 1. Find the entry + item to transfer.
-		let Some(entry) = from_map.find_index(name).await?
-			else { return Ok(Err(TransferError::NotFound)) };
-		let mut item = self.get(entry.item_index).await?;
-		debug_assert!(item.data.key.is_some(), "item to transfer is not in use");
-
-		// If we don't know the type, don't transfer to avoid bringing the filesystem in an
-		// inconsistent state.
-		match item.ty {
-			Type::None => todo!("none type (corrupt fs?)"),
-			Type::Unknown(_) => return Ok(Err(TransferError::UnknownType)),
-			_ => {}
-		}
-
-		// If the entry is a directory, ensure it is not a ancestor of to_dir
-		if let Type::Dir { id } = item.ty {
-			// Start from to_dir and work downwards to the root.
-			// The root is guaranteed to be the ancestor of all other objects.
-			let mut cur_id = to_dir.id;
-			while cur_id != 0 {
-				if cur_id == id {
-					// to_dir is a descendant of the entry to be moved, so cancel operation.
-					return Ok(Err(TransferError::IsAncestor));
-				}
-				cur_id = self.fs.dir_data(cur_id).header.parent_id;
-			}
-		}
-
-		// 2. (if embedded) allocate on heap in other dir & update item.
-		let from_embed_data = match &mut item.ty {
-			Type::EmbedFile { offset, length } | Type::EmbedSym { offset, length } => {
-				let from_offset = *offset;
-				let to_offset = to_dir.alloc_heap((*length).into()).await?;
-				*offset = to_offset;
-				Some((from_offset, to_offset, *length))
-			}
-			Type::Dir { .. } | Type::File { .. } | Type::Sym { .. } => None,
-			Type::Unknown(_) | Type::None => unreachable!(),
+		let mut to_hdr = None;
+		let to_hdr_ref = if self.key.id == to_dir.key.id {
+			&from_hdr
+		} else {
+			to_hdr.insert(to_dir.header().await?)
+		};
+		let to_index = match to_dir.find(to_hdr_ref, to_name).await? {
+			FindResult::Found { .. } => return Ok(Err(TransferError::Duplicate)),
+			FindResult::NotFound { data_index } => data_index,
 		};
 
-		// 3. Try to insert entry + item in other dir.
-		let ext = Extensions { unix: item.data.ext_unix, mtime: item.data.ext_mtime };
-		let to_index = match to_dir.insert(to_name, item.ty, &ext).await? {
-			Ok(i) => i,
-			Err(InsertError::Full) => return Ok(Err(TransferError::Full)),
-			Err(InsertError::Duplicate) => return Ok(Err(TransferError::Duplicate)),
-			Err(InsertError::Dangling) => return Ok(Err(TransferError::Dangling)),
+		let (mut data, ext) = self.item_get_data_ext(&from_hdr, from_index).await?;
+		self.item_erase(&mut from_hdr, from_index).await?;
+
+		let embed = match data.ty {
+			ItemData::TY_DIR | ItemData::TY_FILE | ItemData::TY_SYM => None,
+			ItemData::TY_EMBED_FILE | ItemData::TY_EMBED_SYM => {
+				let mut buf = vec![0; data.len.try_into().unwrap()];
+				let heap = self.heap(&from_hdr);
+				heap.read(data.id_or_offset, &mut buf).await?;
+				heap.dealloc(&mut from_hdr, data.id_or_offset, data.len)
+					.await?;
+				Some(buf)
+			}
+			_ => todo!(),
 		};
 
-		// 4. (if embedded) copy to other dir & deallocate in current.
-		if let Some((from_offset, to_offset, length)) = from_embed_data {
-			let buf = &mut vec![0; length.into()];
-			self.read_heap(from_offset, buf).await?;
-			self.dealloc_heap(from_offset, length.into()).await?;
-			to_dir.write_heap(to_offset, buf).await?;
+		let mut to_hdr = if self.key.id == to_dir.key.id {
+			from_hdr
+		} else {
+			self.set_header(from_hdr).await?;
+			to_hdr.unwrap()
+		};
+
+		if let Some(embed) = embed {
+			let heap = to_dir.heap(&to_hdr);
+			data.id_or_offset = heap.alloc(&mut to_hdr, data.len).await?;
+			heap.write(data.id_or_offset, &embed).await?;
 		}
 
-		// 5. Remove entry + item in this dir.
-		from_map.remove_at(entry.index).await?;
-		self.dealloc_item_slot(item.index).await?;
-		let item_len = self.fs.dir_data(self.id).item_size();
-		self.set(item.index, 0, &vec![0; item_len.into()]).await?;
-		// Deallocate key if stored on heap
-		match entry.key {
-			None | Some(Key::Embed { .. }) => {}
-			Some(Key::Heap { offset, len, .. }) => {
-				self.dealloc_heap(offset, len.get().into()).await?
-			}
-		}
-		self.update_item_count(|x| x - 1).await?;
+		let item = DirNewItem { name: to_name, data, ext };
+		let to_index = to_dir.item_insert(&mut to_hdr, to_index, item).await?;
 
-		// 6. Transfer child, if present.
-		let mut data = self.fs.dir_data(self.id);
-		if let Some(child) = data.children.remove(&item.index) {
-			// Dereference current dir
-			data.header.reference_count -= 1;
-			drop(data);
+		to_dir.set_header(to_hdr).await?;
 
-			// Move to other dir and increase refcount
-			let mut data = self.fs.dir_data(to_dir.id);
-			data.children.insert(to_index, child);
-			data.header.reference_count += 1;
-			drop(data);
-
-			// Fixup child
-			let mut header = match child {
-				Child::File(idx) => {
-					let mut data = self.fs.file_data(idx);
-					if let Some((_, offset, length)) = from_embed_data {
-						// Fixup pointer to embedded data.
-						debug_assert!(matches!(&data.inner, file::Inner::Embed { .. }));
-						data.inner = file::Inner::Embed { offset, length };
-					} else {
-						debug_assert!(matches!(&data.inner, file::Inner::Object { .. }));
-					}
-					RefMut::map(data, |d| &mut d.header)
-				}
-				Child::Dir(id) => {
-					debug_assert!(from_embed_data.is_none(), "dir is never embedded");
-					RefMut::map(self.fs.dir_data(id), |d| &mut d.header)
-				}
-			};
-			header.parent_id = to_dir.id;
-			header.parent_index = to_index;
-		}
-
-		Ok(Ok(()))
-			*/
+		Ok(Ok(to_index))
 	}
 }

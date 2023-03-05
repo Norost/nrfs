@@ -71,12 +71,25 @@ Tools can scan for duplicate files and make a CoW copy [#]_.
 .. [#] On UNIX systems this is achieved with ``cp --reflink``.
 
 
-Filesystem Header
+Filesystem header
 -----------------
 
-The filesystem header contains directory extensions enabled on this filesystem.
-See the Extensions_ section for more information.
+The filesystem header contains:
 
+* Root directory item information
+
+* Enabled extensions.
+  See the Extensions_ section for more information.
+
+.. table:: Filesystem header
+
+  ====== =====
+  Offset Field
+  ====== =====
+       0 Root directory item data
+      16 Extensions
+  ====== =====
+  
 
 Embedded data
 -------------
@@ -163,10 +176,16 @@ Item list
 
 The item list is divided in blocks of 16 bytes each.
 Blocks are chained to form a single item.
-The low bit of the first byte of each block indicates whether the block is part
+The low bits of the first byte of each block indicates whether the block is part
 of a chain.
-The high 7 bits of the first byte are free to use.
 
+.. table:: Item block type
+
+   =========== = = 
+   Type / Bits 1 0
+   =========== = =
+   Name block  1 0
+   Data block  x 1
 
 Item
 ~~~~
@@ -177,7 +196,23 @@ then data,
 then additional data defined by extensions.
 
 The first byte of a name block indicates the amount of name bytes.
-If 16, the name occupies multiple blocks.
+
+.. table:: Name block byte
+
+   ==== =====
+   Bits Field
+   ==== =====
+    0:1 Type
+      2 Not first
+      3 Last
+    4:7 Length
+
+* Not first: Whether this block is *not* the first name block.
+
+* Last: Whether this block is the last name block.
+
+* Length: Amount of bytes constituting this block.
+  Must be between 1 and 15.
 
 After the name block(s) there is a single data block.
 There are three formats for the data block.
@@ -208,9 +243,9 @@ There are three formats for the data block.
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
   |    0 |                   Object ID                    | Type |
-  +------+----------------------------------+-------------+------+
-  |    8 |                                  |     Item count     |
-  +------+----------------------------------+--------------------+
+  +------+------------------------------------------------+------+
+  |    8 |                                                       |
+  +------+-------------------------------------------------------+
 
 * Type (high 7 bits): The type of the item.
   The value of the other data fields depend on the type.
@@ -220,8 +255,6 @@ There are three formats for the data block.
 * Offset: Offset of the data on the heap.
 
 * Length: The length of the file or symlink in bytes.
-
-* Item count: The amount of items in the directory.
 
 After the data block comes an arbitrary amount of extension data.
 
@@ -240,18 +273,17 @@ Extension information is stored in the filesystem header.
        0 NLen
        1 DLen
        2 FLen
-       3 Refcount
-      10 Name
-    10+N FData
+       3 Name
+  3+NLen FData
   ====== =====
 
 * NLen: Length of the name of the extension.
+  If 0, this header serves as padding.
+  No extensions may appear after padding.
 
 * DLen: Length of the directory item data associated with the extension.
 
 * FLen: Length of FData
-
-* Refcount: Amount of directories using this extension.
 
 * Name: Name of the extension.
 

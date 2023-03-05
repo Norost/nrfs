@@ -14,7 +14,7 @@ fn create_flush_get() {
 	run(&s, async {
 		let id = s.create().await.unwrap().id();
 		clear(&s).await;
-		s.get(id).await.unwrap();
+		s.get(id);
 
 		Ok(())
 	});
@@ -29,7 +29,7 @@ fn write_flush_read_offset_0() {
 
 		let id = obj.id();
 		clear(&s).await;
-		let obj = s.get(id).await.unwrap();
+		let obj = s.get(id);
 
 		let mut buf = [0; b"Hello, world!".len()];
 		obj.read(0, &mut buf).await.unwrap();
@@ -48,7 +48,7 @@ fn write_flush_read_offset_1000() {
 
 		let id = obj.id();
 		clear(&s).await;
-		let obj = s.get(id).await.unwrap();
+		let obj = s.get(id);
 
 		let mut buf = [0; b"Hello, world!".len()];
 		obj.read(1000, &mut buf).await.unwrap();
@@ -67,7 +67,7 @@ fn write_flush_read_offset_1024() {
 
 		let id = obj.id();
 		clear(&s).await;
-		let obj = s.get(id).await.unwrap();
+		let obj = s.get(id);
 
 		let mut buf = [0; b"Hello, world!".len()];
 		let l = obj.read(1024, &mut buf).await.unwrap();
@@ -87,7 +87,7 @@ fn write_flush_read_offset_1023() {
 
 		let id = obj.id();
 		clear(&s).await;
-		let obj = s.get(id).await.unwrap();
+		let obj = s.get(id);
 
 		let mut buf = [0; b"Hello, world!".len()];
 		obj.read(1023, &mut buf).await.unwrap();
@@ -108,7 +108,7 @@ fn write_flush_read_offset_10p6() {
 
 		let id = obj.id();
 		clear(&s).await;
-		let obj = s.get(id).await.unwrap();
+		let obj = s.get(id);
 
 		let mut buf = [2; 1000];
 

@@ -8,7 +8,7 @@ use {
 		BlockSize, Compression, Error, KeyDeriver, MaxRecordSize, Resource,
 	},
 	allocator::Allocator,
-	core::cell::{Cell, RefCell},
+	core::cell::{Cell, RefCell, RefMut},
 	dev::Set256,
 };
 
@@ -301,6 +301,11 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	/// Get the key used to encrypt the header.
 	pub fn header_key(&self) -> [u8; 32] {
 		self.devices.header_key()
+	}
+
+	/// Get reference to filesystem data in the header
+	pub fn header_data(&self) -> RefMut<'_, [u8]> {
+		RefMut::map(self.devices.data.borrow_mut(), |d| &mut **d)
 	}
 
 	/// Set a new key derivation function.

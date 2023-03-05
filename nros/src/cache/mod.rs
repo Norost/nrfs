@@ -310,11 +310,21 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		self.store.header_key()
 	}
 
+	/// Get reference to filesystem data in the header
+	pub fn header_data(&self) -> RefMut<'_, [u8]> {
+		self.store.header_data()
+	}
+
 	/// Set a new key derivation function.
 	///
 	/// This replaces the header key.
 	pub fn set_key_deriver(&self, kdf: KeyDeriver<'_>) {
 		self.store.set_key_deriver(kdf)
+	}
+
+	/// The maximum length of an object.
+	pub fn obj_max_len(&self) -> u64 {
+		self.root_max_size.iter().copied().sum::<u64>()
 	}
 
 	/// Amount of entries in a parent record as a power of two.

@@ -34,7 +34,7 @@ fn equal_2() {
 
 		let s = load(devs).await;
 		s.run(async {
-			let obj = s.get(0).await.unwrap();
+			let obj = s.get(0);
 			let buf = &mut [0; 1 << 15];
 			obj.read(0, buf).await.unwrap();
 			assert_eq!(buf, &mut [1; 1 << 15]);

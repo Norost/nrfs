@@ -10,7 +10,10 @@ use {
 		KeyPassword, LoadConfig, MaxRecordSize, NewConfig, Resource,
 	},
 	alloc::sync::Arc,
-	core::{cell::Cell, fmt, future, mem},
+	core::{
+		cell::{Cell, RefCell},
+		fmt, future, mem,
+	},
 	futures_util::stream::{FuturesOrdered, FuturesUnordered, StreamExt, TryStreamExt},
 };
 
@@ -63,6 +66,8 @@ pub(crate) struct DevSet<D: Dev, R: Resource> {
 	nonce: Cell<u64>,
 
 	key: [u8; 32],
+
+	pub data: RefCell<Box<[u8]>>,
 }
 
 impl<D: Dev, R: Resource> DevSet<D, R> {
@@ -156,6 +161,10 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 		let key_hash = FsHeader::hash_key(&header_key);
 
+		let data = vec![0; (1 << config.block_size.to_raw()) - 256]
+			.into_boxed_slice()
+			.into();
+
 		Ok(Self {
 			devices,
 			block_size: config.block_size,
@@ -182,6 +191,9 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			nonce: Default::default(),
 
 			resource: config.resource.into(),
+
+			// FIXME
+			data,
 		})
 	}
 
@@ -343,6 +355,9 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			nonce: Cell::new(header.nonce.into()),
 
 			resource: config.resource.into(),
+
+			// FIXME
+			data: vec![].into_boxed_slice().into(),
 		};
 
 		// If any headers are broken, fix them now.

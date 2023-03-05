@@ -1,13 +1,12 @@
 #[derive(Clone, Copy, Debug, Default)]
-#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
-pub struct Entry {
+pub struct Unix {
 	pub permissions: u16,
 	uid: [u8; 3],
 	gid: [u8; 3],
 }
 
-impl Entry {
-	/// Construct new [`Entry`].
+impl Unix {
+	/// Construct new [`Unix`].
 	///
 	/// # Panics
 	///
@@ -21,12 +20,13 @@ impl Entry {
 
 	pub(crate) fn from_raw(data: [u8; 8]) -> Self {
 		let [a, b, c, d, e, f, g, h] = data;
-		Self { permissions: u16::from_le_bytes([a, b]), uid: [c, d, e], gid: [f, g, h] }
+		Self { permissions: u16::from_le_bytes([a, b]) >> 1, uid: [c, d, e], gid: [f, g, h] }
 	}
 
 	pub(crate) fn into_raw(self) -> [u8; 8] {
+		debug_assert!(self.permissions & 1 << 15 == 0, "high bit will be lost");
 		let mut buf = [0; 8];
-		buf[0..2].copy_from_slice(&self.permissions.to_le_bytes());
+		buf[0..2].copy_from_slice(&(self.permissions << 1).to_le_bytes());
 		buf[2..5].copy_from_slice(&self.uid);
 		buf[5..8].copy_from_slice(&self.gid);
 		buf
@@ -64,5 +64,16 @@ impl Entry {
 		let [a, b, c, d] = gid.to_le_bytes();
 		assert!(d == 0, "uid does not fit in 24 bits");
 		self.gid = [a, b, c];
+	}
+}
+
+#[cfg(any(test, fuzzing))]
+impl<'a> arbitrary::Arbitrary<'a> for Unix {
+	fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+		Ok(Self {
+			permissions: u.int_in_range(u16::MIN..=u16::MAX)? >> 1,
+			uid: u.arbitrary()?,
+			gid: u.arbitrary()?,
+		})
 	}
 }

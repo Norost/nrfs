@@ -122,6 +122,14 @@ macro_rules! alloc {
 
 alloc!(Box Rc Arc);
 
+impl ToOwned for Name {
+	type Owned = Box<Name>;
+
+	fn to_owned(&self) -> Self::Owned {
+		self.into()
+	}
+}
+
 impl fmt::Debug for Name {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		#[cfg(not(fuzzing))]

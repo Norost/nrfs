@@ -32,7 +32,7 @@ fn write_remount_read() {
 	});
 
 	block_on(s.run(async {
-		let obj = s.get(id).await.unwrap();
+		let obj = s.get(id);
 		let mut buf = [0];
 		let l = obj.read(0, &mut buf).await.unwrap();
 		assert_eq!(l, 1);
@@ -61,7 +61,7 @@ fn write_remount_write_read() {
 	});
 
 	block_on(s.run(async {
-		let obj_1 = s.get(id).await.unwrap();
+		let obj_1 = s.get(id);
 		let obj_2 = s.create().await.unwrap();
 		obj_2.write(0, &[2]).await.unwrap();
 

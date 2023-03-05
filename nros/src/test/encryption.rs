@@ -19,7 +19,7 @@ fn write_read_nocache() {
 		let obj = s.create().await.unwrap();
 		obj.write(0, &[1; 1 << 13]).await.unwrap();
 
-		let obj = s.get(0).await.unwrap();
+		let obj = s.get(0);
 		let buf = &mut [2; 1 << 13];
 		obj.read(0, buf).await.unwrap();
 		assert_eq!(*buf, [1; 1 << 13]);

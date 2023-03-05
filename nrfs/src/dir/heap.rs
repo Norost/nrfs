@@ -1,100 +1,69 @@
 use {
-	super::{Dir, Offset},
-	crate::{Dev, Error},
-	core::cell::RefMut,
-	rangemap::RangeSet,
+	super::{header::DirHeader, Dir},
+	crate::{Dev, Error, Nrfs},
 };
 
-impl<'a, D: Dev> Dir<'a, D> {
+pub(crate) struct Heap<'a, D: Dev> {
+	fs: &'a Nrfs<D>,
+	id: u64,
+}
+
+impl<'a, D: Dev> Heap<'a, D> {
 	/// Read a heap value.
-	pub(crate) async fn read_heap(&self, offset: Offset, buf: &mut [u8]) -> Result<(), Error<D>> {
+	pub(crate) async fn read(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error<D>> {
 		trace!("read_heap {:?} (len: {})", offset, buf.len());
-		self.fs.get(self.id).await?.read(offset.into(), buf).await?;
+		self.fs.get(self.id).read(offset.into(), buf).await?;
 		Ok(())
 	}
 
 	/// Write a heap value.
-	pub(crate) async fn write_heap(&self, offset: Offset, data: &[u8]) -> Result<(), Error<D>> {
+	pub(crate) async fn write(&self, offset: u64, data: &[u8]) -> Result<(), Error<D>> {
 		trace!("write_heap {:?} (len: {})", offset, data.len());
-		self.fs
-			.get(self.id)
-			.await?
-			.write(offset.into(), data)
-			.await?;
+		self.fs.get(self.id).write(offset.into(), data).await?;
 		Ok(())
 	}
 
 	/// Zero out heap region.
-	pub(crate) async fn zero_heap(&self, offset: Offset, len: u64) -> Result<(), Error<D>> {
+	pub(crate) async fn zero(&self, offset: u64, len: u64) -> Result<(), Error<D>> {
 		trace!("zero_heap {:?} (len: {})", offset, len);
-		self.fs
-			.get(self.id)
-			.await?
-			.write_zeros(offset.into(), len)
-			.await?;
+		self.fs.get(self.id).write_zeros(offset.into(), len).await?;
 		Ok(())
-	}
-
-	/// Write a full, minimized heap allocation log.
-	pub(super) async fn save_heap_alloc_log(&self) -> Result<(), Error<D>> {
-		trace!("save_heap_alloc_log");
-		todo!();
-	}
-
-	/// Get or load the heap allocation map.
-	pub(super) async fn heap_alloc_log(&self) -> Result<RefMut<'a, RangeSet<Offset>>, Error<D>> {
-		trace!("heap_alloc_log");
-		todo!();
 	}
 
 	/// Allocate heap space for arbitrary data.
 	///
 	/// The returned region is not readable until it is written to.
-	pub(crate) async fn alloc_heap(&self, len: u64) -> Result<Offset, Error<D>> {
+	pub(crate) async fn alloc(&self, hdr: &mut DirHeader<'_>, len: u64) -> Result<u64, Error<D>> {
 		trace!("alloc_heap {:?}", len);
 		if len == 0 {
-			return Ok(Offset::MIN);
+			return Ok(0);
 		}
-		let mut log = self.heap_alloc_log().await?;
-		for r in log.gaps(&(Offset::MIN..Offset::MAX)) {
-			if u64::from(r.end) - u64::from(r.start) >= len {
-				log.insert(r.start..r.start.add_u64(len).unwrap());
-				drop(log);
-				self.save_heap_alloc_log().await?;
-				return Ok(r.start);
-			}
-		}
-		todo!("all 2^48 bytes are allocated");
+		let addr = hdr.heap_length;
+		hdr.heap_length += len;
+		hdr.heap_allocated += len;
+		Ok(addr)
 	}
 
 	/// Deallocate heap space.
-	pub(crate) async fn dealloc_heap(&self, offset: Offset, len: u64) -> Result<(), Error<D>> {
+	pub(crate) async fn dealloc(
+		&self,
+		hdr: &mut DirHeader<'_>,
+		offset: u64,
+		len: u64,
+	) -> Result<(), Error<D>> {
 		trace!("dealloc_heap {:?}", len);
-		if len > 0 {
-			// Write zeroes for compression and to make sure resized files don't include
-			// garbage (non-zeroes).
-			self.zero_heap(offset, len).await?;
-
-			// Free region.
-			// Happens after zeroing to avoid concurrent read/writes.
-			let r = offset..offset.add_u64(len).unwrap();
-			let mut log = self.heap_alloc_log().await?;
-			debug_assert!(
-				log.iter().any(|d| {
-					let d = u64::from(d.start)..u64::from(d.end);
-					let r = u64::from(r.start)..u64::from(r.end);
-					r.into_iter().all(|e| d.contains(&e))
-				}),
-				"double free"
-			);
-			log.remove(r);
-			drop(log);
-			self.save_heap_alloc_log().await?;
+		self.zero(offset, len).await?;
+		hdr.heap_allocated -= len;
+		if offset + len == hdr.heap_length {
+			hdr.heap_length = offset;
 		}
 		Ok(())
 	}
 }
 
-fn offt([a, b, c, d, e, f]: [u8; 6]) -> u64 {
-	u64::from_le_bytes([a, b, c, d, e, f, 0, 0])
+impl<'a, D: Dev> Dir<'a, D> {
+	/// Get heap object.
+	pub(crate) fn heap(&self, hdr: &DirHeader<'a>) -> Heap<'a, D> {
+		Heap { fs: self.fs, id: hdr.heap_id }
+	}
 }

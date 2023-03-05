@@ -157,7 +157,7 @@ pub use {
 
 use {
 	cache::Cache,
-	core::{fmt, future::Future},
+	core::{cell::RefMut, fmt, future::Future},
 	key_derivation::KeyDerivation,
 	storage::{DevSet, Store},
 };
@@ -222,12 +222,8 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 	}
 
 	/// Return an owned reference to an object.
-	pub async fn get(&self, id: u64) -> Result<Object<'_, D, R>, Error<D>> {
-		assert!(
-			id != u64::MAX,
-			"ID u64::MAX is reserved for the object list"
-		);
-		Ok(self.store.get(id))
+	pub fn get(&self, id: u64) -> Object<'_, D, R> {
+		self.store.get(id)
 	}
 
 	/// Readjust cache size.
@@ -260,6 +256,11 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 		self.store.header_key()
 	}
 
+	/// Get reference to filesystem data in the header
+	pub fn header_data(&self) -> RefMut<'_, [u8]> {
+		self.store.header_data()
+	}
+
 	/// Set a new key derivation function.
 	///
 	/// This replaces the header key.
@@ -271,6 +272,11 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 	pub fn uid(&self) -> u128 {
 		todo!()
 		//self.store
+	}
+
+	/// The maximum length of an object.
+	pub fn obj_max_len(&self) -> u64 {
+		self.store.obj_max_len()
 	}
 }
 

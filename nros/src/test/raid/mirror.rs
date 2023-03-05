@@ -26,7 +26,7 @@ fn write_read_2() {
 
 		let s = load(devs).await;
 
-		let obj = s.get(0).await.unwrap();
+		let obj = s.get(0);
 		let buf = &mut [0; 1 << 12];
 		obj.read(0, buf).await.unwrap();
 		assert_eq!(buf, &mut [1; 1 << 12]);
@@ -60,7 +60,7 @@ fn write_corrupt_read_2() {
 			// Remount & test
 			s = load(devs).await;
 
-			let obj = s.get(0).await.unwrap();
+			let obj = s.get(0);
 			let buf = &mut [0; 1 << 12];
 			obj.read(0, buf).await.unwrap();
 

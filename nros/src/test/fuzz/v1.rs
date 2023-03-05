@@ -119,7 +119,7 @@ impl Test {
 						}
 						Op::Write { idx, offset, amount } => {
 							let id = self.ids[idx as usize % self.ids.len()];
-							let obj = self.store.get(id).await.unwrap();
+							let obj = self.store.get(id);
 
 							let l = obj
 								.write(offset.into(), &vec![1; amount.into()])
@@ -137,7 +137,7 @@ impl Test {
 						}
 						Op::WriteZeros { idx, offset, amount } => {
 							let id = self.ids[idx as usize % self.ids.len()];
-							let obj = self.store.get(id).await.unwrap();
+							let obj = self.store.get(id);
 
 							let l = obj.write_zeros(offset.into(), amount.into()).await.unwrap();
 							let l = u32::try_from(l).unwrap();
@@ -155,7 +155,7 @@ impl Test {
 						}
 						Op::Read { idx, offset, amount } => {
 							let id = self.ids[idx as usize % self.ids.len()];
-							let obj = self.store.get(id).await.unwrap();
+							let obj = self.store.get(id);
 
 							let buf = &mut vec![2; amount.into()];
 							let l = obj.read(offset.into(), buf).await.unwrap();
@@ -196,7 +196,7 @@ impl Test {
 						Op::Destroy { idx } => {
 							let i = idx as usize % self.ids.len();
 							let id = self.ids[i];
-							let obj = self.store.get(id).await.unwrap();
+							let obj = self.store.get(id);
 							obj.dealloc().await.unwrap();
 							self.ids.swap_remove(i);
 							// Stop immediately if no objects remain.
