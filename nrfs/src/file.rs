@@ -1,4 +1,7 @@
-use crate::{dir::Dir, item::ItemData, Dev, DirKey, Error, ItemExt, Name, Nrfs, TransferError};
+use {
+	crate::{dir::Dir, item::ItemData, Dev, DirKey, Error, ItemExt, Name, Nrfs, TransferError},
+	core::fmt,
+};
 
 /// How many multiples of the block size a file should be before it is unembedded.
 ///
@@ -306,6 +309,15 @@ impl<'a, D: Dev> File<'a, D> {
 		Ok(self.dir().item_get_data(self.key.index).await?.len)
 	}
 
+	pub async fn is_embed(&self) -> Result<bool, Error<D>> {
+		trace!("is_embed");
+		let ty = self.dir().item_get_data(self.key.index).await?.ty;
+		Ok(matches!(
+			ty,
+			ItemData::TY_EMBED_FILE | ItemData::TY_EMBED_SYM
+		))
+	}
+
 	pub async fn ext(&self) -> Result<ItemExt, Error<D>> {
 		trace!("ext");
 		let hdr = self.dir().header().await?;
@@ -371,3 +383,11 @@ impl<'a, D: Dev> File<'a, D> {
 /// Error returned if the length is larger than supported.
 #[derive(Clone, Debug)]
 pub struct LengthTooLong;
+
+impl fmt::Display for LengthTooLong {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		"length too long".fmt(f)
+	}
+}
+
+impl core::error::Error for LengthTooLong {}

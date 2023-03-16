@@ -192,7 +192,6 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 			resource: config.resource.into(),
 
-			// FIXME
 			data,
 		})
 	}
@@ -273,15 +272,18 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			let hdr = FsHeader::from_raw(hdr.try_into().unwrap());
 			let (info, _) = FsInfo::from_raw_slice(info).unwrap();
 
+			let data = &buf.get()[256..];
+
 			// Add to mirror.
 			mirrors
 				.get_mut(usize::from(info.configuration.mirror_index().to_raw()))
 				.expect("todo: invalid mirror index")
 				.push((i, u64::from(info.lba_offset), u64::from(info.block_count)));
 
-			header.get_or_insert((hdr, info));
+			header.get_or_insert((hdr, info, data));
 		}
-		let (header, info) = header.expect("no header");
+		let (header, info, data) = header.expect("no header");
+		let data = RefCell::new(data.to_vec().into());
 		let header_key = header_key.expect("no header key");
 
 		drop(headers);
@@ -356,8 +358,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 			resource: config.resource.into(),
 
-			// FIXME
-			data: vec![].into_boxed_slice().into(),
+			data,
 		};
 
 		// If any headers are broken, fix them now.
@@ -594,6 +595,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.allocator()
 			.alloc(1 << self.block_size.to_raw())
 			.await?;
+
+		buf.get_mut()[256..].copy_from_slice(&self.data.borrow_mut());
 
 		let mirc = u8::try_from(self.devices.len())
 			.ok()

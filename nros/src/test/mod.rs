@@ -234,3 +234,20 @@ fn read_before_tx_1024() {
 		Ok(())
 	});
 }
+
+#[test]
+fn header_data() {
+	let s = new(MaxRecordSize::K1);
+	s.header_data()[..11].copy_from_slice(b"hello world");
+	let devices = block_on(s.unmount()).unwrap();
+	let s = block_on(Nros::load(LoadConfig {
+		resource: StdResource::new(),
+		devices,
+		magic: *b"TEST",
+		cache_size: 0,
+		allow_repair: false,
+		retrieve_key: &mut |_| todo!(),
+	}))
+	.unwrap();
+	assert_eq!(&s.header_data()[..11], b"hello world");
+}

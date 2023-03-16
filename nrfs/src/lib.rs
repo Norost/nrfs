@@ -1,6 +1,7 @@
 //#![cfg_attr(not(test), no_std)]
 #![forbid(unused_must_use)]
 #![forbid(elided_lifetimes_in_paths)]
+#![feature(is_some_and)]
 #![feature(iterator_try_collect)]
 #![feature(nonzero_min_max)]
 #![feature(cell_update)]
@@ -71,7 +72,7 @@ pub use {
 	config::{LoadConfig, NewConfig},
 	core::cell::RefCell,
 	dir::{CreateError, Dir, DirDestroyError, DirKey, TransferError},
-	ext::EnableExt,
+	ext::{EnableExt, MTime, Unix},
 	file::{File, FileKey, LengthTooLong},
 	item::{Item, ItemExt, ItemInfo, ItemKey},
 	name::Name,
@@ -130,6 +131,7 @@ impl<D: Dev> Nrfs<D> {
 	}
 
 	pub async fn load(config: LoadConfig<'_, D>) -> Result<Self, Error<D>> {
+		trace!("load");
 		let LoadConfig { devices, cache_size, allow_repair, retrieve_key } = config;
 		let conf = nros::LoadConfig {
 			devices,
@@ -140,7 +142,8 @@ impl<D: Dev> Nrfs<D> {
 			magic: Self::MAGIC,
 		};
 		let storage = nros::Nros::load(conf).await?;
-		let ext = ExtMap::parse(&storage.header_data()[16..]).into();
+		let ext = RefCell::new(ExtMap::parse(&storage.header_data()[16..]));
+		trace!("--> {:#?}", ext.borrow());
 		Ok(Self { storage, ext, read_only: !allow_repair })
 	}
 

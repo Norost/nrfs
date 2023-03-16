@@ -1,5 +1,5 @@
 use {
-	crate::{ext, Dev, Dir, DirKey, EnableExt, Error, FileKey, Name, Nrfs, TransferError},
+	crate::{ext, Dev, Dir, DirKey, EnableExt, Error, Ext, FileKey, Name, Nrfs, TransferError},
 	std::borrow::Cow,
 };
 
@@ -70,27 +70,54 @@ impl<'a, D: Dev> Item<'a, D> {
 
 	pub async fn ext(&self) -> Result<ItemExt, Error<D>> {
 		let (dir, index) = self.get_loc();
-		let dir = Dir::new(self.fs, DirKey::inval(dir));
-		let hdr = dir.header().await?;
-		Ok(dir.item_get_data_ext(&hdr, index).await?.1)
+		if dir == u64::MAX {
+			let map = self.fs.ext.borrow_mut();
+			let data = &self.fs.storage.header_data()[16..];
+			Ok(ItemExt {
+				unix: map
+					.get_id(Ext::Unix)
+					.map(|(_, offt)| ext::Unix::from_raw(data[offt..offt + 8].try_into().unwrap())),
+				mtime: map.get_id(Ext::MTime).map(|(_, offt)| {
+					ext::MTime::from_raw(data[offt..offt + 8].try_into().unwrap())
+				}),
+			})
+		} else {
+			let dir = Dir::new(self.fs, DirKey::inval(dir));
+			let hdr = dir.header().await?;
+			Ok(dir.item_get_data_ext(&hdr, index).await?.1)
+		}
 	}
 
 	pub async fn set_unix(&self, unix: ext::Unix) -> Result<bool, Error<D>> {
 		trace!("set_unix {:?}", self.key);
 		assert!(!self.fs.read_only, "read only");
 		let (dir, index) = self.get_loc();
-		Dir::new(self.fs, DirKey::inval(dir))
-			.item_set_unix(index, unix)
-			.await
+		if dir == u64::MAX {
+			let Some((_, offt)) = self.fs.ext.borrow_mut().get_id(Ext::Unix) else { return Ok(false) };
+			self.fs.storage.header_data()[16 + offt..16 + offt + 8]
+				.copy_from_slice(&unix.into_raw());
+			Ok(true)
+		} else {
+			Dir::new(self.fs, DirKey::inval(dir))
+				.item_set_unix(index, unix)
+				.await
+		}
 	}
 
 	pub async fn set_mtime(&self, mtime: ext::MTime) -> Result<bool, Error<D>> {
 		trace!("set_unix {:?}", self.key);
 		assert!(!self.fs.read_only, "read only");
 		let (dir, index) = self.get_loc();
-		Dir::new(self.fs, DirKey::inval(dir))
-			.item_set_mtime(index, mtime)
-			.await
+		if dir == u64::MAX {
+			let Some((_, offt)) = self.fs.ext.borrow_mut().get_id(Ext::MTime) else { return Ok(false) };
+			self.fs.storage.header_data()[16 + offt..16 + offt + 8]
+				.copy_from_slice(&mtime.into_raw());
+			Ok(true)
+		} else {
+			Dir::new(self.fs, DirKey::inval(dir))
+				.item_set_mtime(index, mtime)
+				.await
+		}
 	}
 
 	fn get_loc(&self) -> (u64, u32) {

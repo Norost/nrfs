@@ -7,6 +7,7 @@ use {
 		item::{ItemData, ItemExt, ItemInfo, ItemTy, NewItem},
 		Dev, EnableExt, Error, File, FileKey, Name, Nrfs,
 	},
+	core::fmt,
 	header::DirExt,
 	std::borrow::Cow,
 };
@@ -293,3 +294,38 @@ pub enum TransferError {
 	/// The root directory cannot be transferred
 	IsRoot,
 }
+
+impl fmt::Display for DirDestroyError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::NotEmpty => "not empty",
+			Self::IsRoot => "is root",
+		}
+		.fmt(f)
+	}
+}
+
+impl fmt::Display for CreateError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Duplicate => "duplicate",
+			Self::Full => "full",
+		}
+		.fmt(f)
+	}
+}
+
+impl fmt::Display for TransferError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Duplicate => "duplicate",
+			Self::Full => "full",
+			Self::IsRoot => "is root",
+		}
+		.fmt(f)
+	}
+}
+
+impl core::error::Error for DirDestroyError {}
+impl core::error::Error for CreateError {}
+impl core::error::Error for TransferError {}

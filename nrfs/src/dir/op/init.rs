@@ -15,7 +15,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let mut item_offt = 0u16;
 
 		let mut add_ext = |ext, hdr_len, item_len| {
-			hdr[offt] = fs.ext.borrow_mut().get_id_or_insert(ext).get();
+			hdr[offt] = fs.get_id_or_insert(ext).0.get();
 			hdr[offt + 1..offt + 1 + hdr_len].copy_from_slice(&item_offt.to_le_bytes());
 			offt += 1 + hdr_len;
 			item_offt += item_len;

@@ -270,12 +270,15 @@ Extension information is stored in the filesystem header.
   ====== =====
   Offset Field
   ====== =====
-       0 NLen
-       1 DLen
-       2 FLen
-       3 Name
-  3+NLen FData
+       0 ID
+       1 NLen
+       2 DLen
+       3 FLen
+       4 Name
+  4+NLen FData
   ====== =====
+
+* ID: ID of the extension.
 
 * NLen: Length of the name of the extension.
   If 0, this header serves as padding.

@@ -235,3 +235,69 @@ fn destroy_file() {
 		}
 	});
 }
+
+#[test]
+fn remount() {
+	let fs = new();
+	let devices = block_on(fs.unmount()).unwrap();
+	block_on(Nrfs::load(LoadConfig {
+		devices,
+		cache_size: 1 << 12,
+		allow_repair: true,
+		retrieve_key: &mut |_| unreachable!(),
+	}))
+	.unwrap();
+}
+
+#[test]
+fn remount_ext_file() {
+	let fs = new_ext();
+	run(&fs, async {
+		mkfile(
+			&fs.root_dir(),
+			b"file",
+			ItemExt { unix: Some(Unix::new(0x7ead, 42, 1337)), ..Default::default() },
+		)
+		.await;
+	});
+	let devices = block_on(fs.unmount()).unwrap();
+	let fs = block_on(Nrfs::load(LoadConfig {
+		devices,
+		cache_size: 1 << 12,
+		allow_repair: true,
+		retrieve_key: &mut |_| unreachable!(),
+	}))
+	.unwrap();
+	run(&fs, async {
+		let file = fs.root_dir().search(b"file".into()).await.unwrap().unwrap();
+		assert_eq!(file.ext.unix.unwrap().permissions, 0x7ead);
+		assert_eq!(file.ext.unix.unwrap().uid(), 42);
+		assert_eq!(file.ext.unix.unwrap().gid(), 1337);
+	});
+}
+
+#[test]
+fn remount_ext_root() {
+	let fs = new_ext();
+	run(&fs, async {
+		let root = fs.root_dir().key;
+		let root = fs.item(ItemKey::Dir(root));
+		root.set_unix(Unix::new(0x7ead, 42, 1337)).await.unwrap();
+	});
+	let devices = block_on(fs.unmount()).unwrap();
+	let fs = block_on(Nrfs::load(LoadConfig {
+		devices,
+		cache_size: 1 << 12,
+		allow_repair: true,
+		retrieve_key: &mut |_| unreachable!(),
+	}))
+	.unwrap();
+	run(&fs, async {
+		let root = fs.root_dir().key;
+		let root = fs.item(ItemKey::Dir(root));
+		let ext = root.ext().await.unwrap();
+		assert_eq!(ext.unix.unwrap().permissions, 0x7ead);
+		assert_eq!(ext.unix.unwrap().uid(), 42);
+		assert_eq!(ext.unix.unwrap().gid(), 1337);
+	});
+}
