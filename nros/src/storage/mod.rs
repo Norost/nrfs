@@ -304,8 +304,8 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	}
 
 	/// Get reference to filesystem data in the header
-	pub fn header_data(&self) -> RefMut<'_, [u8]> {
-		RefMut::map(self.devices.data.borrow_mut(), |d| &mut **d)
+	pub fn header_data(&self) -> RefMut<'_, [u8; 256]> {
+		self.devices.data.borrow_mut()
 	}
 
 	/// Set a new key derivation function.

@@ -67,7 +67,7 @@ pub(crate) struct DevSet<D: Dev, R: Resource> {
 
 	key: [u8; 32],
 
-	pub data: RefCell<Box<[u8]>>,
+	pub data: RefCell<[u8; 256]>,
 }
 
 impl<D: Dev, R: Resource> DevSet<D, R> {
@@ -85,11 +85,15 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 	///
 	/// If any device has no blocks.
 	pub async fn new(config: NewConfig<'_, D, R>) -> Result<Self, Error<D>> {
-		// Determine length of smallest chain.
+		let calc_blocks = |dev: &D| {
+			let shift = config.block_size.to_raw() - dev.block_size().to_raw();
+			(dev.block_count() >> shift) - 2
+		};
+
 		let block_count = config
 			.mirrors
 			.iter()
-			.map(|c| c.iter().map(|d| d.block_count() - 2).sum::<u64>())
+			.map(|c| c.iter().map(calc_blocks).sum::<u64>())
 			.min()
 			.expect("no chains");
 
@@ -103,7 +107,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 				chain
 					.into_iter()
 					.map(|dev| {
-						let block_count = remaining_blocks.min(dev.block_count() - 2);
+						let block_count = remaining_blocks.min(calc_blocks(&dev));
 						remaining_blocks -= block_count;
 						Node { block_count, dev, block_offset: 0 }
 					})
@@ -121,17 +125,16 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			devices
 				.iter()
 				.flat_map(|c| c.iter())
-				.all(|d| d.dev.block_count() >= 2 + (1 << (max_record_size - block_size))),
+				.all(|d| calc_blocks(&d.dev) >= (1 << (max_record_size - block_size))),
 			"device cannot contain maximum size record & headers"
 		);
 
-		// FIXME support mismatched block sizes.
 		assert!(
 			devices
 				.iter()
 				.flat_map(|c| c.iter())
-				.all(|d| d.dev.block_size().to_raw() == block_size),
-			"todo: support mismatched block sizes"
+				.all(|d| d.dev.block_size().to_raw() <= block_size),
+			"todo: support larger block sizes"
 		);
 
 		// Assign block offsets to devices in chains and write headers.
@@ -161,10 +164,6 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 		let key_hash = FsHeader::hash_key(&header_key);
 
-		let data = vec![0; (1 << config.block_size.to_raw()) - 256]
-			.into_boxed_slice()
-			.into();
-
 		Ok(Self {
 			devices,
 			block_size: config.block_size,
@@ -192,7 +191,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 			resource: config.resource.into(),
 
-			data,
+			data: [0; 256].into(),
 		})
 	}
 
@@ -210,21 +209,16 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 		let mut header_key = None;
 
-		// Collect both start & end headers.
+		// Collect only start headers, as end header location is unknown.
 		let headers = config
 			.devices
 			.iter()
-			.flat_map(|d| {
-				let end = d.block_count() - 1;
-				let block_size = 1 << d.block_size().to_raw();
-				[d.read(0, block_size), d.read(end, block_size)]
-			})
+			.map(|d| d.read(0, 1 << d.block_size().to_raw()))
 			.collect::<FuturesOrdered<_>>()
 			.map(|buf| {
-				// Try to decrypt header
 				let Ok(mut buf) = buf else { return None };
 
-				let (hdr, info) = buf.get_mut().split_at_mut(64);
+				let (hdr, info) = buf.get_mut()[..512].split_at_mut(64);
 				let header = FsHeader::from_raw((&*hdr).try_into().unwrap());
 
 				let key = match header_key.as_ref() {
@@ -263,16 +257,15 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 		// Build mirrors
 		let mut mirrors = vec![vec![]; 4];
-		for (i, bufs) in headers.chunks(2).enumerate() {
-			let [buf_a, buf_b] = bufs else { unreachable!() };
-			let buf = buf_a.as_ref().or(buf_b.as_ref()).expect("no valid header");
+		for (i, buf) in headers.iter().enumerate() {
+			let buf = buf.as_ref().expect("no valid header");
 
 			let (hdr, info) = buf.get().split_at(64);
 
 			let hdr = FsHeader::from_raw(hdr.try_into().unwrap());
 			let (info, _) = FsInfo::from_raw_slice(info).unwrap();
 
-			let data = &buf.get()[256..];
+			let data = &buf.get()[256..512];
 
 			// Add to mirror.
 			mirrors
@@ -283,7 +276,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			header.get_or_insert((hdr, info, data));
 		}
 		let (header, info, data) = header.expect("no header");
-		let data = RefCell::new(data.to_vec().into());
+		let data = RefCell::new(data.try_into().unwrap());
 		let header_key = header_key.expect("no header key");
 
 		drop(headers);
@@ -384,17 +377,6 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.await
 			.map_err(Error::Dev)?;
 
-		/// Save a single header to a device.
-		async fn save_header<D: Dev>(
-			tail: bool,
-			node: &Node<D>,
-			header: <D::Allocator as Allocator>::Buf,
-		) -> Result<(), D::Error> {
-			let lba = if tail { 0 } else { 1 + node.block_count };
-			node.dev.write(lba, header);
-			node.dev.fence().await
-		}
-
 		// Allocate buffers for headers & write to start headers.
 		let fut = self
 			.devices
@@ -405,7 +387,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 				chain.iter().map(move |node| async move {
 					let buf = self.create_header(i, node).await?;
 					let b = buf.clone();
-					save_header(false, node, b).await?;
+					self.save_header(false, node, b).await?;
 					Ok((node, buf))
 				})
 			})
@@ -418,13 +400,25 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		// Now save to end.
 		let fut: FuturesUnordered<_> = fut
 			.into_iter()
-			.map(|(node, buf)| save_header(true, node, buf))
+			.map(|(node, buf)| self.save_header(true, node, buf))
 			.collect::<FuturesUnordered<_>>();
 
 		// Wait for futures to finish
 		fut.try_for_each(|f| future::ready(Ok(f)))
 			.await
 			.map_err(Error::Dev)
+	}
+
+	/// Save a single header to a device.
+	async fn save_header(
+		&self,
+		tail: bool,
+		node: &Node<D>,
+		header: <D::Allocator as Allocator>::Buf,
+	) -> Result<(), D::Error> {
+		let lba = if tail { 0 } else { node.block_count + 1 };
+		self.write_dev(&node.dev, lba, header).await?;
+		node.dev.fence().await
 	}
 
 	/// Read a range of blocks.
@@ -475,8 +469,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			// If not, split the buffer in two and perform two operations.
 			return if lba_end <= node_block_end {
 				// No splitting necessary - yay
-				node.dev
-					.read(node_lba, size)
+				self.read_dev(&node.dev, node_lba, size)
 					.await
 					.map(|buf| Some((SetBuf(buf), i)))
 					.map_err(|e| (Error::Dev(e), i))
@@ -488,8 +481,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 						.unwrap();
 				// Allocate two buffers and read into each.
 				let (buf_l, buf_r, mut buf) = futures_util::try_join!(
-					node.dev.read(node_lba, mid),
-					chain[node_i + 1].dev.read(1, size - mid),
+					self.read_dev(&node.dev, node_lba, mid),
+					self.read_dev(&chain[node_i + 1].dev, 1, size - mid),
 					node.dev.allocator().alloc(size),
 				)
 				.map_err(|e| (Error::Dev(e), i))?;
@@ -552,7 +545,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 					let node_lba = lba - node.block_offset + 1;
 					if lba_end <= node_lba_end {
 						// No splitting necessary - yay
-						node.dev.write(node_lba, data.0.clone()).await // +1 because headers
+						self.write_dev(&node.dev, node_lba, data.0.clone()).await
 					} else {
 						// We need to split - aw
 						let d = data.get();
@@ -561,18 +554,19 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 							- usize::try_from(lba_end - node_lba_end << self.block_size().to_raw())
 								.unwrap();
 						// Allocate two buffers, copy halves to each and perform two writes.
-						async fn f<D: Dev>(
+						async fn f<D: Dev, R: Resource>(
+							slf: &DevSet<D, R>,
 							node: &Node<D>,
 							lba: u64,
 							data: &[u8],
 						) -> Result<(), D::Error> {
 							let mut buf = node.dev.allocator().alloc(data.len()).await?;
 							buf.get_mut().copy_from_slice(data);
-							node.dev.write(lba, buf).await
+							slf.write_dev(&node.dev, lba, buf).await
 						}
 						futures_util::try_join!(
-							f(node, node_lba, &d[..mid]),
-							f(&chain[node_i + 1], 1, &d[mid..])
+							f(self, node, node_lba, &d[..mid]),
+							f(self, &chain[node_i + 1], 1, &d[mid..])
 						)
 						.map(|((), ())| ())
 					}
@@ -596,14 +590,14 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.alloc(1 << self.block_size.to_raw())
 			.await?;
 
-		buf.get_mut()[256..].copy_from_slice(&self.data.borrow_mut());
+		buf.get_mut()[256..512].copy_from_slice(&*self.data.borrow_mut());
 
 		let mirc = u8::try_from(self.devices.len())
 			.ok()
 			.and_then(MirrorCount::from_raw)
 			.expect("too many mirrors");
 
-		let (header_raw, info_raw) = buf.get_mut().split_at_mut(64);
+		let (header_raw, info_raw) = buf.get_mut()[..512].split_at_mut(64);
 
 		let mut conf = Configuration::default();
 		conf.set_mirror_count(mirc);
@@ -720,6 +714,28 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		};
 		self.header_key.set(key);
 		self.key_derivation.set(kdf);
+	}
+
+	/// Read from a device, accounting for block size mismatch.
+	async fn read_dev(
+		&self,
+		dev: &D,
+		lba: u64,
+		len: usize,
+	) -> Result<<D::Allocator as Allocator>::Buf, D::Error> {
+		let shift = self.block_size.to_raw() - dev.block_size().to_raw();
+		dev.read(lba << shift, len).await
+	}
+
+	/// Write to a device, accounting for block size mismatch.
+	async fn write_dev(
+		&self,
+		dev: &D,
+		lba: u64,
+		buf: <D::Allocator as Allocator>::Buf,
+	) -> Result<(), D::Error> {
+		let shift = self.block_size.to_raw() - dev.block_size().to_raw();
+		dev.write(lba << shift, buf).await
 	}
 }
 

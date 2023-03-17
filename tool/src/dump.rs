@@ -64,12 +64,7 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 	let devices = args
 		.paths
 		.into_iter()
-		.map(|p| {
-			File::open(p).map(|f| {
-				// FIXME block size shouldn't matter.
-				nrfs::dev::FileDev::new(f, nrfs::BlockSize::from_raw(12).unwrap())
-			})
-		})
+		.map(|p| File::open(p).map(nrfs::dev::FileDev::new))
 		.try_collect()?;
 
 	let conf = nrfs::LoadConfig {

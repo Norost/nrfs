@@ -160,7 +160,7 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 						.read(true)
 						.write(true)
 						.open(&*path)
-						.map(|f| nrfs::dev::FileDev::new(f, block_size))
+						.map(nrfs::dev::FileDev::new)
 				})
 				.try_collect()
 		})

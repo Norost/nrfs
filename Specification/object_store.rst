@@ -91,6 +91,9 @@ Filesystem info
 
 A block with a filesystem header & info is placed at the start and end of a volume.
 
+  It is sufficient to only read the start headers when loading a filesystem.
+  Scanning for tail headers is useful if the start header is corrupted.
+
 .. table:: Filesystem header
 
   +------+------+------+------+------+------+------+------+------+
@@ -240,8 +243,10 @@ A block with a filesystem header & info is placed at the start and end of a volu
   |  ... |                                                       |
   +------+-------------------------------------------------------+
   |  256 |                                                       |
-  +------+              Free for use by filesystem               |
-  |  ... |                                                       |
+  +------+                                                       |
+  |  ... |              Free for use by filesystem               |
+  +------+                                                       |
+  |  504 |                                                       |
   +------+-------------------------------------------------------+
 
 * Configuration: configuration values for the filesystem.

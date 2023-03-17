@@ -2,7 +2,7 @@ use {
 	super::{Allocator, Buf, Dev},
 	crate::BlockSize,
 	alloc::sync::Arc,
-	core::{cell::RefCell, fmt, future},
+	core::{cell::RefCell, future},
 	std::{
 		fs::File,
 		io::{Read, Seek, SeekFrom, Write},
@@ -10,9 +10,9 @@ use {
 };
 
 /// A pseudo-device wrapping a file.
+#[derive(Debug)]
 pub struct FileDev {
 	file: RefCell<File>,
-	block_size: BlockSize,
 	block_count: u64,
 }
 
@@ -24,23 +24,22 @@ pub enum FileDevError {
 }
 
 impl FileDev {
-	/// Wrap a new file and emulate the given block size.
-	pub fn new(mut file: File, block_size: BlockSize) -> Self {
+	/// Wrap a new file.
+	pub fn new(mut file: File) -> Self {
 		let len = file.seek(SeekFrom::End(0)).expect("failed to seek");
-		Self { file: file.into(), block_size, block_count: len >> block_size.to_raw() }
+		Self { file: file.into(), block_count: len / 512 }
 	}
 
 	fn seek(&self, lba: u64, len: usize) -> Result<(), FileDevError> {
-		let end = lba.saturating_add((len >> self.block_size.to_raw()).try_into().unwrap());
-		if len % (1 << self.block_size.to_raw()) != 0 {
+		let end = lba.saturating_add((len / 512).try_into().unwrap());
+		if len % 512 != 0 {
 			Err(FileDevError::BlockSizeMismatch)
 		} else if end > self.block_count {
 			Err(FileDevError::OutOfRange)
 		} else {
-			let offset = lba << self.block_size.to_raw();
 			self.file
 				.borrow_mut()
-				.seek(SeekFrom::Start(offset))
+				.seek(SeekFrom::Start(lba * 512))
 				.map(|_| ())
 				.map_err(FileDevError::Io)
 		}
@@ -65,7 +64,7 @@ impl Dev for FileDev {
 	}
 
 	fn block_size(&self) -> BlockSize {
-		self.block_size
+		BlockSize::B512
 	}
 
 	fn read<'a>(&self, lba: u64, len: usize) -> Self::ReadTask<'_> {
@@ -94,16 +93,6 @@ impl Dev for FileDev {
 
 	fn allocator(&self) -> &Self::Allocator {
 		&FileAllocator
-	}
-}
-
-impl fmt::Debug for FileDev {
-	#[no_coverage]
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct(stringify!(MemDev))
-			.field("buf", &format_args!("[...]"))
-			.field("block_size", &self.block_size)
-			.finish()
 	}
 }
 

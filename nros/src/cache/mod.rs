@@ -311,7 +311,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	}
 
 	/// Get reference to filesystem data in the header
-	pub fn header_data(&self) -> RefMut<'_, [u8]> {
+	pub fn header_data(&self) -> RefMut<'_, [u8; 256]> {
 		self.store.header_data()
 	}
 

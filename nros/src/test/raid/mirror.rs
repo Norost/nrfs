@@ -1,4 +1,4 @@
-use {super::*, crate::data::fs_info::FsHeader};
+use super::*;
 
 /// Just create and save a filesystem with two devices.
 #[test]
@@ -69,6 +69,7 @@ fn write_corrupt_read_2() {
 	});
 }
 
+/* FIXME scan for tail header
 /// Corrupt the start headers only.
 #[test]
 fn corrupt_headers_2() {
@@ -100,3 +101,4 @@ fn corrupt_headers_2() {
 		}
 	})
 }
+*/

@@ -251,3 +251,31 @@ fn header_data() {
 	.unwrap();
 	assert_eq!(&s.header_data()[..11], b"hello world");
 }
+
+#[test]
+fn smaller_blocksize() {
+	let s = MemDev::new(32, BlockSize::B512);
+	let s = block_on(Nros::new(NewConfig {
+		magic: *b"TEST",
+		resource: StdResource::new(),
+		mirrors: vec![vec![s]],
+		block_size: BlockSize::K1,
+		max_record_size: MaxRecordSize::K1,
+		compression: Compression::None,
+		cipher: CipherType::NoneXxh3,
+		key_deriver: KeyDeriver::None { key: &[0; 32] },
+		cache_size: 1 << 10,
+	}))
+	.unwrap();
+	let devices = block_on(s.unmount()).unwrap();
+	dbg!(&devices[0]);
+	block_on(Nros::load(LoadConfig {
+		magic: *b"TEST",
+		resource: StdResource::new(),
+		devices,
+		cache_size: 1 << 10,
+		allow_repair: false,
+		retrieve_key: &mut |_| unreachable!(),
+	}))
+	.unwrap();
+}
