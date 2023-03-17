@@ -165,25 +165,15 @@ impl<'a, D: Dev> Dir<'a, D> {
 	) -> Result<Option<(ItemInfo<'static>, u32)>, Error<D>> {
 		trace!("next_from {:?}", index);
 		let hdr = self.header().await?;
-		let obj = self.fs.get(self.key.id);
 		while index < hdr.highest_block {
 			let name;
 			(name, index) = self.item_name(index).await?;
 			let Some(name) = name else { continue };
 
-			// Collect base data
-			let data = self.item_get_data(index).await?;
-
-			// Collect extension data.
-			let ext_blocks = hdr.ext_slots();
-			let mut buf = vec![0; usize::from(ext_blocks * 16)];
-			obj.read(index_to_offset(index), &mut buf).await?;
-
-			let ext = hdr.decode_ext(&buf);
+			let (data, ext) = self.item_get_data_ext(&hdr, index).await?;
 			let item = ItemInfo { dir: self.key.id, index, name: Cow::Owned(name), data, ext };
 
-			index += 1;
-			index += u32::from(ext_blocks);
+			index += 1 + u32::from(hdr.ext_slots());
 
 			return Ok(Some((item, index)));
 		}
