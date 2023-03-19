@@ -268,7 +268,6 @@ fn smaller_blocksize() {
 	}))
 	.unwrap();
 	let devices = block_on(s.unmount()).unwrap();
-	dbg!(&devices[0]);
 	block_on(Nros::load(LoadConfig {
 		magic: *b"TEST",
 		resource: StdResource::new(),

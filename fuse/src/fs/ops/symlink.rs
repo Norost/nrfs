@@ -2,31 +2,26 @@ use super::*;
 
 impl Fs {
 	pub async fn symlink(&self, job: crate::job::SymLink) {
-		let mut self_ino = self.ino.borrow_mut();
-
-		let d = self_ino.get_dir(&self.fs, job.parent);
 		let Ok(name) = job.name.as_bytes().try_into() else { return job.reply.error(libc::ENAMETOOLONG) };
-		let unix = nrfs::dir::ext::unix::Entry::new(0o777, job.uid, job.gid);
-		let mtime = mtime_now();
-		let ext =
-			nrfs::dir::Extensions { unix: Some(unix), mtime: Some(mtime), ..Default::default() };
-		match d.create_sym(name, &ext).await.unwrap() {
+
+		if self.ino().is_unlinked(job.parent) {
+			return job.reply.error(libc::ENOENT);
+		}
+
+		let d = self.ino().get_dir(job.parent);
+		let d = self.fs.dir(d);
+
+		let ext = mkext(0o777, job.uid, job.gid);
+		match d.create_sym(name, ext.clone()).await.unwrap() {
 			Ok(f) => {
 				let link = job.link.as_os_str().as_bytes();
-				f.write_grow(0, link).await.unwrap();
-				let data = f.data().await.unwrap();
-				let (ino, e) = self_ino.add_sym(f);
-				drop(self_ino);
-				if let Some(e) = e {
-					e.drop().await.unwrap();
-				}
-				let attr = self.attr(ino, FileType::Symlink, link.len() as _, &data);
+				f.write_grow(0, link).await.unwrap().unwrap();
+				let ino = self.ino().add_sym(f.into_key());
+				let attr = self.attr(ino, FileType::Symlink, link.len() as _, ext);
 				job.reply.entry(&TTL, &attr, 0);
 			}
-			Err(InsertError::Duplicate) => job.reply.error(libc::EEXIST),
-			// This is what Linux's tmpfs returns.
-			Err(InsertError::Dangling) => job.reply.error(libc::ENOENT),
-			Err(InsertError::Full) => todo!("figure out error code"),
+			Err(CreateError::Duplicate) => job.reply.error(libc::EEXIST),
+			Err(CreateError::Full) => job.reply.error(libc::ENOSPC),
 		}
 	}
 }

@@ -9,14 +9,12 @@ use {
 	async_channel::{self, Receiver},
 	fuser::*,
 	inode::InodeStore,
-	nrfs::{
-		dev::FileDev,
-		dir::{ItemData, ItemRef, RemoveError},
-		Name, Nrfs,
-	},
+	nrfs::{dev::FileDev, ItemExt, ItemKey, MTime, Name, Nrfs},
 	std::{
-		cell::RefCell,
+		cell::{RefCell, RefMut},
 		fs,
+		future::Future,
+		pin::Pin,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	},
 };
@@ -52,7 +50,7 @@ impl Fs {
 			}
 		};
 
-		let devices = io.map(|f| FileDev::new(f, nrfs::BlockSize::K4)).collect();
+		let devices = io.map(|f| FileDev::new(f)).collect();
 		let conf = nrfs::LoadConfig { retrieve_key, devices, cache_size, allow_repair: true };
 		eprintln!("Mounting filesystem");
 		let fs = Nrfs::load(conf).await.unwrap();
@@ -62,8 +60,7 @@ impl Fs {
 			libc::getgid()
 		});
 
-		let root = fs.run(fs.root_dir()).await.unwrap();
-		ino.add_dir(root);
+		ino.add_dir(fs.root_dir().into_key());
 
 		let (send, recv) = async_channel::bounded(1024);
 
@@ -120,12 +117,9 @@ impl Fs {
 	}
 
 	/// Convert [`ItemData`] et al. to [`FileAttr`].
-	fn attr(&self, ino: u64, ty: FileType, len: u64, data: &ItemData) -> FileAttr {
-		let self_ino = self.ino.borrow_mut();
-
-		let u = data.ext_unix.unwrap_or(self_ino.unix_default);
-
-		let mtime = data.ext_mtime.map_or(UNIX_EPOCH, |t| {
+	fn attr(&self, ino: u64, ty: FileType, len: u64, ext: ItemExt) -> FileAttr {
+		let unix = ext.unix.unwrap_or(self.ino().unix_default);
+		let mtime = ext.mtime.map_or(UNIX_EPOCH, |t| {
 			if t.mtime > 0 {
 				UNIX_EPOCH.checked_add(Duration::from_micros(t.mtime as _))
 			} else {
@@ -147,10 +141,10 @@ impl Fs {
 			mtime,
 			ctime: UNIX_EPOCH,
 			crtime: UNIX_EPOCH,
-			perm: u.permissions,
+			perm: unix.permissions,
 			nlink: 1,
-			uid: u.uid(),
-			gid: u.gid(),
+			uid: unix.uid(),
+			gid: unix.gid(),
 			rdev: 0,
 			flags: 0,
 			kind: ty,
@@ -163,40 +157,75 @@ impl Fs {
 
 	/// Remove a file or symbolic link.
 	async fn remove_file<'a>(&'a self, parent: u64, name: &Name) -> Result<(), i32> {
-		let self_ino = self.ino.borrow_mut();
+		let parent = self.ino().get_dir(parent);
+		let parent = self.fs.dir(parent);
 
-		let d = self_ino.get_dir(&self.fs, parent);
-
-		// Be a good UNIX citizen and check the type.
-		let Some(e) = d.find(name).await.unwrap() else { return Err(libc::ENOENT) };
-		let r = match &e {
-			ItemRef::Dir(_) => Err(libc::EISDIR),
-			ItemRef::File(_) | ItemRef::Sym(_) => Ok(()),
-			ItemRef::Unknown(_) => Err(libc::EPERM),
+		let Some(item) = parent.search(name).await.unwrap()
+			else { return Err(libc::ENOENT) };
+		let file = match item.key() {
+			ItemKey::File(f) | ItemKey::Sym(f) => f,
+			ItemKey::Dir(_) => return Err(libc::EISDIR),
 		};
-		e.drop().await.unwrap();
-		r?;
+		let file = self.fs.file(file);
 
-		// First try to remove the entry straight away.
-		match d.remove(name).await.unwrap() {
-			Ok(()) => Ok(()),
-			Err(RemoveError::NotFound) => Err(libc::ENOENT),
-			// Shouldn't happen ever but w/e
-			Err(RemoveError::NotEmpty) => Err(libc::ENOTEMPTY),
-			Err(RemoveError::UnknownType) => Err(libc::EPERM),
+		let ino = self.ino().get_ino(item.key());
+		if let Some(ino) = ino {
+			self.fs.item(item.key()).erase_name().await.unwrap();
+			self.ino().mark_unlinked(ino);
+		} else {
+			file.destroy().await.unwrap();
 		}
+		Ok(())
+	}
+
+	/// Clean up a dangling item if it is not referenced.
+	async fn clean_dangling(&self, item: ItemKey) {
+		if self.ino().get_ino(item).is_some() {
+			return;
+		}
+		match item {
+			ItemKey::Dir(d) => {
+				let d = self.fs.dir(d);
+				let mut index = 0;
+				let mut in_use = false;
+				while let Some((info, i)) = d.next_from(index).await.unwrap() {
+					if self.ino().get_ino(info.key()).is_some() {
+						in_use = true;
+					} else {
+						let fut = box_fut(self.clean_dangling(info.key()));
+						fut.await;
+					}
+					index = i;
+				}
+				if !in_use {
+					d.destroy().await.unwrap().unwrap();
+				}
+			}
+			ItemKey::File(f) | ItemKey::Sym(f) => {
+				self.fs.file(f).destroy().await.unwrap();
+			}
+		}
+	}
+
+	#[track_caller]
+	fn ino(&self) -> RefMut<'_, InodeStore> {
+		self.ino.borrow_mut()
 	}
 }
 
-fn mtime_now() -> nrfs::dir::ext::mtime::Entry {
+fn mtime_now() -> MTime {
 	mtime_sys(SystemTime::now())
 }
 
-fn mtime_sys(t: SystemTime) -> nrfs::dir::ext::mtime::Entry {
-	nrfs::dir::ext::mtime::Entry {
+fn mtime_sys(t: SystemTime) -> MTime {
+	MTime {
 		mtime: t.duration_since(UNIX_EPOCH).map_or_else(
-			|t| -t.duration().as_micros().try_into().unwrap_or(i64::MAX),
-			|t| t.as_micros().try_into().unwrap_or(i64::MAX),
+			|t| -t.duration().as_micros().try_into().unwrap_or(i64::MAX >> 1),
+			|t| t.as_micros().try_into().unwrap_or(i64::MAX >> 1),
 		),
 	}
+}
+
+fn box_fut<'a, F: Future + 'a>(fut: F) -> Pin<Box<dyn Future<Output = F::Output> + 'a>> {
+	Box::pin(fut)
 }

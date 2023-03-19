@@ -2,21 +2,17 @@ use super::*;
 
 impl Fs {
 	pub async fn getattr(&self, job: crate::job::GetAttr) {
-		let self_ino = self.ino.borrow_mut();
-
-		let entry = self_ino.get(&self.fs, job.ino);
+		let item = self.ino().get(job.ino);
+		let item = self.fs.item(item);
 
 		// Get type, len
-		let (ty, len) = match &*entry {
-			ItemRef::Dir(d) => (FileType::Directory, d.len().await.unwrap().into()),
-			ItemRef::File(f) => (FileType::RegularFile, f.len().await.unwrap()),
-			ItemRef::Sym(f) => (FileType::Symlink, f.len().await.unwrap()),
-			ItemRef::Unknown(_) => unreachable!(),
+		let (ty, len) = match item.key() {
+			ItemKey::Dir(_) => (FileType::Directory, 0),
+			ItemKey::File(f) => (FileType::RegularFile, self.fs.file(f).len().await.unwrap()),
+			ItemKey::Sym(f) => (FileType::Symlink, self.fs.file(f).len().await.unwrap()),
 		};
+		let ext = item.ext().await.unwrap();
 
-		let data = entry.data().await.unwrap();
-
-		drop(self_ino);
-		job.reply.attr(&TTL, &self.attr(job.ino, ty, len, &data));
+		job.reply.attr(&TTL, &self.attr(job.ino, ty, len, ext));
 	}
 }

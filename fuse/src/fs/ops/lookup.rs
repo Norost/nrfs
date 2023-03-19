@@ -2,45 +2,31 @@ use super::*;
 
 impl Fs {
 	pub async fn lookup(&self, job: crate::job::Lookup) {
-		let mut self_ino = self.ino.borrow_mut();
-
-		let d = self_ino.get_dir(&self.fs, job.parent);
-
 		let Ok(name) = job.name.as_bytes().try_into() else { return job.reply.error(libc::ENAMETOOLONG) };
-		let Some(entry) = d.find(name).await.unwrap() else { return job.reply.error(libc::ENOENT) };
 
-		let data = entry.data().await.unwrap();
+		let d = self.ino().get_dir(job.parent);
+		let d = self.fs.dir(d);
 
-		// Get type, len, add to inode store
-		let (ty, len, ino) = match entry {
-			ItemRef::Dir(d) => {
-				let len = d.len().await.unwrap().into();
-				let (ino, e) = self_ino.add_dir(d);
-				if let Some(e) = e {
-					e.drop().await.unwrap()
-				}
-				(FileType::Directory, len, ino)
+		let Some(item) = d.search(name).await.unwrap()
+			else { return job.reply.error(libc::ENOENT) };
+
+		let (ty, len, ino) = match item.key() {
+			ItemKey::Dir(d) => {
+				let ino = self.ino().add_dir(d);
+				(FileType::Directory, 0, ino)
 			}
-			ItemRef::File(f) => {
-				let len = f.len().await.unwrap();
-				let (ino, e) = self_ino.add_file(f);
-				if let Some(e) = e {
-					e.drop().await.unwrap()
-				}
+			ItemKey::File(f) => {
+				let len = self.fs.file(f).len().await.unwrap();
+				let ino = self.ino().add_file(f);
 				(FileType::RegularFile, len, ino)
 			}
-			ItemRef::Sym(f) => {
-				let len = f.len().await.unwrap();
-				let (ino, e) = self_ino.add_sym(f);
-				if let Some(e) = e {
-					e.drop().await.unwrap()
-				}
+			ItemKey::Sym(f) => {
+				let len = self.fs.file(f).len().await.unwrap();
+				let ino = self.ino().add_sym(f);
 				(FileType::Symlink, len, ino)
 			}
-			ItemRef::Unknown(_) => todo!("unknown entry type"),
 		};
 
-		drop(self_ino);
-		job.reply.entry(&TTL, &self.attr(ino, ty, len, &data), 0)
+		job.reply.entry(&TTL, &self.attr(ino, ty, len, item.ext), 0)
 	}
 }
