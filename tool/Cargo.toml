@@ -31,3 +31,6 @@ version = "7.2"
 
 [dependencies.num_cpus]
 version = "1.0"
+
+[target.'cfg(unix)'.dependencies.libc]
+version = "0.2"
