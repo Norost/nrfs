@@ -143,7 +143,7 @@ async fn list_files(
 			print!("{:<26} ", format!("{}", t));
 		}
 
-		let name = match Some(&data.name) {
+		let name = match &data.name {
 			Some(name) => String::from_utf8_lossy(name.as_ref()),
 			None => {
 				stats.dangling += 1;

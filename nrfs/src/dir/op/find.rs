@@ -35,7 +35,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 				continue
 			};
 			unused_blocks = 0;
-			if name == &*cur_name {
+			if cur_name.map_or(false, |n| &*n == name) {
 				return Ok(FindResult::Found { data_index: index });
 			}
 			index += u32::from(data_blocks);

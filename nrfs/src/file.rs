@@ -1,5 +1,7 @@
 use {
-	crate::{dir::Dir, item::ItemData, Dev, DirKey, Error, ItemExt, Name, Nrfs, TransferError},
+	crate::{
+		dir::Dir, item::ItemData, Dev, DirKey, Error, ItemExt, ItemKey, Name, Nrfs, TransferError,
+	},
 	core::fmt,
 };
 
@@ -371,6 +373,15 @@ impl<'a, D: Dev> File<'a, D> {
 
 	pub fn into_key(self) -> FileKey {
 		self.key
+	}
+
+	pub fn key(&self) -> FileKey {
+		self.key
+	}
+
+	/// Erase the name of this item.
+	pub async fn erase_name(&self) -> Result<(), Error<D>> {
+		self.fs.item(ItemKey::File(self.key)).erase_name().await
 	}
 
 	/// Determine the embed factor.

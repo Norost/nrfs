@@ -326,3 +326,23 @@ fn iter_ext() {
 		assert_eq!(file.ext.mtime.unwrap().mtime, 0xdeadbeef);
 	});
 }
+
+#[test]
+fn erase_name() {
+	let fs = new_ext();
+	run(&fs, async {
+		let root = fs.root_dir();
+		let f = mkfile(
+			&root,
+			b"file",
+			ItemExt { mtime: Some(MTime { mtime: 0xdeadbeef }), ..Default::default() },
+		)
+		.await;
+		assert!(root.search(b"file".into()).await.unwrap().is_some());
+		f.erase_name().await.unwrap();
+		assert!(root.search(b"file".into()).await.unwrap().is_none());
+		let (item, _) = root.next_from(0).await.unwrap().unwrap();
+		assert_eq!(item.key(), ItemKey::File(f.key()));
+		assert!(item.name.is_none());
+	});
+}

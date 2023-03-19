@@ -93,6 +93,37 @@ impl<'a, D: Dev> Dir<'a, D> {
 		Ok(name_index + u32::from(name_blocks))
 	}
 
+	/// Erase the name of an item.
+	pub(crate) async fn item_erase_name(
+		&self,
+		hdr: &mut DirHeader<'_>,
+		data_index: u32,
+	) -> Result<(), Error<D>> {
+		let mut name_index = data_index;
+		let mut buf = [0; 16];
+		let obj = self.fs.get(self.key.id);
+
+		while name_index > 0 {
+			name_index -= 1;
+			obj.read(super::index_to_offset(name_index), &mut buf)
+				.await?;
+			if buf[0] & 3 != 0b10 {
+				name_index += 1;
+				break;
+			}
+		}
+
+		let blocks = data_index - name_index;
+		obj.write_zeros(super::index_to_offset(name_index), u64::from(blocks) * 16)
+			.await?;
+		obj.write(super::index_to_offset(data_index - 1), &[0b1110])
+			.await?;
+
+		hdr.blocks_used -= blocks - 1;
+
+		Ok(())
+	}
+
 	/// Erase an item.
 	///
 	/// This does not destroy the item itself.
@@ -175,7 +206,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 	pub(crate) async fn item_name(
 		&self,
 		mut index: u32,
-	) -> Result<(Option<Box<Name>>, u32), Error<D>> {
+	) -> Result<(Option<Option<Box<Name>>>, u32), Error<D>> {
 		trace!("item_name {}", index);
 
 		let mut buf = [0; 16];
@@ -195,7 +226,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 				name.extend_from_slice(&buf[1..1 + usize::from(name_len)]);
 			}
 
-			Ok((Some(name.into_boxed_slice().try_into().unwrap()), index))
+			assert!(name.len() < 256, "name too long");
+			Ok((Some(name.into_boxed_slice().try_into().ok()), index))
 		} else {
 			Ok((None, index))
 		}

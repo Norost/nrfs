@@ -147,7 +147,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 				Some(ItemInfo {
 					dir: self.key.id,
 					index: data_index,
-					name: Cow::Borrowed(name),
+					name: Some(Cow::Borrowed(name)),
 					data,
 					ext,
 				})
@@ -169,9 +169,10 @@ impl<'a, D: Dev> Dir<'a, D> {
 			let name;
 			(name, index) = self.item_name(index).await?;
 			let Some(name) = name else { continue };
+			let name = name.map(Cow::Owned);
 
 			let (data, ext) = self.item_get_data_ext(&hdr, index).await?;
-			let item = ItemInfo { dir: self.key.id, index, name: Cow::Owned(name), data, ext };
+			let item = ItemInfo { dir: self.key.id, index, name, data, ext };
 
 			index += 1 + u32::from(hdr.ext_slots());
 

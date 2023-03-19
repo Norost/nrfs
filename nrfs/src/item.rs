@@ -7,7 +7,7 @@ use {
 pub struct ItemInfo<'n> {
 	pub(crate) dir: u64,
 	pub(crate) index: u32,
-	pub name: Cow<'n, Name>,
+	pub name: Option<Cow<'n, Name>>,
 	pub(crate) data: ItemData,
 	pub ext: ItemExt,
 }
@@ -68,6 +68,18 @@ impl<'a, D: Dev> Item<'a, D> {
 		Ok(res.map(|()| self.key))
 	}
 
+	/// Erase the name of this item.
+	pub async fn erase_name(&self) -> Result<(), Error<D>> {
+		let (dir, index) = self.get_loc();
+		if dir == u64::MAX {
+			return Ok(());
+		}
+		let dir = self.fs.dir(DirKey::inval(dir));
+		let mut hdr = dir.header().await?;
+		dir.item_erase_name(&mut hdr, index).await?;
+		dir.set_header(hdr).await
+	}
+
 	pub async fn ext(&self) -> Result<ItemExt, Error<D>> {
 		let (dir, index) = self.get_loc();
 		if dir == u64::MAX {
@@ -118,6 +130,14 @@ impl<'a, D: Dev> Item<'a, D> {
 				.item_set_mtime(index, mtime)
 				.await
 		}
+	}
+
+	pub fn key(&self) -> ItemKey {
+		self.key
+	}
+
+	pub fn into_key(self) -> ItemKey {
+		self.key
 	}
 
 	fn get_loc(&self) -> (u64, u32) {

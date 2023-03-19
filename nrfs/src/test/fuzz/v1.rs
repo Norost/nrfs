@@ -14,6 +14,7 @@ struct Ref<'a> {
 	data: RangeSet<u64>,
 	len: u64,
 	children: BTreeSet<&'a Name>,
+	dangling: u32,
 	parent: u8,
 }
 
@@ -45,6 +46,8 @@ pub enum Op<'a> {
 	Resize { file_idx: u8, len: u32 },
 	/// Transfer an item.
 	Transfer { idx: u8, to_dir_idx: u8, to: &'a Name },
+	/// Erase the name of an item.
+	EraseName { idx: u8 },
 	/// Destroy an item.
 	Destroy { idx: u8 },
 	/// Set `unix` extension data.
@@ -84,6 +87,7 @@ impl<'a> Test<'a> {
 			data: Default::default(),
 			len: Default::default(),
 			children: Default::default(),
+			dangling: Default::default(),
 			parent: u8::MAX,
 		}));
 		macro_rules! get {
@@ -97,7 +101,7 @@ impl<'a> Test<'a> {
 			mtime: enabled_ext.mtime().then(|| ext.mtime.unwrap_or_default()),
 		};
 
-		let mut ops = self.ops.iter().rev().cloned().peekable();
+		let mut ops = self.ops.iter().cloned().peekable();
 
 		while ops.peek().is_some() {
 			run(&self.fs, async {
@@ -121,6 +125,7 @@ impl<'a> Test<'a> {
 										data: Default::default(),
 										len: Default::default(),
 										children: Default::default(),
+										dangling: Default::default(),
 										parent: dir_idx,
 									}));
 								}
@@ -150,6 +155,7 @@ impl<'a> Test<'a> {
 										data: Default::default(),
 										len: Default::default(),
 										children: Default::default(),
+										dangling: Default::default(),
 										parent: dir_idx,
 									}));
 								}
@@ -274,6 +280,9 @@ impl<'a> Test<'a> {
 										let from_r = get!(parent);
 										let removed = from_r.children.remove(name);
 										assert!(removed, "{:?} was not present", name);
+									} else {
+										let from_r = get!(parent);
+										from_r.dangling -= 1;
 									}
 
 									let to_r = get!(to_dir_idx);
@@ -290,15 +299,34 @@ impl<'a> Test<'a> {
 								}
 							}
 						}
+						Op::EraseName { idx } => {
+							let r = get!(idx);
+							self.fs.item(r.key).erase_name().await.unwrap();
+							if let Some(name) = r.name.take() {
+								let parent = r.parent;
+								let parent = get!(parent);
+								let removed = parent.children.remove(name);
+								assert!(removed, "{:?} was not present", name);
+								parent.dangling += 1;
+							}
+						}
 						Op::Destroy { idx } => {
 							let r = get!(idx);
 
 							match r.key {
 								ItemKey::Dir(k) => {
 									match crate::Dir::new(&self.fs, k).destroy().await.unwrap() {
-										Ok(()) => {}
+										Ok(()) => {
+											assert!(
+												r.children.is_empty() && r.dangling == 0,
+												"dir is not empty"
+											);
+										}
 										Err(DirDestroyError::NotEmpty) => {
-											assert!(!r.children.is_empty(), "dir is empty");
+											assert!(
+												!r.children.is_empty() || r.dangling > 0,
+												"dir is empty"
+											);
 											continue;
 										}
 										Err(DirDestroyError::IsRoot) => {
@@ -316,6 +344,10 @@ impl<'a> Test<'a> {
 								let parent = get!(parent);
 								let removed = parent.children.remove(name);
 								assert!(removed, "{:?} was not present", name);
+							} else {
+								let parent = r.parent;
+								let parent = get!(parent);
+								parent.dangling -= 1;
 							}
 							self.map[usize::from(idx)] = None;
 						}
