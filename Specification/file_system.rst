@@ -203,16 +203,18 @@ The first byte of a name block indicates the amount of name bytes.
    Bits Field
    ==== =====
     0:1 Type
-      2 Not first
+      2 First
       3 Last
     4:7 Length
 
-* Not first: Whether this block is *not* the first name block.
+* Not first: Whether this block is the first name block.
 
 * Last: Whether this block is the last name block.
 
 * Length: Amount of bytes constituting this block.
-  Must be between 1 and 15.
+  Must be between 0 and 15.
+
+  If 0, the item has no name.
 
 After the name block(s) there is a single data block.
 There are three formats for the data block.
