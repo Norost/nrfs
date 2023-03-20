@@ -30,7 +30,9 @@ impl KeyDerivation {
 		match self {
 			Self::None => (0, buf),
 			Self::Argon2id { p, t, m } => {
-				buf[0..3].copy_from_slice(&t.get().to_le_bytes());
+				let [a, b, c, 0] = t.get().to_le_bytes()
+					else { panic!("t out of range") };
+				buf[0..3].copy_from_slice(&[a, b, c]);
 				buf[3] = p.get();
 				buf[4..8].copy_from_slice(&m.get().to_le_bytes());
 				(1, buf)
