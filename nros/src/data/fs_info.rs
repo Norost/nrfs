@@ -96,8 +96,8 @@ impl FsHeader {
 	pub fn encrypt(&mut self, key: &[u8; 32], data: &mut [u8]) {
 		assert!(data.len() >= 448, "data too small");
 		let cipher = Cipher { ty: self.cipher().unwrap(), key: *key };
-		self.hash = cipher.encrypt(self.nonce.into(), data);
 		self.nonce += 1;
+		self.hash = cipher.encrypt(self.nonce.into(), data);
 	}
 
 	/// Attempt to decrypt filesystem info.

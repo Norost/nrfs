@@ -50,5 +50,14 @@ fn mkfs_argon2id() {
 		cache_size: 0,
 	}))
 	.unwrap();
-	block_on(s.unmount()).unwrap();
+	let devices = block_on(s.unmount()).unwrap();
+	block_on(Nros::load(LoadConfig {
+		resource: StdResource::new(),
+		devices,
+		magic: *b"CRYP",
+		cache_size: 0,
+		allow_repair: false,
+		retrieve_key: &mut |_| Some(KeyPassword::Password((*b"test").into())),
+	}))
+	.unwrap();
 }
