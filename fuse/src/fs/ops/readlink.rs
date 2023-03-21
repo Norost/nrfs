@@ -2,10 +2,9 @@ use super::*;
 
 impl Fs {
 	pub async fn readlink(&self, job: crate::job::ReadLink) {
-		let self_ino = self.ino.borrow_mut();
-
 		let mut buf = [0; 1 << 15];
-		let f = self_ino.get_sym(&self.fs, job.ino);
+		let f = self.ino().get_sym(job.ino);
+		let f = self.fs.file(f);
 		let l = f.read(0, &mut buf).await.unwrap();
 		job.reply.data(&buf[..l]);
 	}

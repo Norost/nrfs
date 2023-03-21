@@ -1,10 +1,12 @@
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
 use {
 	crate::{Compression, Encryption},
+	nrfs::{EnableExt, ItemExt},
 	std::{
 		error::Error,
-		fs::{self, OpenOptions},
+		fs::{self, Metadata, OpenOptions},
 		future::Future,
 		io::Write,
 		num::{NonZeroU32, NonZeroU8},
@@ -160,17 +162,16 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 						.read(true)
 						.write(true)
 						.open(&*path)
-						.map(|f| nrfs::dev::FileDev::new(f, block_size))
+						.map(nrfs::dev::FileDev::new)
 				})
 				.try_collect()
 		})
 		.try_collect()?;
 
-	let mut extensions = nrfs::dir::EnableExtensions::default();
-	extensions.add_unix();
-	extensions.add_mtime();
+	let mut ext = nrfs::EnableExt::default();
+	ext.add_unix();
+	ext.add_mtime();
 	// FIXME randomize key
-	let opt = nrfs::DirOptions { extensions, ..nrfs::DirOptions::new(&[0; 16]) };
 
 	let keybuf;
 	let (cipher, key_deriver) = if let Some(enc) = args.encryption {
@@ -206,7 +207,7 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 		mirrors,
 		block_size,
 		max_record_size,
-		dir: opt,
+		dir: ext,
 		compression: args.compression.into(),
 		cache_size: args.cache_size,
 	};
@@ -216,10 +217,30 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 
 	nrfs.run(async {
 		if let Some(d) = &args.directory {
+			let curdir = std::env::current_dir()?;
+			let meta = std::fs::metadata(curdir)?;
+			let root = nrfs.item(nrfs::ItemKey::Dir(nrfs.root_dir().into_key()));
+			let e = mkext(ext, &meta);
+			if let Some(unix) = e.unix {
+				root.set_unix(unix).await?;
+			}
+			if let Some(mtime) = e.mtime {
+				root.set_mtime(mtime).await?;
+			}
 			eprintln!("Adding files from {:?}", d);
-			let root = nrfs.root_dir().await?;
-			add_files(root, d, args.follow, extensions).await?;
+			add_files(nrfs.root_dir(), d, args.follow, ext).await?;
+		} else {
+			// TODO should be an option, perhaps?
+			// Or maybe a separate tool to edit the filesystem.
+			if ext.unix() {
+				let uid = unsafe { libc::geteuid() };
+				let gid = unsafe { libc::getegid() };
+				let unix = nrfs::Unix::new(0o700, uid, gid);
+				let root = nrfs.item(nrfs::ItemKey::Dir(nrfs.root_dir().into_key()));
+				root.set_unix(unix).await?;
+			}
 		}
+
 		nrfs.finish_transaction().await?;
 		Ok::<_, Box<dyn Error>>(())
 	})
@@ -244,10 +265,10 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn add_files(
-	root: nrfs::DirRef<'_, nrfs::dev::FileDev>,
+	root: nrfs::Dir<'_, nrfs::dev::FileDev>,
 	from: &Path,
 	follow_symlinks: bool,
-	extensions: nrfs::dir::EnableExtensions,
+	extensions: nrfs::EnableExt,
 ) -> Result<(), Box<dyn Error>> {
 	for f in fs::read_dir(from).expect("failed to read dir") {
 		let f = f?;
@@ -255,51 +276,49 @@ async fn add_files(
 		let n = f.file_name();
 		let n = n.to_str().unwrap().try_into().unwrap();
 
-		let mut ext = nrfs::dir::Extensions::default();
-
-		ext.unix = extensions.unix().then(|| {
-			let mut u = nrfs::dir::ext::unix::Entry::new(0o700, 0, 0);
-			let p = m.permissions();
-			#[cfg(target_family = "unix")]
-			{
-				u.permissions = (p.mode() & 0o777) as _;
-				u.set_uid(m.uid());
-				u.set_gid(m.gid());
-			}
-			u
-		});
-
-		ext.mtime = extensions.mtime().then(|| nrfs::dir::ext::mtime::Entry {
-			mtime: m
-				.modified()
-				.ok()
-				.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-				.map(|t| t.as_micros().try_into().unwrap_or(i64::MAX))
-				.unwrap_or(0),
-		});
+		let ext = mkext(extensions, &m);
 
 		if m.is_file() || (m.is_symlink() && follow_symlinks) {
 			let c = fs::read(f.path())?;
-			let f = root.create_file(n, &ext).await?.unwrap();
-			f.write_grow(0, &c).await?;
-			f.drop().await?;
+			let f = root.create_file(n, ext).await?.unwrap();
+			f.write_grow(0, &c).await??;
 		} else if m.is_dir() {
-			// FIXME randomize key
-			let opt = nrfs::DirOptions { extensions, ..nrfs::DirOptions::new(&[0; 16]) };
-			let d = root.create_dir(n, &opt, &ext).await?.unwrap();
+			let d = root.create_dir(n, extensions, ext).await?.unwrap();
 			let path = f.path();
 			let fut: Pin<Box<dyn Future<Output = _>>> =
 				Box::pin(add_files(d, &path, follow_symlinks, extensions));
 			fut.await?;
 		} else if m.is_symlink() {
 			let c = fs::read_link(f.path())?;
-			let f = root.create_sym(n, &ext).await?.unwrap();
-			f.write_grow(0, c.to_str().unwrap().as_bytes()).await?;
-			f.drop().await?;
+			let f = root.create_sym(n, ext).await?.unwrap();
+			f.write_grow(0, c.to_str().unwrap().as_bytes()).await??;
 		} else {
 			todo!()
 		}
 	}
-	root.drop().await?;
 	Ok(())
+}
+
+fn mkext(enabled: EnableExt, meta: &Metadata) -> ItemExt {
+	let mut ext = ItemExt::default();
+	ext.unix = enabled.unix().then(|| {
+		let mut u = nrfs::Unix::new(0o700, 0, 0);
+		let p = meta.permissions();
+		#[cfg(target_family = "unix")]
+		{
+			u.permissions = (p.mode() & 0o777) as _;
+			u.set_uid(meta.uid());
+			u.set_gid(meta.gid());
+		}
+		u
+	});
+	ext.mtime = enabled.mtime().then(|| nrfs::MTime {
+		mtime: meta
+			.modified()
+			.ok()
+			.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+			.map(|t| t.as_micros().try_into().unwrap_or(i64::MAX))
+			.unwrap_or(0),
+	});
+	ext
 }

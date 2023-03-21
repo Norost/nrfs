@@ -2,7 +2,6 @@ use core::{
 	cell::RefCell,
 	fmt::Arguments,
 	future::Future,
-	mem,
 	pin::Pin,
 	task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
@@ -114,7 +113,7 @@ impl<F: Future> Future for TracedTask<F> {
 		let cx = &mut Context::from_waker(&waker);
 
 		// SAFETY: self is pinned too
-		let mut task = unsafe { self.as_mut().map_unchecked_mut(|s| &mut s.task) };
+		let task = unsafe { self.as_mut().map_unchecked_mut(|s| &mut s.task) };
 		if let Poll::Ready(r) = task.poll(cx) {
 			trace!(info "done");
 			// SAFETY: finished doesn't apply to task

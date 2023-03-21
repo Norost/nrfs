@@ -24,7 +24,6 @@ fn equal_2() {
 
 		s.run(async {
 			let obj = s.create().await.unwrap();
-			obj.resize(1 << 15).await.unwrap();
 			obj.write(0, &[1; 1 << 15]).await.unwrap();
 			Ok::<_, Error<_>>(())
 		})
@@ -34,10 +33,14 @@ fn equal_2() {
 		let devs = s.unmount().await.unwrap();
 
 		let s = load(devs).await;
-
-		let obj = s.get(0).await.unwrap();
-		let buf = &mut [0; 1 << 15];
-		obj.read(0, buf).await.unwrap();
-		assert_eq!(buf, &mut [1; 1 << 15]);
+		s.run(async {
+			let obj = s.get(0);
+			let buf = &mut [0; 1 << 15];
+			obj.read(0, buf).await.unwrap();
+			assert_eq!(buf, &mut [1; 1 << 15]);
+			Ok::<_, Error<_>>(())
+		})
+		.await
+		.unwrap();
 	});
 }

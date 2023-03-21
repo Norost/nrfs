@@ -14,22 +14,45 @@
 #![feature(iterator_try_collect)]
 #![feature(map_try_insert)]
 #![feature(nonzero_min_max)]
-#![feature(slice_flatten)]
+#![feature(slice_flatten, split_array)]
 #![feature(type_alias_impl_trait)]
 #![feature(error_in_core)]
+#![feature(step_trait)]
 
 extern crate alloc;
 
 macro_rules! raw {
 	($ty:ty) => {
-		impl AsRef<[u8; core::mem::size_of::<Self>()]> for $ty {
-			fn as_ref(&self) -> &[u8; core::mem::size_of::<Self>()] {
+		impl $ty {
+			#[allow(dead_code)]
+			pub fn from_raw(raw: &[u8; core::mem::size_of::<Self>()]) -> Self {
+				unsafe { core::mem::transmute(*raw) }
+			}
+
+			#[allow(dead_code)]
+			pub fn from_raw_slice(raw: &[u8]) -> Option<(Self, &[u8])> {
+				if raw.len() < core::mem::size_of::<Self>() {
+					return None;
+				}
+				//let (raw, rest) = raw.split_array_ref::<{ core::mem::size_of::<Self>() }>();
+				//let (raw, rest) = raw.split_once(core::mem::size_of::<Self>())?;
+				let rest = &raw[core::mem::size_of::<Self>()..];
+				let raw = &raw[..core::mem::size_of::<Self>()];
+				let raw = raw.try_into().unwrap();
+				Some((Self::from_raw(raw), rest))
+			}
+			//}
+
+			//impl AsRef<[u8; core::mem::size_of::<Self>()]> for $ty {
+			#[allow(dead_code)]
+			pub fn as_ref(&self) -> &[u8; core::mem::size_of::<Self>()] {
 				unsafe { &*(self as *const _ as *const _) }
 			}
-		}
+			//}
 
-		impl AsMut<[u8; core::mem::size_of::<Self>()]> for $ty {
-			fn as_mut(&mut self) -> &mut [u8; core::mem::size_of::<Self>()] {
+			//impl AsMut<[u8; core::mem::size_of::<Self>()]> for $ty {
+			#[allow(dead_code)]
+			pub fn as_mut(&mut self) -> &mut [u8; core::mem::size_of::<Self>()] {
 				unsafe { &mut *(self as *mut _ as *mut _) }
 			}
 		}
@@ -106,12 +129,9 @@ mod trace {
 mod background;
 mod block_size;
 mod cache;
-mod cipher;
 mod config;
-mod header;
+mod data;
 mod key_derivation;
-mod object;
-mod record;
 pub mod resource;
 mod storage;
 #[cfg(any(test, fuzzing))]
@@ -125,22 +145,21 @@ mod waker_queue;
 pub use resource::StdResource;
 pub use {
 	block_size::BlockSize,
-	cache::{Statistics, Tree},
-	cipher::CipherType,
+	cache::{Object, Statistics},
 	config::{KeyDeriver, KeyPassword, LoadConfig, NewConfig},
-	record::{Compression, MaxRecordSize},
+	data::{
+		cipher::CipherType,
+		record::{Compression, MaxRecordSize},
+	},
 	resource::Resource,
 	storage::{dev, Dev},
 };
 
 use {
 	cache::Cache,
-	cipher::{Cipher, HeaderCipher, RecordCipher},
-	core::{fmt, future::Future},
+	core::{cell::RefMut, fmt, future::Future},
 	key_derivation::KeyDerivation,
-	record::Record,
 	storage::{DevSet, Store},
-	waker_queue::{WakerQueue, WakerQueueTicket},
 };
 
 type Background<'a, D> = background::Background<'a, Result<(), Error<D>>>;
@@ -190,13 +209,8 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 	}
 
 	/// Create an object.
-	pub async fn create(&self) -> Result<Tree<'_, D, R>, Error<D>> {
+	pub async fn create(&self) -> Result<Object<'_, D, R>, Error<D>> {
 		self.store.create().await
-	}
-
-	/// Create multiple adjacent objects, from ID up to ID + N - 1.
-	pub async fn create_many(&self, amount: u64) -> Result<u64, Error<D>> {
-		self.store.create_many(amount).await
 	}
 
 	pub async fn finish_transaction<'a>(&'a self) -> Result<(), Error<D>> {
@@ -208,12 +222,8 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 	}
 
 	/// Return an owned reference to an object.
-	pub async fn get(&self, id: u64) -> Result<Tree<'_, D, R>, Error<D>> {
-		assert!(
-			id != u64::MAX,
-			"ID u64::MAX is reserved for the object list"
-		);
-		self.store.get(id).await
+	pub fn get(&self, id: u64) -> Object<'_, D, R> {
+		self.store.get(id)
 	}
 
 	/// Readjust cache size.
@@ -246,6 +256,11 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 		self.store.header_key()
 	}
 
+	/// Get reference to filesystem data in the header
+	pub fn header_data(&self) -> RefMut<'_, [u8; 256]> {
+		self.store.header_data()
+	}
+
 	/// Set a new key derivation function.
 	///
 	/// This replaces the header key.
@@ -257,6 +272,11 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 	pub fn uid(&self) -> u128 {
 		todo!()
 		//self.store
+	}
+
+	/// The maximum length of an object.
+	pub fn obj_max_len(&self) -> u64 {
+		self.store.obj_max_len()
 	}
 }
 
@@ -275,7 +295,7 @@ pub enum LoadError<D: Dev> {
 
 pub enum Error<D: Dev> {
 	Dev(D::Error),
-	RecordUnpack(record::UnpackError),
+	RecordUnpack(data::record::UnpackError),
 	NotEnoughSpace,
 }
 

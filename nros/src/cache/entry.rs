@@ -1,45 +1,70 @@
 use {
-	super::{tree::data::Dirty, Busy, Cache, Key, MemoryTracker, Present, Slot},
+	super::{
+		mem::{Idx, IDX_NONE},
+		Cache, IdKey,
+	},
 	crate::{resource::Buf, util, waker_queue, Dev, Resource},
-	alloc::{collections::BTreeMap, rc::Rc},
+	alloc::collections::BTreeSet,
 	core::{
 		cell::{RefCell, RefMut},
-		ops::Deref,
+		fmt,
+		mem::ManuallyDrop,
 	},
 };
 
-/// Reference to an entry.
-pub struct EntryRef<'a, D: Dev, R: Resource> {
-	cache: &'a Cache<D, R>,
-	pub(super) key: Key,
-	memory_tracker: RefMut<'a, MemoryTracker>,
-	entry: RefMut<'a, Present<R::Buf>>,
-	pub(super) dirty_markers: RefMut<'a, BTreeMap<u64, Dirty>>,
+pub(super) struct Entry<B: Buf> {
+	/// Unpacked record data.
+	pub data: B,
+	/// Index in LRU.
+	///
+	/// Invalid if any busy entries for this entry are present.
+	pub lru_idx: Idx,
 }
 
-impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
-	/// Construct a new [`EntryRef`] for the given entry.
-	///
-	/// This puts the entry at the back of the LRU queue.
-	pub(super) fn new(
-		cache: &'a Cache<D, R>,
-		key: Key,
-		entry: RefMut<'a, Present<R::Buf>>,
-		dirty_markers: RefMut<'a, BTreeMap<u64, Dirty>>,
-		mut memory_tracker: RefMut<'a, MemoryTracker>,
-	) -> Self {
-		memory_tracker.touch(&entry.refcount);
-		Self { cache, key, entry, dirty_markers, memory_tracker }
+impl<B: Buf> fmt::Debug for Entry<B> {
+	#[no_coverage]
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		format_args!("{:?} @ {:?}", self.lru_idx, self.data.get()).fmt(f)
 	}
+}
 
+/// Reference to an entry.
+pub struct EntryRef<'a, B: Buf> {
+	entry: ManuallyDrop<RefMut<'a, Entry<B>>>,
+	pub(super) key: IdKey,
+	pub(super) dirty: ManuallyDrop<RefMut<'a, BTreeSet<IdKey>>>,
+	cache: &'a RefCell<super::CacheData<B>>,
+	in_lru: bool,
+}
+
+impl<B: Buf> Drop for EntryRef<'_, B> {
+	fn drop(&mut self) {
+		let lru_idx = self.entry.lru_idx;
+		// SAFETY: no other code will be able to touch entry or dirty
+		unsafe {
+			ManuallyDrop::drop(&mut self.entry);
+			ManuallyDrop::drop(&mut self.dirty);
+		}
+		let mut d = self.cache.borrow_mut();
+		if d.busy.decr(self.key) {
+			if !self.in_lru {
+				let idx = d.mem.soft_add(self.key);
+				let entry = d.records.get_mut(&self.key).expect("no entry");
+				debug_assert_eq!(entry.lru_idx, IDX_NONE, "entry already in LRU");
+				entry.lru_idx = idx;
+			}
+		} else if self.in_lru {
+			d.mem.soft_del(lru_idx);
+			let entry = d.records.get_mut(&self.key).expect("no entry");
+			debug_assert_ne!(entry.lru_idx, IDX_NONE, "entry still in LRU");
+			entry.lru_idx = IDX_NONE;
+		}
+	}
+}
+
+impl<'a, B: Buf> EntryRef<'a, B> {
 	/// Write data to the entry.
-	///
-	/// This consumes the entry to ensure no reference is held across an await point.
-	///
-	/// # Note
-	///
-	/// `offset + data.len()` may not be greater than the maximum record size.
-	pub(super) async fn write(self, offset: usize, data: &[u8]) {
+	pub(super) fn write(&mut self, offset: usize, data: &[u8]) {
 		trace!(
 			"EntryRef::write {:?} offset {} len {}",
 			self.key,
@@ -47,25 +72,11 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 			data.len()
 		);
 
-		let Self { cache, key, mut entry, mut memory_tracker, dirty_markers } = self;
-		drop(dirty_markers);
-
-		let rec_size = 1 << self.cache.max_record_size().to_raw();
-		debug_assert!(
-			offset + data.len() <= rec_size,
-			"offset + data.len() is greater than max record size"
-		);
-
 		let total_len = data.len(); // Length including zeroes.
 		let data = util::slice_trim_zeros_end(data);
 
+		let entry = &mut self.entry;
 		if entry.data.len() < offset + data.len() {
-			// We'll have to grow the buffer, ensure memory is available for it.
-			// FIXME we *must* somehow reserve memory without await.
-			// For now, cheat and go past the limit.
-			memory_tracker.force_grow(&entry.refcount, entry.data.len(), offset + data.len());
-
-			// Write data
 			entry.data.resize(offset, 0);
 			entry.data.extend_from_slice(data);
 		} else if offset + total_len < entry.data.len() {
@@ -75,34 +86,16 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 			d[data.len()..].fill(0);
 		} else {
 			// If the end would be filled with zeroes, we can shrink.
-			let old_len = entry.data.len();
 			entry.data.resize(offset, 0);
 			entry.data.extend_from_slice(data);
 			util::trim_zeros_end(&mut entry.data);
-			memory_tracker.shrink(&entry.refcount, old_len, entry.data.len());
 		}
 
-		// Mark dirty
-		drop((entry, memory_tracker));
-		let (mut obj, _) = cache.get_object(key.id()).expect("no object");
-		obj.data
-			.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
-
-		drop(obj);
-		cache.verify_cache_usage();
-
-		// Do try to stay as close as the limit as possible.
-		cache.memory_compensate_forced_grow().await
+		self.dirty.insert(self.key);
 	}
 
 	/// Write zeroes to the entry.
-	///
-	/// This consumes the entry for consistency with [`write`] and [`replace`].
-	///
-	/// # Note
-	///
-	/// `offset + data.len()` may not be greater than the maximum record size.
-	pub(super) fn write_zeros(self, offset: usize, length: usize) {
+	pub(super) fn write_zeros(&mut self, offset: usize, length: usize) {
 		trace!(
 			"EntryRef::write_zeros {:?} offset {} len {}",
 			self.key,
@@ -110,96 +103,50 @@ impl<'a, D: Dev, R: Resource> EntryRef<'a, D, R> {
 			length
 		);
 
-		let Self { cache, key, mut entry, dirty_markers, mut memory_tracker } = self;
-		drop(dirty_markers);
-
-		let rec_size = 1 << cache.max_record_size().to_raw();
-		assert!(
-			offset.saturating_add(length) <= rec_size,
-			"offset + length is greater than max record size"
-		);
-
-		let entry_len = entry.data.len();
-
-		if entry_len < offset {
+		let entry = &mut self.entry;
+		if entry.data.len() < offset {
 			// Nothing to do, as the tail is implicitly all zeroes.
 			return;
 		}
 
-		if entry_len <= offset + length {
-			// Trim
+		if entry.data.len() <= offset + length {
 			entry.data.resize(offset, 0);
 			util::trim_zeros_end(&mut entry.data);
-
-			memory_tracker.shrink(&entry.refcount, entry_len, entry.data.len());
 		} else {
-			// Fill
 			entry.data.get_mut()[offset..offset + length].fill(0);
+			debug_assert_ne!(entry.data.get().last(), Some(&0), "entry not trimmed");
 		}
-		debug_assert_ne!(entry.data.get().last(), Some(&0), "entry not trimmed");
 
-		// Mark dirty
-		drop((entry, memory_tracker));
-		let (mut obj, _) = cache.get_object(key.id()).expect("no object");
-		obj.data
-			.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
-
-		drop(obj);
-		cache.verify_cache_usage();
+		self.dirty.insert(self.key);
 	}
 
 	/// Replace entry data.
-	///
-	/// This consumes the entry to ensure no reference is held across an await point.
-	///
-	/// # Note
-	///
-	/// `data.len()` may not be greater than the maximum record size.
-	pub(super) async fn replace(self, mut data: R::Buf) {
+	pub(super) fn replace(&mut self, mut data: B) {
 		trace!("EntryRef::replace {:?} len {}", self.key, data.len());
-
-		let Self { cache, key, mut entry, dirty_markers, mut memory_tracker } = self;
-		drop(dirty_markers);
-
-		let rec_size = 1 << cache.max_record_size().to_raw();
-		assert!(
-			data.len() <= rec_size,
-			"data.len() is greater than max record size"
-		);
-
-		// Trim
 		util::trim_zeros_end(&mut data);
-
-		if entry.data.len() < data.len() {
-			// We'll have to grow the buffer, ensure memory is available for it.
-			// FIXME we *must* somehow reserve memory without await.
-			// For now, cheat and go past the limit.
-			memory_tracker.force_grow(&entry.refcount, entry.data.len(), data.len());
-			entry.data = data;
-		} else {
-			memory_tracker.shrink(&entry.refcount, entry.data.len(), data.len());
-			entry.data = data;
+		if data.len() > 0 || self.entry.data.len() > 0 {
+			self.entry.data = data;
+			self.dirty.insert(self.key);
 		}
-
-		// Mark dirty
-		drop((memory_tracker, entry));
-		let (mut obj, _) = cache.get_object(key.id()).expect("no object");
-		obj.data
-			.mark_dirty(key.depth(), key.offset(), cache.max_record_size());
-
-		drop(obj);
-		cache.verify_cache_usage();
-
-		// Do try to stay as close as the limit as possible.
-		cache.memory_compensate_forced_grow().await
 	}
-}
 
-impl<'a, D: Dev, R: Resource> Deref for EntryRef<'a, D, R> {
-	type Target = R::Buf;
+	/// Read data.
+	pub(super) fn read(&self, offset: usize, buf: &mut [u8]) {
+		trace!(
+			"EntryRef::read {:?} offset {} len {}",
+			self.key,
+			offset,
+			buf.len()
+		);
+		util::read(offset, buf, self.entry.data.get());
+	}
 
-	fn deref(&self) -> &Self::Target {
-		&self.entry.data
+	pub(super) fn as_slice(&self) -> &[u8] {
+		self.entry.data.get()
+	}
+
+	pub(super) fn len(&self) -> usize {
+		self.entry.data.len()
 	}
 }
 
@@ -207,83 +154,73 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Try to get an entry directly.
 	///
 	/// This will block if a task is busy with the entry.
-	pub(super) async fn wait_entry(&self, mut key: Key) -> Option<EntryRef<'_, D, R>> {
+	///
+	/// # Note
+	///
+	/// This function will always increase the reference count to an entry.
+	/// If no entry is returned it is the caller's responsibility to ensure
+	/// either an entry is inserted or a transition to the Not Present state occurs.
+	pub(super) async fn wait_entry(&self, key: IdKey) -> Option<EntryRef<'_, R::Buf>> {
 		trace!("wait_entry {:?}", key);
-		let mut busy = None::<Rc<RefCell<Busy>>>;
-		waker_queue::poll(|cx| {
-			if let Some(busy) = busy.as_mut() {
-				key = busy.borrow_mut().key;
-			}
-
-			let Some(mut comp) = self.get_entryref_components(key) else {
-				debug_assert!(busy.is_none(), "entry {:?} removed while waiting", key);
-				return Ok(None)
-			};
-
-			let mut ticket = None;
-			let entry = RefMut::filter_map(comp.slot, |slot| match slot {
-				Slot::Present(entry) => {
-					if busy.is_some() {
-						comp.memory_tracker.decr_entry_refcount(
-							&mut entry.refcount,
-							entry.data.len(),
-							1,
-						);
-					}
-					Some(entry)
+		if self.data().busy.incr(key) {
+			self.entry_get(key)
+		} else {
+			waker_queue::poll(|cx| {
+				if let Some(rec) = self.entry_get(key) {
+					return Ok(Some(rec));
 				}
-				Slot::Busy(entry) => {
-					let mut e = entry.borrow_mut();
-					ticket = Some(e.wakers.push(cx.waker().clone(), ()));
-					if busy.is_none() {
-						e.refcount += 1;
-					}
-					busy = Some(entry.clone());
-					None
-				}
-			});
-			if let Some(ticket) = ticket {
-				Err(ticket)
-			} else if let Ok(entry) = entry {
-				Ok(Some(EntryRef::new(
-					self,
-					key,
-					entry,
-					comp.dirty_markers,
-					comp.memory_tracker,
-				)))
-			} else {
-				Ok(None)
-			}
-		})
-		.await
+				Err(self.data().busy.wait(key, cx.waker().clone()))
+			})
+			.await
+		}
 	}
 
-	/// Get [`RefMut`]s to components necessary to construct a [`EntryRef`].
-	pub(super) fn get_entryref_components(&self, key: Key) -> Option<EntryRefComponents<'_, R>> {
-		let data = self.data.borrow_mut();
-
-		let (objects, memory_tracker) =
-			RefMut::map_split(data, |d| (&mut d.objects, &mut d.memory_tracker));
-
-		let level = RefMut::filter_map(objects, |objects| {
-			let slot = objects.get_mut(&key.id())?;
-			let Slot::Present(obj) = slot else { return None };
-			Some(obj.level_mut(key.depth()))
-		})
-		.ok()?;
-
-		let (slots, dirty_markers) =
-			RefMut::map_split(level, |level| (&mut level.slots, &mut level.dirty_markers));
-
-		let slot = RefMut::filter_map(slots, |slots| slots.get_mut(&key.offset())).ok()?;
-
-		Some(EntryRefComponents { memory_tracker, slot, dirty_markers })
+	/// # Panics
+	///
+	/// If already present.
+	pub(super) fn entry_insert(&self, key: IdKey, data: R::Buf) -> EntryRef<'_, R::Buf> {
+		let (recs, dirty) = RefMut::map_split(self.data(), |d| (&mut d.records, &mut d.dirty));
+		let rec = RefMut::map(recs, |r| {
+			r.try_insert(key, Entry { data, lru_idx: IDX_NONE })
+				.expect("entry already present")
+		});
+		EntryRef {
+			key,
+			in_lru: rec.lru_idx != IDX_NONE,
+			entry: ManuallyDrop::new(rec),
+			dirty: ManuallyDrop::new(dirty),
+			cache: &self.data,
+		}
 	}
-}
 
-pub(super) struct EntryRefComponents<'a, R: Resource> {
-	pub memory_tracker: RefMut<'a, MemoryTracker>,
-	pub slot: RefMut<'a, Slot<R::Buf>>,
-	pub dirty_markers: RefMut<'a, BTreeMap<u64, Dirty>>,
+	/// Returns entry and whether it is dirty.
+	///
+	/// # Panics
+	///
+	/// If not present.
+	#[must_use = "entry"]
+	pub(super) fn entry_remove(&self, key: IdKey) -> (R::Buf, bool) {
+		let mut d = self.data();
+		let entry = d.records.remove(&key).expect("no entry");
+		let is_dirty = d.dirty.contains(&key);
+		if entry.lru_idx != IDX_NONE {
+			d.mem.soft_del(entry.lru_idx);
+		}
+		(entry.data, is_dirty)
+	}
+
+	/// Get an already present entry.
+	///
+	/// If `is_referenced` is `true`, the reference count to the entry is decreased if present.
+	fn entry_get(&self, key: IdKey) -> Option<EntryRef<'_, R::Buf>> {
+		let (recs, dirty) = RefMut::map_split(self.data(), |d| (&mut d.records, &mut d.dirty));
+		let rec = RefMut::filter_map(recs, |r| r.get_mut(&key)).ok()?;
+		Some(EntryRef {
+			key,
+			in_lru: rec.lru_idx != IDX_NONE,
+			entry: ManuallyDrop::new(rec),
+			dirty: ManuallyDrop::new(dirty),
+			cache: &self.data,
+		})
+	}
 }

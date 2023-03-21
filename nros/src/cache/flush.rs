@@ -1,65 +1,24 @@
 use {
-	super::{
-		is_pseudo_id, Busy, Cache, EntryRef, Key, Present, Slot, SlotExt, Tree, OBJECT_BITMAP_ID,
-		OBJECT_LIST_ID,
-	},
-	crate::{resource::Buf, waker_queue, Dev, Error, Resource},
-	alloc::rc::Rc,
-	core::{
-		cell::{RefCell, RefMut},
-		future, mem,
-		task::Poll,
-	},
+	super::{Cache, IdKey, Key, RootIndex, Tree, OBJECT_BITMAP_ID, OBJECT_LIST_ID},
+	crate::{data::record::Depth, Dev, Error, Resource},
+	core::{future, task::Poll},
 	futures_util::stream::{FuturesUnordered, TryStreamExt},
 };
 
 impl<D: Dev, R: Resource> Cache<D, R> {
-	/// Wait for an entry to not be busy.
-	///
-	/// Unlike [`wait_entry`] this will not cause the entry to be refetched if evicted.
-	async fn wait_entry_nofetch(&self, mut key: Key) -> Option<EntryRef<'_, D, R>> {
-		trace!("wait_entry_nofetch {:?}", key);
-		let mut busy = None::<Rc<RefCell<Busy>>>;
-		waker_queue::poll(|cx| {
-			if let Some(busy) = busy.as_mut() {
-				key = busy.borrow_mut().key;
-			}
-
-			let Some(c) = self.get_entryref_components(key)
-				else { return Ok(None) };
-
-			let mut ticket = None;
-			let Ok(entry) = RefMut::filter_map(c.slot, |slot| match slot {
-				Slot::Present(p) => Some(p),
-				Slot::Busy(b) => {
-					// Do *not* increase refcount to avoid having the entry being fetched again.
-					if busy.is_none() {
-						busy = Some(b.clone());
-					}
-					ticket = Some(b.borrow_mut().wakers.push(cx.waker().clone(), ()));
-					None
-				}
-			}) else { return Err(ticket.unwrap()) };
-
-			let entry = EntryRef::new(self, key, entry, c.dirty_markers, c.memory_tracker);
-			Ok(Some(entry))
-		})
-		.await
-	}
-
 	/// Flush an entry from the cache.
 	///
 	/// This does not evict the entry.
 	///
 	/// Does nothing if the entry wasn't present or dirty.
-	async fn flush_entry(&self, key: Key) -> Result<(), Error<D>> {
+	async fn flush_entry(&self, key: IdKey) -> Result<(), Error<D>> {
 		trace!("flush_entry {:?}", key);
 
 		// Wait for entry
-		// Don't use wait_entry as that may redundantly fetch the entry again.
-		let Some(entry) = self.wait_entry_nofetch(key).await else { return Ok(()) };
+		let Some(entry) = self.wait_entry(key).await else { return Ok(()) };
 
-		if !entry.dirty_markers.contains_key(&key.offset()) {
+		// Check if dirty.
+		if !entry.dirty.contains(&key) {
 			trace!(info "not dirty");
 			// The entry is not dirty, so skip.
 			return Ok(());
@@ -67,81 +26,44 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 
 		// Take entry.
 		drop(entry);
-		let mut data = self.data.borrow_mut();
-		let data_ref = &mut *data;
-		let obj = data_ref
-			.objects
-			.get_mut(&key.id())
-			.into_present_mut()
-			.expect("no object");
-		let slot = obj.get_mut(key.depth(), key.offset()).expect("no entry");
-		let present = slot.as_present_mut().expect("no entry");
-
-		let entry = mem::replace(&mut present.data, self.resource().alloc());
-		let busy = data_ref
-			.memory_tracker
-			.soft_remove_entry(&present.refcount, entry.len());
-		*slot = Slot::Busy(busy.clone());
-
-		// Unmark as dirty
-		let r = obj
-			.data
-			.unmark_dirty(key.depth(), key.offset(), self.max_record_size());
-		debug_assert!(r, "not marked");
+		self.data().busy.incr(key);
+		let (data, _) = self.entry_remove(key);
 
 		// Store entry.
-		drop(data);
-		let (rec, entry) = self.store.write(entry).await?;
-		let key = busy.borrow_mut().key;
+		let (rec, data) = self.store.write(data).await?;
 
 		// TODO check if tree can allocate enough reserved memory to operate
 		// If not, discard entry to avoid potential deadlock.
 		// TODO check LRU too.
 		// FIXME don't just fucking discard goddamn
 
-		let entry_len = entry.len();
-		let entry = if false {
-			Some(entry)
+		let data = if false {
+			Some(data)
 		} else {
-			// Drop entry data for now.
-			let data = &mut *self.data.borrow_mut();
-			data.memory_tracker.hard_remove_entry(entry.len());
-			drop(entry);
+			drop(data);
+			self.mem().hard_del();
 			None
 		};
 
-		Tree::new(self, key.id())
-			.update_record(key.depth(), key.offset(), rec, &busy)
+		let tree = match key.id {
+			super::OBJECT_LIST_ID => Tree::object_list(self),
+			super::OBJECT_BITMAP_ID => Tree::object_bitmap(self),
+			id => Tree::object(self, id, key.key.root()),
+		};
+		tree.update_record(key.key.depth(), key.key.offset(), rec)
 			.await?;
 
 		// Fetch entry again if a task needs it.
-		let (key, entry) = if let Some(entry) = entry {
-			(key, Some(entry))
-		} else if busy.borrow_mut().refcount > 0 {
-			self.memory_reserve_entry(entry_len).await;
-			let entry = self.store.read(&rec).await?;
-			(busy.borrow_mut().key, Some(entry))
-		} else {
-			(key, None)
-		};
-
-		let data = &mut *self.data.borrow_mut();
-		let obj = data
-			.objects
-			.get_mut(&key.id())
-			.into_present_mut()
-			.expect("no object");
-		let mut slot = obj.occupied(key.depth(), key.offset()).expect("no entry");
-		debug_assert!(matches!(slot.get(), Slot::Busy(_)), "entry not busy");
-
-		if let Some(entry) = entry {
-			// Put entry back in.
-			let refcount = data.memory_tracker.finish_fetch_entry(busy, entry.len());
-			*slot.get_mut() = Slot::Present(Present { data: entry, refcount });
-		} else {
-			// Remove busy slot.
-			slot.remove();
+		if let Some(data) = data {
+			self.entry_insert(key, data);
+		} else if self.data().busy.decr(key) {
+			self.data().busy.incr(key);
+			self.mem_hard_add().await;
+			let data = self.store.read(rec).await?;
+			self.entry_insert(key, data);
 		}
+
+		self.data().dirty.remove(&key);
 
 		Ok(())
 	}
@@ -149,34 +71,28 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Flush all entries.
 	pub(super) async fn flush_all(&self) -> Result<(), Error<D>> {
 		trace!("flush_all");
+
+		// TODO optimize this crap.
+
 		// Go through all trees and flush from bottom to top.
 		//
 		// Start from the bottom of all trees since those are trivial to all flush in parallel.
 
 		// Helper function for entirely flushing an object, bottom to top.
-		let flush_object = |id| async move {
-			trace!("flush_all::flush_object {:#x}", id);
-			// Bottom to top
-			for d in 0.. {
-				// If None, it has been evicted and nothing is left for us to do.
-				let Some((mut obj, _)) = self.wait_object(id).await else { return Ok(()) };
-				if d >= u8::try_from(obj.data().len()).unwrap() {
-					// Highest level has been flushed.
-					break;
-				}
-				// Collect all offsets
-				let mut offt = obj
-					.level_mut(d)
-					.dirty_markers
-					.keys()
+		let flush_object = |id, root: super::RootIndex| async move {
+			trace!("flush_all::flush_object ({:#x}:{:?})", id, root);
+			for d in Depth::D0..=Depth::D3 {
+				let start = IdKey { id, key: Key::new(root, d, 0) };
+				let end = IdKey { id, key: Key::new(root, d, Key::MAX_OFFSET) };
+				let keys = self
+					.data()
+					.dirty
+					.range(start..=end)
 					.copied()
 					.collect::<Vec<_>>();
-				// Sort to take better advantage of caching.
-				offt.sort_unstable();
 				// Flush all entries at current level.
-				drop(obj);
-				offt.into_iter()
-					.map(|o| self.flush_entry(Key::new(0, id, d, o)))
+				keys.into_iter()
+					.map(|key| self.flush_entry(key))
 					.collect::<FuturesUnordered<_>>()
 					.try_for_each(|()| async { Ok(()) })
 					.await?;
@@ -184,60 +100,23 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 			Ok(())
 		};
 		#[cfg(feature = "trace")]
-		let flush_object = |id| crate::trace::TracedTask::new(flush_object(id));
-
-		let data = || self.data.borrow_mut();
+		let flush_object = |id, root| crate::trace::TracedTask::new(flush_object(id, root));
 
 		self.wait_all_evict().await;
 
 		// Flush all objects except the object list & bitmap,
 		// since the latter will get a lot of updates to the leaves.
-		let queue = data()
-			.objects
-			.keys()
-			.copied()
-			.filter(|&id| id & (1 << 58) == 0)
-			.map(flush_object)
+		let mut prev_id = None;
+		let queue = self
+			.data()
+			.dirty
+			.iter()
+			.flat_map(|key| (Some(key.id) != prev_id).then(|| *prev_id.insert(key.id)))
+			.filter(|id| ![OBJECT_LIST_ID, OBJECT_BITMAP_ID].contains(id))
+			.flat_map(|id| (RootIndex::I0..=RootIndex::I3).map(move |r| (id, r)))
+			.map(|(id, root)| flush_object(id, root))
 			.collect::<FuturesUnordered<_>>();
 		queue.try_for_each(|()| async { Ok(()) }).await?;
-
-		// Wait for evicts to finish.
-		self.wait_all_evict().await;
-
-		// Write object roots.
-		let mut ids = data()
-			.objects
-			.iter()
-			.filter(|&(&id, obj)| {
-				let Slot::Present(obj) = obj else { unreachable!() };
-				id & (3 << 58) == 0 && obj.data.is_dirty()
-			})
-			.map(|(id, _)| *id)
-			.collect::<Vec<_>>();
-
-		// Sort the objects to take better advantage of caching.
-		ids.sort_unstable();
-
-		let queue = ids
-			.into_iter()
-			.filter(|&id| !is_pseudo_id(id))
-			.map(|id| async move {
-				trace!("flush_all::save_object {:#x}", id);
-				let Some((mut obj, _)) = self.wait_object(id).await else { return Ok(()) };
-				if obj.data.is_dirty() {
-					let object = obj.data.object();
-					obj.data.clear_dirty();
-					drop(obj);
-					self.save_object(id, &object).await?;
-				}
-				Ok(())
-			});
-		#[cfg(feature = "trace")]
-		let queue = queue.map(crate::trace::TracedTask::new);
-		queue
-			.collect::<FuturesUnordered<_>>()
-			.try_for_each(|()| async { Ok(()) })
-			.await?;
 
 		// Wait for evicts to finish.
 		self.wait_all_evict().await;
@@ -245,7 +124,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// Now flush the object list and bitmap.
 		[OBJECT_LIST_ID, OBJECT_BITMAP_ID]
 			.into_iter()
-			.map(flush_object)
+			.map(|id| flush_object(id, RootIndex::I0))
 			.collect::<FuturesUnordered<_>>()
 			.try_for_each(|()| async { Ok(()) })
 			.await?;
@@ -253,44 +132,15 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// Wait for evicts to finish.
 		self.wait_all_evict().await;
 
-		let data = self.data.borrow_mut();
-
-		// Write object list root.
-		if let Some(Slot::Present(obj)) = data.objects.get(&OBJECT_LIST_ID) {
-			self.store.set_object_list_root(obj.data.object().root);
-		}
-
-		// Write object bitmap root.
-		if let Some(Slot::Present(obj)) = data.objects.get(&OBJECT_BITMAP_ID) {
-			self.store.set_object_bitmap_root(obj.data.object().root);
-		}
-
 		// Tadha!
-		// Do a sanity check just in case.
-		if cfg!(debug_assertions) {
-			for (&id, tree) in data.objects.iter() {
-				let Slot::Present(tree) = tree else { unreachable!() };
-
-				for level in tree.data().iter() {
-					debug_assert!(level.dirty_markers.is_empty(), "flush_all didn't flush all");
-				}
-
-				if is_pseudo_id(id) {
-					debug_assert_eq!(
-						tree.data.object().root.length(),
-						0,
-						"pseudo object is not zero"
-					);
-				}
-			}
-		}
+		debug_assert!(self.data().dirty.is_empty(), "flush_all didn't flush all");
 		Ok(())
 	}
 
 	async fn wait_all_evict(&self) {
 		trace!("wait_all_evict");
 		future::poll_fn(|cx| {
-			let mut data = self.data.borrow_mut();
+			let mut data = self.data();
 			if data.evict_tasks_count != 0 {
 				data.wake_after_evicts = Some(cx.waker().clone());
 				Poll::Pending

@@ -116,70 +116,44 @@ record tree is used for:
 Resizing
 ........
 
-Resizing a record tree may cause its height to change.
-However, the tree on disk still has the old height, so one cannot trivially
-replace or substitute the root node.
+Since resizing record trees while allowing concurrent reads & writes has proven
+to be exceptionally difficult & error-prone the trees used by objects cannot
+be resized.
 
-When resizing there are two cases to consider:
+The trees used by the object list and bitmap can be resized however, since:
 
-* Growing, where the depth may increase and records must be added.
-* Shrinking, where the depth may decrease and records must be removed.
+* growing the tree merely involves moving the root to a new record, then
+  waiting for the new record to be flushed.
+* shrinking does not require zeroing any records, as by the time shrinking
+  is possible all the unused objects & bits are already zeroed.
 
-If the depth increases a single record is added on top of the current root
-record.
-When this record is flushed it will automatically create a new record on top of
-it until the new root is reached.
+Memory use accounting
+.....................
 
-If the depth decreases all records outside the current range are either removed
-or trimmed.
-The current root is immediately moved to the new root.
-While this root record may include redundant data and be redundantly flushed
-this will automatically be resolved and should not be an issue in practice.
-To aid this process `Pseudo-objects`_ are used.
+Various schemes have been attempted to accurately gauge memory usage,
+but in the end a simple scheme that assumes all records use the same
+amount of memory regardless of real size was adopted.
 
+While this will lead to the cache being vastly underutilized in many cases,
+the cache of the VFS and possibly the (DMA) cache of the disk drivers should
+compensate for this.
 
-Cache object & entry states
----------------------------
+Hard limit
+``````````
 
-In the cache, each object & entry can be in any of four states:
+The hard limit ensures the cache won't use up all system memory under heavy
+load. When there is no more room to insert an entry, a task blocks until memory
+is available again.
 
-::
+Soft limit
+``````````
 
-       +-------------+         +-------------+
-       |             |         |             |
-  -->--+ Not present +---->----+  Fetching   |
-       |             |         |   (Busy)    |
-       +------+------+         +------+------+
-              |                       |
-              ^                       v
-              |                       |
-       +------+------+         +------+------+
-       |             +----<----+             |
-       |  Flushing   |         |   Present   |
-       |   (Busy)    +---->----+             |
-       +-------------+         +-------------+
+The soft limit is the target size of the cache.
+If exceeded tasks won't block but entries will begin being evicted in the
+background.
 
-Every entry is in the "not present" state by default.
-
-Entries that are being flushed are inaccessible for reading or writing.
-This simplifies the flushing logic & should have little to no impact on
-performance as an entry is flushed when it is either:
-
-* Being evicted, in which case it likely will not be accessed soon anyways.
-* Being flushed without eviction, which may happen during transaction commit
-  during which no other operations may take place.
-
-The root of objects are also cached alongside the entries for each object and
-are subject to the same mechanism.
-
-To simplify things, Flushing and Fetching are combined into a single "Busy"
-state.
-
-
-Pseudo-objects
---------------
-
-
+The soft limit must be strictly lower than the hard limit to ensure there is
+always room for new entries.
 
 
 Resilvering
@@ -202,11 +176,19 @@ Finally, the headers are written.
 Filesystem
 ~~~~~~~~~~
 
+Since the filesystem has been built on top of the object store, which already
+implements a cache, it has been designed to be as "cacheless", i.e. no cached
+data about each file/directory/... must be explictly kept around.
+This is to simplify implementations.
+
+In particular, when reading data the VFS can cache it more efficiently than the
+filesystem driver.
+When writing data another caching layer on top of the object store is unlikely
+to be useful as data is written through anyways.
 
 Directory
 ^^^^^^^^^
 
-::
-
-  +----------
-  |
+The specification of the directory itself has been kept as minimal as
+practically viable to allow incremental improvements with extensions while
+avoid legacy baggage as much as possible.

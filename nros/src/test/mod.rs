@@ -1,7 +1,6 @@
 pub mod fuzz;
 
 mod allocator;
-mod background;
 mod cache;
 mod concurrency;
 mod dev;
@@ -73,7 +72,7 @@ fn create_destroy() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.decrease_reference_count().await.unwrap();
+		obj.dealloc().await.unwrap();
 
 		Ok(())
 	});
@@ -85,37 +84,9 @@ fn create_destroy_twice() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.decrease_reference_count().await.unwrap();
+		obj.dealloc().await.unwrap();
 		// Should panic here, as reference count is already zero
-		obj.decrease_reference_count().await.unwrap();
-
-		Ok(())
-	});
-}
-
-#[test]
-fn create_destroy_pair() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let id = s.create_many(2).await.unwrap();
-		let obj_a = s.get(id + 0).await.unwrap();
-		let obj_b = s.get(id + 1).await.unwrap();
-		obj_a.decrease_reference_count().await.unwrap();
-		obj_b.decrease_reference_count().await.unwrap();
-
-		Ok(())
-	});
-}
-
-#[test]
-fn resize_object() {
-	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj = s.create().await.unwrap();
-		obj.resize(1024).await.unwrap();
-		obj.resize(2040).await.unwrap();
-		obj.resize(1000).await.unwrap();
-		obj.resize(0).await.unwrap();
+		obj.dealloc().await.unwrap();
 
 		Ok(())
 	});
@@ -126,7 +97,6 @@ fn write() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(2000).await.unwrap();
 		obj.write(1000, &[0xcc; 1000]).await.unwrap();
 
 		Ok(())
@@ -138,7 +108,6 @@ fn finish_transaction() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(2000).await.unwrap();
 		obj.write(1000, &[0xcc; 1000]).await.unwrap();
 		s.finish_transaction().await.unwrap();
 
@@ -151,8 +120,6 @@ fn read_before_tx_offset_0() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-
-		obj.resize(1000).await.unwrap();
 
 		let l = obj.write(0, &[1; 1000]).await.unwrap();
 		assert_eq!(l, 1000);
@@ -171,8 +138,6 @@ fn read_before_tx_offset_1000() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-
-		obj.resize(2000).await.unwrap();
 
 		let l = obj.write(1000, &[1; 1000]).await.unwrap();
 		assert_eq!(l, 1000);
@@ -194,7 +159,6 @@ fn read_before_tx_offset_1023_short() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(2000).await.unwrap();
 		obj.write(1023, b"Hello, world!").await.unwrap();
 
 		let mut buf = [0; b"Hello, world!".len()];
@@ -210,8 +174,6 @@ fn read_before_tx_offset_10p6() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-
-		obj.resize(2_000_000).await.unwrap();
 
 		let l = obj.write(1_000_000, &[1; 1000]).await.unwrap();
 		assert_eq!(l, 1000);
@@ -233,7 +195,6 @@ fn read_before_tx_offset_1000_short() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(2000).await.unwrap();
 		obj.write(1000, b"Hello, world!").await.unwrap();
 		let mut buf = [0; b"Hello, world!".len()];
 		obj.read(1000, &mut buf).await.unwrap();
@@ -248,7 +209,6 @@ fn read_after_tx() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(2000).await.unwrap();
 		obj.write(1000, &[1; 1000]).await.unwrap();
 		s.finish_transaction().await.unwrap();
 		let mut buf = [0; 1000];
@@ -266,7 +226,6 @@ fn read_before_tx_1024() {
 	let s = new(MaxRecordSize::K1);
 	run(&s, async {
 		let obj = s.create().await.unwrap();
-		obj.resize(1024).await.unwrap();
 		obj.write(0, &[1; 1024]).await.unwrap();
 		let mut buf = [0; 1024];
 		obj.read(0, &mut buf).await.unwrap();
@@ -277,30 +236,45 @@ fn read_before_tx_1024() {
 }
 
 #[test]
-fn replace_object() {
+fn header_data() {
 	let s = new(MaxRecordSize::K1);
-	run(&s, async {
-		let obj_1 = s.create().await.unwrap();
-		let obj_2 = s.create().await.unwrap();
+	s.header_data()[..11].copy_from_slice(b"hello world");
+	let devices = block_on(s.unmount()).unwrap();
+	let s = block_on(Nros::load(LoadConfig {
+		resource: StdResource::new(),
+		devices,
+		magic: *b"TEST",
+		cache_size: 0,
+		allow_repair: false,
+		retrieve_key: &mut |_| todo!(),
+	}))
+	.unwrap();
+	assert_eq!(&s.header_data()[..11], b"hello world");
+}
 
-		obj_2.resize(64).await.unwrap();
-		obj_2.write(42, &[2; 2]).await.unwrap();
-
-		obj_1.resize(2000).await.unwrap();
-		obj_1.write(1000, &[1; 1000]).await.unwrap();
-
-		let mut buf = [0; 1000];
-		obj_1.read(0, &mut buf).await.unwrap();
-		assert_eq!(buf, [0; 1000]);
-		obj_1.read(1000, &mut buf).await.unwrap();
-		assert_eq!(buf, [1; 1000]);
-
-		obj_1.replace_with(obj_2).await.unwrap();
-
-		let mut buf = [0; 2];
-		obj_1.read(42, &mut buf).await.unwrap();
-		assert_eq!(buf, [2; 2]);
-
-		Ok(())
-	});
+#[test]
+fn smaller_blocksize() {
+	let s = MemDev::new(32, BlockSize::B512);
+	let s = block_on(Nros::new(NewConfig {
+		magic: *b"TEST",
+		resource: StdResource::new(),
+		mirrors: vec![vec![s]],
+		block_size: BlockSize::K1,
+		max_record_size: MaxRecordSize::K1,
+		compression: Compression::None,
+		cipher: CipherType::NoneXxh3,
+		key_deriver: KeyDeriver::None { key: &[0; 32] },
+		cache_size: 1 << 10,
+	}))
+	.unwrap();
+	let devices = block_on(s.unmount()).unwrap();
+	block_on(Nros::load(LoadConfig {
+		magic: *b"TEST",
+		resource: StdResource::new(),
+		devices,
+		cache_size: 1 << 10,
+		allow_repair: false,
+		retrieve_key: &mut |_| unreachable!(),
+	}))
+	.unwrap();
 }

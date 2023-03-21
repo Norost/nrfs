@@ -2,13 +2,24 @@ use super::*;
 
 impl Fs {
 	pub async fn fallocate(&self, job: crate::job::FAllocate) {
-		let self_ino = self.ino.borrow_mut();
-
-		match &*self_ino.get(&self.fs, job.ino) {
-			ItemRef::Dir(_) => job.reply.error(libc::EISDIR),
-			ItemRef::File(f) => f.resize(job.length as _).await.unwrap(),
-			ItemRef::Sym(f) => f.resize(job.length as _).await.unwrap(),
-			ItemRef::Unknown(_) => unreachable!(),
+		match self.ino().get(job.ino) {
+			ItemKey::Dir(_) => job.reply.error(libc::EISDIR),
+			ItemKey::File(f) => {
+				if self
+					.fs
+					.file(f)
+					.resize(job.length as _)
+					.await
+					.unwrap()
+					.is_err()
+				{
+					job.reply.error(libc::EFBIG)
+				} else {
+					job.reply.ok()
+				}
+			}
+			// TODO which error should we return?
+			ItemKey::Sym(_) => job.reply.error(libc::EINVAL),
 		}
 	}
 }

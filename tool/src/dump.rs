@@ -5,6 +5,8 @@ use std::{
 	pin::Pin,
 };
 
+use nrfs::{ItemKey, Nrfs};
+
 /// Dump the contents of a filesystem.
 #[derive(clap::Args)]
 pub struct Dump {
@@ -62,12 +64,7 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 	let devices = args
 		.paths
 		.into_iter()
-		.map(|p| {
-			File::open(p).map(|f| {
-				// FIXME block size shouldn't matter.
-				nrfs::dev::FileDev::new(f, nrfs::BlockSize::from_raw(12).unwrap())
-			})
-		})
+		.map(|p| File::open(p).map(nrfs::dev::FileDev::new))
 		.try_collect()?;
 
 	let conf = nrfs::LoadConfig {
@@ -81,8 +78,7 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 	let mut stat = Statistics::default();
 
 	nrfs.run(async {
-		let root = nrfs.root_dir().await?;
-		list_files(root, &mut stat, 0).await?;
+		list_files(&nrfs, nrfs.root_dir(), &mut stat, 0).await?;
 		Ok::<_, Box<dyn Error>>(())
 	})
 	.await?;
@@ -93,10 +89,9 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 		println!("{}: {:>indent$}", name, val, indent = 34 - name.len())
 	};
 
+	e("directories", &stat.directories);
 	e("files", &stat.files);
 	e("symlinks", &stat.symlinks);
-	e("directories", &stat.directories);
-	e("directories", &stat.directories);
 	e("embedded files", &stat.embedded_files);
 	e("embedded symlinks", &stat.embedded_symlinks);
 	e("unknown", &stat.unknown);
@@ -120,15 +115,14 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 }
 
 async fn list_files(
-	root: nrfs::DirRef<'_, nrfs::dev::FileDev>,
+	fs: &Nrfs<nrfs::dev::FileDev>,
+	root: nrfs::Dir<'_, nrfs::dev::FileDev>,
 	stats: &mut Statistics,
 	indent: usize,
 ) -> Result<(), Box<dyn Error>> {
 	let mut i = 0;
-	while let Some((e, next_i)) = root.next_from(i).await? {
-		let data = e.data().await?;
-
-		if let Some(u) = data.ext_unix {
+	while let Some((data, next_i)) = root.next_from(i).await? {
+		if let Some(u) = data.ext.unix {
 			let mut s = [0; 9];
 			for (i, (c, l)) in s.iter_mut().zip(b"rwxrwxrwx").rev().enumerate() {
 				*c = [b'-', *l][usize::from(u.permissions & 1 << i != 0)];
@@ -141,7 +135,7 @@ async fn list_files(
 			);
 		}
 
-		if let Some(t) = data.ext_mtime {
+		if let Some(t) = data.ext.mtime {
 			let secs = (t.mtime / 1_000_000) as i64;
 			let micros = t.mtime.rem_euclid(1_000_000) as u32;
 			let t = chrono::NaiveDateTime::from_timestamp_opt(secs, micros * 1_000).unwrap();
@@ -149,8 +143,7 @@ async fn list_files(
 			print!("{:<26} ", format!("{}", t));
 		}
 
-		let name = e.key(&data).await?;
-		let name = match &name {
+		let name = match &data.name {
 			Some(name) => String::from_utf8_lossy(name.as_ref()),
 			None => {
 				stats.dangling += 1;
@@ -158,67 +151,62 @@ async fn list_files(
 			}
 		};
 
-		use nrfs::dir::ItemRef;
-		match e {
-			ItemRef::File(f) => {
-				if f.is_embedded() {
+		match data.key() {
+			ItemKey::Dir(d) => {
+				let d = nrfs::Dir::new(fs, d);
+				stats.directories += 1;
+				println!("{:>indent$}  d {}", "", name, indent = 10 + indent + 4 + 8);
+				let fut: Pin<Box<dyn Future<Output = _>>> =
+					Box::pin(list_files(fs, d, stats, indent + 2));
+				fut.await?;
+			}
+			ItemKey::File(f) => {
+				let f = nrfs::File::new(fs, f);
+				let is_embed = f.is_embed().await?;
+				if is_embed {
 					stats.embedded_files += 1;
 				} else {
 					stats.files += 1;
 				}
 				println!(
-					"{:>8}  {:>indent$}{}f {}",
+					"{:>8}  {:>indent$} {}f {}",
 					f.len().await?,
 					"",
-					[' ', 'e'][usize::from(f.is_embedded())],
+					[' ', 'e'][usize::from(is_embed)],
 					name,
 					indent = indent + 4 + 8
 				);
-				f.drop().await?;
 			}
-			ItemRef::Dir(d) => {
-				stats.directories += 1;
-				println!(
-					"{:>8} heap:{:<8}  {:>indent$} d {}",
-					format!("{}/{}", d.len().await?, d.capacity().await?),
-					d.heap_size().await?,
-					"",
-					name,
-					indent = indent
-				);
-				let fut: Pin<Box<dyn Future<Output = _>>> =
-					Box::pin(list_files(d, stats, indent + 2));
-				fut.await?;
-			}
-			ItemRef::Sym(f) => {
-				if f.is_embedded() {
+			ItemKey::Sym(f) => {
+				let f = nrfs::File::new(fs, f);
+				let is_embed = f.is_embed().await?;
+				if is_embed {
 					stats.embedded_symlinks += 1;
 				} else {
 					stats.symlinks += 1;
 				}
 				let len = f.len().await?;
+				let (len, trim_len) = if len > 64 { (61, true) } else { (len, false) };
 				let mut buf = vec![0; len as _];
-				f.read_exact(0, &mut buf).await?;
-				let link = String::from_utf8_lossy(&buf);
+				f.read(0, &mut buf).await?;
+				let mut link = String::from_utf8_lossy(&buf);
+				trim_len.then(|| link += "...");
 				println!(
-					"{:>indent$}{}s {} -> {}",
+					"{:>indent$} {}s {} -> {}",
 					"",
-					[' ', 'e'][usize::from(f.is_embedded())],
+					[' ', 'e'][usize::from(is_embed)],
 					name,
 					link,
 					indent = 10 + indent + 4 + 8
 				);
-				f.drop().await?;
 			}
-			ItemRef::Unknown(e) => {
+			_ => {
 				stats.unknown += 1;
 				println!("     ???  {:>indent$} ? {}", "", name, indent = indent);
-				e.drop().await?;
 			}
 		}
 		i = next_i
 	}
-	root.drop().await?;
 
 	Ok(())
 }

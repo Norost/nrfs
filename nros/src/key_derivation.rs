@@ -8,40 +8,42 @@ pub enum KeyDerivation {
 
 impl KeyDerivation {
 	/// Parse serialized key derivation parameters.
-	pub fn from_raw(buf: &[u8; 14]) -> Option<Self> {
-		Some(match buf[0] {
+	pub fn from_raw(algorithm: u8, buf: &[u8; 8]) -> Option<Self> {
+		Some(match algorithm {
 			0 => Self::None,
 			1 => {
-				let f = |i| {
-					let i = buf[i..i + 4].try_into().unwrap();
-					let i = u32::from_le_bytes(i);
-					NonZeroU32::new(i).unwrap()
-				};
-				Self::Argon2id { p: NonZeroU8::new(buf[1]).unwrap(), t: f(2), m: f(6) }
+				let &[t0, t1, t2, p, m0, m1, m2, m3] = buf;
+				let t = u32::from_le_bytes([t0, t1, t2, 0]);
+				let m = u32::from_le_bytes([m0, m1, m2, m3]);
+				let p = NonZeroU8::new(p)?;
+				let t = NonZeroU32::new(t)?;
+				let m = NonZeroU32::new(m)?;
+				Self::Argon2id { p, t, m }
 			}
 			_ => return None,
 		})
 	}
 
 	/// Serialize key derivation parameters.
-	pub fn to_raw(self) -> [u8; 14] {
-		let mut buf = [0; 14];
+	pub fn to_raw(self) -> (u8, [u8; 8]) {
+		let mut buf = [0; 8];
 		match self {
-			Self::None => {}
+			Self::None => (0, buf),
 			Self::Argon2id { p, t, m } => {
-				buf[0] = 1;
-				buf[1] = p.get();
-				buf[2..6].copy_from_slice(&t.get().to_le_bytes());
-				buf[6..10].copy_from_slice(&m.get().to_le_bytes());
+				let [a, b, c, 0] = t.get().to_le_bytes()
+					else { panic!("t out of range") };
+				buf[0..3].copy_from_slice(&[a, b, c]);
+				buf[3] = p.get();
+				buf[4..8].copy_from_slice(&m.get().to_le_bytes());
+				(1, buf)
 			}
 		}
-		buf
 	}
 }
 
-/// Derive key as argon2id
+/// Derive key with argon2id.
 ///
-/// Returns `None` if not set as a password derivation function.
+/// Returns derived key and its hash.
 pub fn argon2id(
 	password: &[u8],
 	uid: &[u8; 16],
@@ -52,7 +54,7 @@ pub fn argon2id(
 	use argon2::{Algorithm, Argon2, Params, Version};
 	let params = Params::new(m.get(), t.get(), p.get().into(), Some(32)).unwrap();
 	let kdf = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-	let mut buf = [0; 32];
-	kdf.hash_password_into(password, uid, &mut buf).unwrap();
-	buf
+	let mut key = [0; 32];
+	kdf.hash_password_into(password, uid, &mut key).unwrap();
+	key
 }

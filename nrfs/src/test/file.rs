@@ -5,38 +5,154 @@ use super::*;
 fn transfer_embed() {
 	let fs = new();
 	run(&fs, async {
-		let root = fs.root_dir().await.unwrap();
+		let root = fs.root_dir();
 
 		let dir = root
-			.create_dir(
-				b"dir".into(),
-				&DirOptions::new(&[0; 16]),
-				&Default::default(),
-			)
+			.create_dir(b"dir".into(), Default::default(), Default::default())
 			.await
 			.unwrap()
 			.unwrap();
 
-		let file = root
-			.create_file(b"file".into(), &Default::default())
+		let mut file = root
+			.create_file(b"file".into(), Default::default())
 			.await
 			.unwrap()
 			.unwrap();
 
-		file.write_grow(0, b"Hello!").await.unwrap();
+		file.write_grow(0, b"Hello!").await.unwrap().unwrap();
 
-		root.transfer(b"file".into(), &dir, b"file".into())
-			.await
-			.unwrap()
-			.unwrap();
+		file.transfer(&dir, b"file".into()).await.unwrap().unwrap();
 
 		// If the embedded data hasn't been transferred, this will crash.
 		let buf = &mut [0; 6];
-		file.read_exact(0, buf).await.unwrap();
+		let l = file.read(0, buf).await.unwrap();
+		assert_eq!(l, 6);
 		assert_eq!(*buf, *b"Hello!");
-
-		file.drop().await.unwrap();
-		dir.drop().await.unwrap();
-		root.drop().await.unwrap();
 	});
+}
+
+#[test]
+fn reembed_empty() {
+	let fs = new();
+	run(&fs, async {
+		let file = fs
+			.root_dir()
+			.create_file(b"file".into(), Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+		file.resize(1 << 20).await.unwrap().unwrap();
+		file.resize(0).await.unwrap().unwrap();
+	});
+}
+
+#[test]
+fn writegrow_far() {
+	let fs = new();
+	run(&fs, async {
+		let file = fs
+			.root_dir()
+			.create_file(b"file".into(), Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+		file.write_grow(1 << 20, &[1; 256]).await.unwrap().unwrap();
+		let mut buf = [2; 256];
+		file.read(0, &mut buf).await.unwrap();
+		assert_eq!(buf, [0; 256]);
+	});
+}
+
+#[test]
+fn resize_verylarge() {
+	let fs = new();
+	run(&fs, async {
+		let file = fs
+			.root_dir()
+			.create_file(b"\0".into(), Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+		file.resize(1 << 32).await.unwrap().unwrap_err();
+	});
+}
+
+#[test]
+fn writegrow_veryfar() {
+	let fs = new();
+	run(&fs, async {
+		let file = fs
+			.root_dir()
+			.create_file(b"\0".into(), Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+		file.write_grow(1 << 32, &[1; 256])
+			.await
+			.unwrap()
+			.unwrap_err();
+	});
+}
+
+#[test]
+fn grow_empty_embed() {
+	let fs = new();
+	run(&fs, async {
+		let file = fs
+			.root_dir()
+			.create_file(b"file".into(), Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+		file.resize(1).await.unwrap().unwrap();
+		file.resize(0).await.unwrap().unwrap();
+	});
+}
+
+#[test]
+fn write_edge() {
+	let fs = new();
+	run(&fs, async {
+		let file = fs
+			.root_dir()
+			.create_file(b"file".into(), Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+		file.resize(20).await.unwrap().unwrap();
+		let len = file.write(15, &[1; 30]).await.unwrap();
+		assert_eq!(len, 20 - 15);
+	});
+}
+
+#[test]
+fn read_embed() {
+	let fs = new();
+	run(&fs, async {
+		let file = fs
+			.root_dir()
+			.create_file(b"file".into(), Default::default())
+			.await
+			.unwrap()
+			.unwrap();
+		file.write_grow(2, &[1, 2]).await.unwrap().unwrap();
+		let mut buf = [0xff; 4];
+		let len = file.read(1, &mut buf).await.unwrap();
+		assert_eq!(len, 3);
+		assert_eq!(buf, [0, 1, 2, 0xff]);
+	});
+}
+
+#[test]
+fn write_embed() {
+	let fs = new();
+	run(&fs, async {
+		let f = mkfile(&fs.root_dir(), b"x", Default::default()).await;
+		f.write_grow(1, &[1; 230]).await.unwrap().unwrap();
+		f.write(0, &[1; 15359]).await.unwrap();
+		let mut buf = [2; 231];
+		let l = f.read(0, &mut buf).await.unwrap();
+		assert_eq!(l, 231);
+		assert_eq!(buf, [1; 231]);
+	})
 }

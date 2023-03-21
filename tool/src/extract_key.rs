@@ -28,12 +28,7 @@ pub async fn extract_key(args: ExtractKey) -> Result<(), Box<dyn Error>> {
 	let devices = args
 		.paths
 		.into_iter()
-		.map(|p| {
-			File::open(p).map(|f| {
-				// FIXME block size shouldn't matter.
-				nros::dev::FileDev::new(f, nros::BlockSize::from_raw(12).unwrap())
-			})
-		})
+		.map(|p| File::open(p).map(nros::dev::FileDev::new))
 		.try_collect()?;
 
 	let conf = nros::LoadConfig {

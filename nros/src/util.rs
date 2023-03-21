@@ -1,26 +1,8 @@
 use {
-	crate::{resource::Buf, Record},
+	crate::resource::Buf,
 	alloc::collections::btree_map,
-	core::{future::Future, mem, pin::Pin},
+	core::{future::Future, pin::Pin},
 };
-
-/// Get a record from a slice of raw data.
-///
-/// Returns `None` if the index is completely out of range,
-/// i.e. a zeroed record would be returned.
-pub(crate) fn get_record(data: &[u8], index: usize) -> Option<Record> {
-	let offt = index * mem::size_of::<Record>();
-	if offt >= data.len() {
-		return None;
-	}
-
-	let (start, end) = (offt, offt + mem::size_of::<Record>());
-	let (start, end) = (start.min(data.len()), end.min(data.len()));
-
-	let mut record = Record::default();
-	record.as_mut()[..end - start].copy_from_slice(&data[start..end]);
-	Some(record)
-}
 
 /// Cut off trailing zeroes from [`Buf`].
 pub(crate) fn trim_zeros_end(vec: &mut impl Buf) {
