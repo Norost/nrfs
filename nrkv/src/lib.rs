@@ -362,8 +362,7 @@ impl<'a, S: Store> Item<'a, S> {
 	}
 }
 
-#[cfg(feature = "alloc")]
-impl Store for Vec<u8> {
+impl Store for [u8] {
 	type Error = !;
 
 	fn read(
@@ -409,9 +408,46 @@ impl Store for Vec<u8> {
 	}
 
 	fn len(&self) -> u64 {
-		Vec::len(self).try_into().unwrap_or(u64::MAX)
+		<[u8]>::len(self).try_into().unwrap_or(u64::MAX)
 	}
 }
+
+macro_rules! store_slice {
+	($ty:ty) => {
+		impl Store for $ty {
+			type Error = !;
+
+			fn read(
+				&mut self,
+				offset: u64,
+				buf: &mut [u8],
+			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+				<[u8] as Store>::read(self, offset, buf)
+			}
+			fn write(
+				&mut self,
+				offset: u64,
+				data: &[u8],
+			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+				<[u8] as Store>::write(self, offset, data)
+			}
+			fn write_zeros(
+				&mut self,
+				offset: u64,
+				len: u64,
+			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+				<[u8] as Store>::write_zeros(self, offset, len)
+			}
+			fn len(&self) -> u64 {
+				<[u8] as Store>::len(self)
+			}
+		}
+	};
+}
+#[cfg(feature = "alloc")]
+store_slice!(Box<[u8]>);
+#[cfg(feature = "alloc")]
+store_slice!(Vec<u8>);
 
 use {
 	core::{
