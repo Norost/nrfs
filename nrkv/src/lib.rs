@@ -39,6 +39,11 @@ pub trait Store {
 		offset: u64,
 		data: &[u8],
 	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>>;
+	fn write_zeros(
+		&mut self,
+		offset: u64,
+		len: u64,
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>>;
 	fn len(&self) -> u64;
 }
 
@@ -144,8 +149,7 @@ impl<S: Store> Nrkv<S> {
 
 	async fn add_item(&mut self, key: &Key, data: &[u8]) -> Result<Tag, S::Error> {
 		assert!(data.len() <= usize::from(self.hdr.user_data_len));
-		let offt = Tag::new(self.hdr.free_head).unwrap();
-		self.hdr.free_head += u64::from(self.item_len(key.len() as _));
+		let offt = self.alloc(self.item_len(key.len() as _).into()).await?;
 		self.store.write(offt.get(), data).await?;
 		let offt_key = offt.get() + u64::from(self.key_offset());
 		self.store.write(offt_key, &[key.len() as _]).await?;
@@ -257,12 +261,16 @@ impl<S: Store> Nrkv<S> {
 		self.store.write(offt, data).await
 	}
 
-	pub async fn alloc(&mut self, amount: u64) -> Result<u64, S::Error> {
-		todo!()
+	pub async fn alloc(&mut self, amount: u64) -> Result<Tag, S::Error> {
+		let offt = Tag::new(self.hdr.free_head).unwrap();
+		self.hdr.free_head += u64::from(amount);
+		Ok(offt)
 	}
 
 	pub async fn dealloc(&mut self, offset: u64, amount: u64) -> Result<(), S::Error> {
-		todo!()
+		self.hdr.used -= amount;
+		self.store.write_zeros(offset, amount).await?;
+		Ok(())
 	}
 }
 
@@ -383,6 +391,20 @@ impl Store for Vec<u8> {
 			.and_then(|o| self.get_mut(o..o + data.len()))
 			.expect("out of bounds")
 			.copy_from_slice(data);
+		Box::pin(future::ready(Ok(())))
+	}
+
+	fn write_zeros(
+		&mut self,
+		offset: u64,
+		len: u64,
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+		let f = |n: u64| n.try_into().ok();
+		f(offset)
+			.and_then(|s| offset.checked_add(len).and_then(f).map(|e| s..e))
+			.and_then(|r| self.get_mut(r))
+			.expect("out of bounds")
+			.fill(0);
 		Box::pin(future::ready(Ok(())))
 	}
 
