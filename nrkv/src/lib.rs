@@ -61,6 +61,15 @@ impl<S: Store> Nrkv<S> {
 	{
 		let mut hash_key = [0; 16];
 		random.fill_bytes(&mut hash_key);
+		Self::init_with_key(store, hash_key, user_data_len).await
+	}
+
+	#[must_use]
+	pub async fn init_with_key(
+		store: S,
+		hash_key: [u8; 16],
+		user_data_len: u8,
+	) -> Result<Self, S::Error> {
 		let hdr = || Header {
 			hash_key,
 			old_nrkv: u64::MAX,
@@ -175,6 +184,10 @@ impl<S: Store> Nrkv<S> {
 		let mut h = SipHasher13::new_with_key(&self.hdr.hash_key);
 		h.write(key);
 		h.finish128().as_u128()
+	}
+
+	pub fn hash_key(&self) -> [u8; 16] {
+		self.hdr.hash_key
 	}
 
 	pub async fn read_key(&mut self, tag: Tag, buf: &mut [u8]) -> Result<u8, S::Error> {
@@ -299,19 +312,6 @@ impl<'a, S: Store> ShareNrkv<'a, S> {
 		}
 
 		rec(self, root, 0, state, f).await
-	}
-
-	pub async fn take_all<F, Fut>(
-		&mut self,
-		old: &mut Self,
-		old_id: u64,
-		mut f: F,
-	) -> Result<(), S::Error>
-	where
-		for<'f> F: FnMut(&'f mut Self, &[u8], &[u8]) -> Fut + 'f,
-		Fut: Future<Output = Result<(), S::Error>>,
-	{
-		todo!()
 	}
 }
 
