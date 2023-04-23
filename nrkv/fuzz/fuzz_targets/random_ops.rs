@@ -61,6 +61,7 @@ pub enum Op<'a> {
 	Get { tag_idx: u16 },
 	Set { tag_idx: u16, data: [u8; 16] },
 	Iter { break_at: u16 },
+	Reload,
 }
 
 impl<'a> Test<'a> {
@@ -144,6 +145,10 @@ impl<'a> Test<'a> {
 					.await
 					.unwrap();
 					assert!(live.borrow().is_empty(), "not all live tags visited");
+				}
+				Op::Reload => {
+					let store = kv.save().await.unwrap();
+					kv = Nrkv::load(store).await.unwrap();
 				}
 			}
 		}
