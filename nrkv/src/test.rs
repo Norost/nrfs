@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+
+use crate::ShareNrkv;
+
 use {
 	crate::Nrkv,
 	alloc::vec,
@@ -157,27 +161,28 @@ fn remove() {
 fn next_batch() {
 	run(async {
 		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
-		let mut tags = [
+		let tags = &RefCell::new([
 			Some(kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap()),
 			Some(kv.insert(b"RV".into(), &[]).await.unwrap().unwrap()),
 			Some(kv.insert((&[167, 114]).into(), &[]).await.unwrap().unwrap()),
 			Some(kv.insert(b"hi".into(), &[]).await.unwrap().unwrap()),
-		];
+		]);
 		let mut it = Default::default();
-		kv.next_batch(&mut it, &mut |tag| {
-			dbg!(tag);
-			for t in tags.iter_mut() {
-				if *t == Some(tag) {
-					*t = None;
-					return true;
+		ShareNrkv::new(&mut kv)
+			.next_batch(&mut it, move |tag| async move {
+				dbg!(tag);
+				for t in tags.borrow_mut().iter_mut() {
+					if *t == Some(tag) {
+						*t = None;
+						return Ok(true);
+					}
 				}
-			}
-			panic!("tag not in tags");
-		})
-		.await
-		.unwrap();
+				panic!("tag not in tags");
+			})
+			.await
+			.unwrap();
 		assert!(
-			tags.iter().all(|t| t.is_none()),
+			tags.borrow().iter().all(|t| t.is_none()),
 			"not all items visited {:?}",
 			tags
 		);

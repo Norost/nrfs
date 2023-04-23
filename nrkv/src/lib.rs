@@ -10,6 +10,7 @@ extern crate alloc;
 use {
 	alloc::boxed::Box,
 	core::{
+		cell::{RefCell, RefMut},
 		future::{self, Future},
 		hash::Hasher,
 		mem,
@@ -150,15 +151,20 @@ impl<S: Store> Nrkv<S> {
 	async fn add_item(&mut self, key: &Key, data: &[u8]) -> Result<Tag, S::Error> {
 		assert!(data.len() <= usize::from(self.hdr.user_data_len));
 		let offt = self.alloc(self.item_len(key.len() as _).into()).await?;
-		self.store.write(offt.get(), data).await?;
+		let offt_user = offt.get() + u64::from(self.user_offset());
+		self.store.write(offt_user, data).await?;
 		let offt_key = offt.get() + u64::from(self.key_offset());
 		self.store.write(offt_key, &[key.len() as _]).await?;
 		self.store.write(offt_key + 1, key).await?;
 		Ok(offt)
 	}
 
+	fn user_offset(&self) -> u16 {
+		u16::try_from(HAMT_ENTRY_SIZE * HAMT_CHILD_LEN).unwrap()
+	}
+
 	fn key_offset(&self) -> u16 {
-		u16::try_from(HAMT_ENTRY_SIZE * HAMT_CHILD_LEN).unwrap() + u16::from(self.hdr.user_data_len)
+		self.user_offset() + u16::from(self.hdr.user_data_len)
 	}
 
 	fn item_len(&self, key_len: u8) -> u16 {
@@ -171,72 +177,13 @@ impl<S: Store> Nrkv<S> {
 		h.finish128().as_u128()
 	}
 
-	pub async fn next_batch(
-		&mut self,
-		state: &mut IterState,
-		f: &mut dyn FnMut(Tag) -> bool,
-	) -> Result<(), S::Error> {
-		loop {
-			if !self.next_batch_child(state, f).await? || !state.step_root() {
-				return Ok(());
-			}
-		}
-	}
-
-	async fn next_batch_child(
-		&mut self,
-		state: &mut IterState,
-		f: &mut dyn FnMut(Tag) -> bool,
-	) -> Result<bool, S::Error> {
-		let Some(root) = self.hamt_root_get(state.root()).await? else { return Ok(true) };
-
-		async fn rec<S: Store>(
-			slf: &mut Nrkv<S>,
-			item: Tag,
-			depth: u8,
-			state: &mut IterState,
-			f: &mut dyn FnMut(Tag) -> bool,
-		) -> Result<bool, S::Error> {
-			dbg!(depth, state.child(depth));
-			let mut item = Item::new(slf, item);
-			if depth == state.depth() {
-				state.incr_depth();
-				if !f(item.offset) {
-					return Ok(false);
-				}
-			}
-			for i in state.child(depth)..=15 {
-				if let Some(child) = item.hamt_get(i).await? {
-					fn box_fut<'a, T>(
-						f: impl Future<Output = T> + 'a,
-					) -> Pin<Box<dyn Future<Output = T> + 'a>> {
-						Box::pin(f)
-					}
-					let f = box_fut(rec(item.kv, child, depth + 1, state, f));
-					if !f.await? {
-						return Ok(false);
-					}
-				}
-				state.step_child(depth);
-			}
-			state.decr_depth();
-			Ok(true)
-		}
-
-		rec(self, root, 0, state, f).await
-	}
-
-	pub async fn take_all<F, Fut>(
-		&mut self,
-		old: &mut Self,
-		old_id: u64,
-		mut f: F,
-	) -> Result<(), S::Error>
-	where
-		for<'f> F: FnMut(&'f mut Self, &[u8], &[u8]) -> Fut + 'f,
-		Fut: Future<Output = Result<(), S::Error>>,
-	{
-		todo!()
+	pub async fn read_key(&mut self, tag: Tag, buf: &mut [u8]) -> Result<u8, S::Error> {
+		let len = &mut [0];
+		let offt = tag.get() + u64::from(self.key_offset());
+		self.store.read(offt, len).await?;
+		let l = buf.len().min(usize::from(len[0]));
+		self.store.read(offt + 1, &mut buf[..l]);
+		Ok(len[0])
 	}
 
 	pub async fn read_user_data(
@@ -271,6 +218,100 @@ impl<S: Store> Nrkv<S> {
 		self.hdr.used -= amount;
 		self.store.write_zeros(offset, amount).await?;
 		Ok(())
+	}
+}
+
+pub struct ShareNrkv<'a, S>(RefCell<&'a mut Nrkv<S>>);
+
+impl<'a, S> ShareNrkv<'a, S> {
+	pub fn new(kv: &'a mut Nrkv<S>) -> Self {
+		Self(RefCell::new(kv))
+	}
+
+	pub fn borrow_mut(&self) -> RefMut<Nrkv<S>> {
+		RefMut::map(self.0.borrow_mut(), |b| *b)
+	}
+}
+
+impl<'a, S: Store> ShareNrkv<'a, S> {
+	pub async fn next_batch<F, Fut>(&self, state: &mut IterState, mut f: F) -> Result<(), S::Error>
+	where
+		F: FnMut(Tag) -> Fut,
+		Fut: Future<Output = Result<bool, S::Error>>,
+	{
+		while self.next_batch_child(state, &mut f).await? {
+			if !state.step_root() {
+				state.set_depth(15);
+				break;
+			}
+		}
+		Ok(())
+	}
+
+	async fn next_batch_child<F, Fut>(
+		&self,
+		state: &mut IterState,
+		f: &mut F,
+	) -> Result<bool, S::Error>
+	where
+		F: FnMut(Tag) -> Fut,
+		Fut: Future<Output = Result<bool, S::Error>>,
+	{
+		let Some(root) = self.borrow_mut().hamt_root_get(state.root()).await?
+			else { return Ok(true) };
+
+		async fn rec<S: Store, F, Fut>(
+			slf: &ShareNrkv<'_, S>,
+			item: Tag,
+			depth: u8,
+			state: &mut IterState,
+			f: &mut F,
+		) -> Result<bool, S::Error>
+		where
+			F: FnMut(Tag) -> Fut,
+			Fut: Future<Output = Result<bool, S::Error>>,
+		{
+			if depth == state.depth() {
+				state.incr_depth();
+				if !f(item).await? {
+					return Ok(false);
+				}
+			}
+			for i in state.child(depth)..=15 {
+				let mut kv = slf.borrow_mut();
+				let mut item = Item::new(&mut kv, item);
+				if let Some(child) = item.hamt_get(i).await? {
+					fn box_fut<'a, T>(
+						f: impl Future<Output = T> + 'a,
+					) -> Pin<Box<dyn Future<Output = T> + 'a>> {
+						Box::pin(f)
+					}
+					drop(kv);
+					let f = box_fut(rec(slf, child, depth + 1, state, f));
+					if !f.await? {
+						return Ok(false);
+					}
+				}
+				state.step_child(depth);
+			}
+			state.decr_depth();
+			Ok(true)
+		}
+
+		rec(self, root, 0, state, f).await
+	}
+
+	pub async fn take_all<F, Fut>(
+		&mut self,
+		old: &mut Self,
+		old_id: u64,
+		mut f: F,
+	) -> Result<(), S::Error>
+	where
+		for<'f> F: FnMut(&'f mut Self, &[u8], &[u8]) -> Fut + 'f,
+		Fut: Future<Output = Result<(), S::Error>>,
+	{
+		todo!()
 	}
 }
 
@@ -677,5 +718,15 @@ impl IterState {
 		self.root_depth += 1 << 4;
 		self.children = 0;
 		true
+	}
+}
+
+impl fmt::Debug for IterState {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(IterState))
+			.field("depth", &self.depth())
+			.field("root", &self.root())
+			.field("children", &format_args!("{:016x}", self.children))
+			.finish()
 	}
 }
