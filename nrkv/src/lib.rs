@@ -11,13 +11,16 @@ use {
 	alloc::boxed::Box,
 	core::{
 		cell::{RefCell, RefMut},
+		fmt,
 		future::{self, Future},
 		hash::Hasher,
-		mem,
+		num::NonZeroU8,
+		ops::{Deref, DerefMut},
 		pin::Pin,
 	},
 	rand_core::{CryptoRng, RngCore},
 	siphasher::sip128::{Hasher128, SipHasher13},
+	std::{rc::Rc, sync::Arc},
 };
 
 const HEADER_SIZE: u64 = 64;
@@ -505,15 +508,6 @@ store_slice!(Box<[u8]>);
 #[cfg(feature = "alloc")]
 store_slice!(Vec<u8>);
 
-use {
-	core::{
-		fmt,
-		num::NonZeroU8,
-		ops::{Deref, DerefMut},
-	},
-	std::{rc::Rc, sync::Arc},
-};
-
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Key([u8]);
@@ -522,11 +516,11 @@ pub struct Key([u8]);
 pub struct TooLong;
 
 impl Key {
-	pub(crate) fn len_u8(&self) -> u8 {
+	pub fn len_u8(&self) -> u8 {
 		self.len_nonzero_u8().get()
 	}
 
-	pub(crate) fn len_nonzero_u8(&self) -> NonZeroU8 {
+	pub fn len_nonzero_u8(&self) -> NonZeroU8 {
 		debug_assert!(!self.0.is_empty());
 		// SAFETY: names are always non-zero length.
 		unsafe { NonZeroU8::new_unchecked(self.0.len() as _) }
