@@ -72,10 +72,11 @@ impl<S: Store> Nrkv<S> {
 	) -> Result<Self, S::Error> {
 		let hdr = || Header {
 			hash_key,
-			old_nrkv: u64::MAX,
 			used: HEADER_SIZE + HAMT_ENTRY_SIZE * HAMT_ROOT_LEN,
 			free_head: HEADER_SIZE + HAMT_ENTRY_SIZE * HAMT_ROOT_LEN,
 			user_data_len,
+			_reserved: [0; 7],
+			user_data: [0; 24],
 		};
 		let store = Self { hdr: hdr(), store }.save().await?;
 		Ok(Self { hdr: hdr(), store })
@@ -188,6 +189,14 @@ impl<S: Store> Nrkv<S> {
 
 	pub fn hash_key(&self) -> [u8; 16] {
 		self.hdr.hash_key
+	}
+
+	pub fn user_data(&self) -> &[u8; 24] {
+		&self.hdr.user_data
+	}
+
+	pub fn user_data_mut(&mut self) -> &mut [u8; 24] {
+		&mut self.hdr.user_data
 	}
 
 	pub async fn read_key(&mut self, tag: Tag, buf: &mut [u8]) -> Result<u8, S::Error> {
@@ -318,30 +327,33 @@ impl<'a, S: Store> ShareNrkv<'a, S> {
 #[repr(C)]
 struct Header {
 	hash_key: [u8; 16],
-	old_nrkv: u64,
 	used: u64,
 	free_head: u64,
 	user_data_len: u8,
+	_reserved: [u8; 7],
+	user_data: [u8; 24],
 }
 
 impl Header {
-	fn to_raw(&self) -> [u8; mem::size_of::<Self>()] {
+	fn to_raw(&self) -> [u8; 64] {
 		fn f<const N: usize>(s: &mut [u8], v: [u8; N]) -> &mut [u8] {
 			let (x, y) = s.split_array_mut::<N>();
 			*x = v;
 			y
 		}
 
-		let mut buf = [0; mem::size_of::<Self>()];
+		let mut buf = [0; 64];
 		let b = f(&mut buf, self.hash_key);
-		let b = f(b, self.old_nrkv.to_le_bytes());
 		let b = f(b, self.used.to_le_bytes());
 		let b = f(b, self.free_head.to_le_bytes());
-		let _ = f(b, self.user_data_len.to_le_bytes());
+		let b = f(b, self.user_data_len.to_le_bytes());
+		let b = f(b, self._reserved);
+		let b = f(b, self.user_data);
+		assert!(b.is_empty());
 		buf
 	}
 
-	fn from_raw(raw: &[u8; mem::size_of::<Self>()]) -> Self {
+	fn from_raw(raw: &[u8; 64]) -> Self {
 		fn f<const N: usize>(s: &mut &[u8]) -> [u8; N] {
 			let (x, y) = s.split_array_ref::<N>();
 			*s = y;
@@ -349,13 +361,16 @@ impl Header {
 		}
 
 		let mut raw = &raw[..];
-		Self {
+		let s = Self {
 			hash_key: f(&mut raw),
-			old_nrkv: u64::from_le_bytes(f(&mut raw)),
 			used: u64::from_le_bytes(f(&mut raw)),
 			free_head: u64::from_le_bytes(f(&mut raw)),
 			user_data_len: u8::from_le_bytes(f(&mut raw)),
-		}
+			_reserved: f(&mut raw),
+			user_data: f(&mut raw),
+		};
+		assert!(raw.is_empty());
+		s
 	}
 }
 

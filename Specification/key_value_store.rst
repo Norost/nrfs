@@ -20,10 +20,10 @@ Data structures
   Offset Length Field
   ====== ====== =====
        0     16 Hash key
-      16      8 Old key-value store
-      24      8 Used
-      32      8 Free head
-      40      1 User data length
+      16      8 Used
+      24      8 Free head
+      32      1 Entry user data length
+      40     24 User data
       64 6*4096 HAMT root
   ====== ====== =====
 
