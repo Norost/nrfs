@@ -92,7 +92,6 @@ dependencies = [
  "arbitrary",
  "libfuzzer-sys",
  "nrkv",
- "rand_core",
 ]
 
 [[package]]

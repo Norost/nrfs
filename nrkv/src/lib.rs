@@ -700,7 +700,7 @@ impl IterState {
 		debug_assert!(depth <= 15);
 		self.root_depth &= !0xf;
 		self.root_depth |= u16::from(depth);
-		self.children &= u128::MAX >> 4 * (15 - self.depth());
+		self.children &= !(u128::MAX << 4 * self.depth());
 	}
 
 	fn incr_depth(&mut self) {
@@ -734,7 +734,7 @@ impl fmt::Debug for IterState {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(IterState))
 			.field("depth", &self.depth())
-			.field("root", &self.root())
+			.field("root", &format_args!("{:03x}", self.root()))
 			.field("children", &format_args!("{:016x}", self.children))
 			.finish()
 	}

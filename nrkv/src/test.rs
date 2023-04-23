@@ -2,7 +2,7 @@ use {
 	crate::{Nrkv, ShareNrkv},
 	alloc::vec,
 	core::{
-		cell::RefCell,
+		cell::{Cell, RefCell},
 		future::Future,
 		task::{Context, RawWaker, RawWakerVTable, Waker},
 	},
@@ -144,7 +144,6 @@ fn next_batch() {
 		let mut it = Default::default();
 		ShareNrkv::new(&mut kv)
 			.next_batch(&mut it, move |tag| async move {
-				dbg!(tag);
 				for t in tags.borrow_mut().iter_mut() {
 					if *t == Some(tag) {
 						*t = None;
@@ -172,5 +171,30 @@ fn user_data() {
 		let mut buf = [0; 16];
 		kv.read_user_data(tag, 0, &mut buf).await.unwrap();
 		assert_eq!(buf, *b"\0\0\0\0I'm a sheep\0");
+	});
+}
+
+#[test]
+fn next_batch_child_step_reset() {
+	run(async {
+		let mut kv = mkkv().await;
+		kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
+		assert!(kv.remove(b"\0".into()).await.unwrap());
+		let b = kv.insert(b"J\x07\xC7\xC7\xC7\xC7\xC7\xF1\xF1\xF1\0\0\0\0J\x07\xC7\xC7\xC7\xC7\xC7\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\x10\0\0\0\0\0\0\0{\xF1\xF1\xF1\xF1\xD1\xF1\xF1\xF1\xF1\xF1\xFF\xFF\xFF\xFE\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x15\x0e\xFB\xF1\x0e\x0e\x0e\x0e\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xC7\xF1\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\0\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\0\0\0\0\0\0\0\0\0\xC7\0\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\0\0\0\0\0\0\0\0\0\0\0H\0\0\0\0\0]\0\0\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".into(), &[]).await.unwrap().unwrap();
+		kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
+		assert!(kv.remove(b"\0".into()).await.unwrap());
+		let d = kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
+		let mut state = Default::default();
+		let (x, y) = (&Cell::new(Some(b)), &Cell::new(Some(d)));
+		ShareNrkv::new(&mut kv)
+			.next_batch(&mut state, |tag| async move {
+				(x.get() == Some(tag)).then(|| x.take());
+				(y.get() == Some(tag)).then(|| y.take());
+				Ok(true)
+			})
+			.await
+			.unwrap();
+		assert!(x.get().is_none());
+		assert!(y.get().is_none());
 	});
 }
