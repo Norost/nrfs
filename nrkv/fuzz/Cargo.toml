@@ -11,7 +11,6 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "*", features = ["derive"] }
-rand_core = "*"
 
 [dependencies.nrkv]
 path = ".."

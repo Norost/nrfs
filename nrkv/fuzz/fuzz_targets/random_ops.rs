@@ -28,26 +28,6 @@ fn run(f: impl Future<Output = ()>) {
 	panic!("stuck");
 }
 
-struct ZeroRand;
-
-impl rand_core::RngCore for ZeroRand {
-	fn next_u32(&mut self) -> u32 {
-		0
-	}
-	fn next_u64(&mut self) -> u64 {
-		0
-	}
-	fn fill_bytes(&mut self, bytes: &mut [u8]) {
-		bytes.fill(0)
-	}
-	fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), rand_core::Error> {
-		bytes.fill(0);
-		Ok(())
-	}
-}
-
-impl rand_core::CryptoRng for ZeroRand {}
-
 #[derive(Debug, Arbitrary)]
 pub struct Test<'a> {
 	ops: Vec<Op<'a>>,
@@ -66,7 +46,7 @@ pub enum Op<'a> {
 
 impl<'a> Test<'a> {
 	async fn run(self) {
-		let mut kv = Nrkv::init(vec![0; 1 << 20], &mut ZeroRand, 16)
+		let mut kv = Nrkv::init_with_key(vec![0; 1 << 20], [0; 16], 16)
 			.await
 			.unwrap();
 		let mut map = std::collections::BTreeMap::new();

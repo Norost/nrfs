@@ -1,11 +1,8 @@
-use std::cell::RefCell;
-
-use crate::ShareNrkv;
-
 use {
-	crate::Nrkv,
+	crate::{Nrkv, ShareNrkv},
 	alloc::vec,
 	core::{
+		cell::RefCell,
 		future::Future,
 		task::{Context, RawWaker, RawWakerVTable, Waker},
 	},
@@ -28,41 +25,18 @@ fn run(f: impl Future<Output = ()>) {
 	panic!("stuck");
 }
 
-struct ZeroRand;
-
-impl rand_core::RngCore for ZeroRand {
-	fn next_u32(&mut self) -> u32 {
-		0
-	}
-	fn next_u64(&mut self) -> u64 {
-		0
-	}
-	fn fill_bytes(&mut self, bytes: &mut [u8]) {
-		bytes.fill(0)
-	}
-	fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), rand_core::Error> {
-		bytes.fill(0);
-		Ok(())
-	}
-}
-
-impl rand_core::CryptoRng for ZeroRand {}
-
 fn mkstore() -> alloc::vec::Vec<u8> {
 	vec![0; 1 << 17]
 }
 
-#[test]
-fn init() {
-	run(async {
-		let _ = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
-	});
+async fn mkkv() -> Nrkv<Vec<u8>> {
+	Nrkv::init_with_key(mkstore(), [0; 16], 32).await.unwrap()
 }
 
 #[test]
 fn load() {
 	run(async {
-		let kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let kv = mkkv().await;
 		let sto = kv.save().await.unwrap();
 		let _ = Nrkv::load(sto).await.unwrap();
 	});
@@ -71,7 +45,7 @@ fn load() {
 #[test]
 fn insert_one() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		kv.insert(b"hello".into(), &[]).await.unwrap().unwrap();
 	});
 }
@@ -79,7 +53,7 @@ fn insert_one() {
 #[test]
 fn find_one() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		kv.insert(b"hello".into(), &[]).await.unwrap().unwrap();
 		kv.find(b"hello".into()).await.unwrap().unwrap();
 	});
@@ -88,7 +62,7 @@ fn find_one() {
 #[test]
 fn find_none() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		kv.insert(b"hello".into(), &[]).await.unwrap().unwrap();
 		assert!(kv.find(b"quack".into()).await.unwrap().is_none());
 	});
@@ -97,7 +71,7 @@ fn find_none() {
 #[test]
 fn insert_dup() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		kv.insert(b"hello".into(), &[]).await.unwrap().unwrap();
 		assert!(kv.insert(b"hello".into(), &[]).await.unwrap().is_none());
 	});
@@ -106,7 +80,7 @@ fn insert_dup() {
 #[test]
 fn insert_collide() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap();
 		kv.insert(b"RV".into(), &[]).await.unwrap().unwrap();
 	});
@@ -115,7 +89,7 @@ fn insert_collide() {
 #[test]
 fn insert_collide3() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap();
 		kv.insert(b"RV".into(), &[]).await.unwrap().unwrap();
 		kv.insert((&[167, 114]).into(), &[]).await.unwrap().unwrap();
@@ -125,7 +99,7 @@ fn insert_collide3() {
 #[test]
 fn insert_collide_dup() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap();
 		kv.insert(b"RV".into(), &[]).await.unwrap().unwrap();
 		assert!(kv.insert(b"RV".into(), &[]).await.unwrap().is_none());
@@ -135,7 +109,7 @@ fn insert_collide_dup() {
 #[test]
 fn find_collide() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap();
 		kv.insert(b"RV".into(), &[]).await.unwrap().unwrap();
 		kv.find((&[17, 4]).into()).await.unwrap().unwrap();
@@ -146,7 +120,7 @@ fn find_collide() {
 #[test]
 fn remove() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap();
 		kv.insert(b"RV".into(), &[]).await.unwrap().unwrap();
 		assert!(kv.remove((&[17, 4]).into()).await.unwrap());
@@ -160,7 +134,7 @@ fn remove() {
 #[test]
 fn next_batch() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 32).await.unwrap();
+		let mut kv = mkkv().await;
 		let tags = &RefCell::new([
 			Some(kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap()),
 			Some(kv.insert(b"RV".into(), &[]).await.unwrap().unwrap()),
@@ -192,7 +166,7 @@ fn next_batch() {
 #[test]
 fn user_data() {
 	run(async {
-		let mut kv = Nrkv::init(mkstore(), &mut ZeroRand, 16).await.unwrap();
+		let mut kv = mkkv().await;
 		let tag = kv.insert(b"hello".into(), &[]).await.unwrap().unwrap();
 		kv.write_user_data(tag, 4, b"I'm a sheep").await.unwrap();
 		let mut buf = [0; 16];
