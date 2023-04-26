@@ -102,24 +102,32 @@ impl<S: Store> Nrkv<S> {
 		let h = self.hash(key);
 		let next = |h, d| (h / u128::from(d), h % u128::from(d));
 		let (mut h, mut i) = next(h, HAMT_ROOT_LEN);
-		let Some(mut slot) = self.hamt_root_get(i as _).await? else {
-			let offt = self.add_item(key, data).await?;
-			self.hamt_root_set(i as _, offt.get()).await?;
+		let (mut slot_offt, slot) = self.hamt_root_get(i as _).await?;
+		let Some(mut slot) = slot else {
+			let offt = self.replace_item(None, key, data).await?;
+			self.hamt_set_entry(slot_offt, offt.get()).await?;
 			return Ok(Some(offt));
 		};
 
+		let mut replace = None;
 		loop {
 			let mut item = Item::new(self, slot);
-			if item.key_eq(key).await? {
-				return Ok(None);
+			match item.key_eq(key).await? {
+				None => {
+					replace.get_or_insert((slot_offt, slot));
+				}
+				Some(false) => {}
+				Some(true) => return Ok(None),
 			}
 			(h, i) = next(h, HAMT_CHILD_LEN);
-			let Some(s) = item.hamt_get(i as _).await? else {
-				let offt = item.kv.add_item(key, data).await?;
-				item.hamt_set(i as _, offt.get()).await?;
+			let (o, s) = item.hamt_get(i as _).await?;
+			let Some(s) = s else {
+				let (o, prev_slot) = replace.map_or((o, None), |(o, s)| (o, Some(s)));
+				let offt = item.kv.replace_item(prev_slot, key, data).await?;
+				self.hamt_set_entry(o, offt.get()).await?;
 				return Ok(Some(offt));
 			};
-			slot = s;
+			(slot_offt, slot) = (o, s);
 		}
 	}
 
@@ -127,15 +135,15 @@ impl<S: Store> Nrkv<S> {
 		let h = self.hash(key);
 		let next = |h, d| (h / u128::from(d), h % u128::from(d));
 		let (mut h, mut i) = next(h, HAMT_ROOT_LEN);
-		let mut slot = self.hamt_root_get(i as _).await?;
+		let (_, mut slot) = self.hamt_root_get(i as _).await?;
 
 		while let Some(item) = slot {
 			let mut item = Item::new(self, item);
-			if item.key_eq(key).await? {
+			if item.key_eq(key).await? == Some(true) {
 				return Ok(Some(item.offset));
 			}
 			(h, i) = next(h, HAMT_CHILD_LEN);
-			slot = item.hamt_get(i as _).await?;
+			(_, slot) = item.hamt_get(i as _).await?;
 		}
 		Ok(None)
 	}
@@ -147,24 +155,36 @@ impl<S: Store> Nrkv<S> {
 		Ok(true)
 	}
 
-	async fn hamt_root_get(&mut self, index: u16) -> Result<Option<Tag>, S::Error> {
+	async fn hamt_root_get(&mut self, index: u16) -> Result<(Tag, Option<Tag>), S::Error> {
 		debug_assert!(u64::from(index) < HAMT_ROOT_LEN);
 		let mut buf = [0; 8];
 		let offt = 64 + u64::from(index) * HAMT_ENTRY_SIZE;
-		self.store.read(offt, &mut buf[..6]).await?;
-		Ok(Tag::new(u64::from_le_bytes(buf)))
+		let offt = Tag::new(offt).unwrap();
+		self.store.read(offt.get(), &mut buf[..6]).await?;
+		Ok((offt, Tag::new(u64::from_le_bytes(buf))))
 	}
 
-	async fn hamt_root_set(&mut self, index: u16, value: u64) -> Result<(), S::Error> {
-		debug_assert!(u64::from(index) < HAMT_ROOT_LEN);
-		let offt = 64 + u64::from(index) * HAMT_ENTRY_SIZE;
-		self.store.write(offt, &value.to_le_bytes()[..6]).await
+	async fn hamt_set_entry(&mut self, offset: Tag, value: u64) -> Result<(), S::Error> {
+		assert!(value < 1 << 48);
+		self.store
+			.write(offset.get(), &value.to_le_bytes()[..6])
+			.await
 	}
 
-	async fn add_item(&mut self, key: &Key, data: &[u8]) -> Result<Tag, S::Error> {
+	async fn replace_item(
+		&mut self,
+		prev_slot: Option<Tag>,
+		key: &Key,
+		data: &[u8],
+	) -> Result<Tag, S::Error> {
 		assert!(data.len() <= usize::from(self.hdr.user_data_len));
 		let offt = self.alloc(self.item_len(key.len() as _).into()).await?;
 		let offt_user = offt.get() + u64::from(self.user_offset());
+		if let Some(prev_slot) = prev_slot {
+			let mut buf = [0; (HAMT_ENTRY_SIZE * HAMT_CHILD_LEN) as _];
+			self.store.read(prev_slot.get(), &mut buf).await?;
+			self.store.write(offt.get(), &mut buf).await?;
+		}
 		self.store.write(offt_user, data).await?;
 		let offt_key = offt.get() + u64::from(self.key_offset());
 		self.store.write(offt_key, &[key.len() as _]).await?;
@@ -282,7 +302,7 @@ impl<'a, S: Store> ShareNrkv<'a, S> {
 		F: FnMut(Tag) -> Fut,
 		Fut: Future<Output = Result<bool, S::Error>>,
 	{
-		let Some(root) = self.borrow_mut().hamt_root_get(state.root()).await?
+		let (_, Some(root)) = self.borrow_mut().hamt_root_get(state.root()).await?
 			else { return Ok(true) };
 
 		async fn rec<S: Store, F, Fut>(
@@ -305,7 +325,7 @@ impl<'a, S: Store> ShareNrkv<'a, S> {
 			for i in state.child(depth)..=15 {
 				let mut kv = slf.borrow_mut();
 				let mut item = Item::new(&mut kv, item);
-				if let Some(child) = item.hamt_get(i).await? {
+				if let (_, Some(child)) = item.hamt_get(i).await? {
 					fn box_fut<'a, T>(
 						f: impl Future<Output = T> + 'a,
 					) -> Pin<Box<dyn Future<Output = T> + 'a>> {
@@ -389,12 +409,14 @@ impl<'a, S> Item<'a, S> {
 }
 
 impl<'a, S: Store> Item<'a, S> {
-	async fn key_eq(&mut self, key: &Key) -> Result<bool, S::Error> {
+	async fn key_eq(&mut self, key: &Key) -> Result<Option<bool>, S::Error> {
 		let offt = self.offset.get() + u64::from(self.kv.key_offset());
 		let len = &mut [0];
 		self.kv.store.read(offt, len).await?;
-		if usize::from(len[0]) != key.len() {
-			return Ok(false);
+		if len[0] == 0 {
+			return Ok(None);
+		} else if usize::from(len[0]) != key.len() {
+			return Ok(Some(false));
 		}
 		let mut buf_stack = [0; 32];
 		let mut buf_heap = vec![];
@@ -403,21 +425,16 @@ impl<'a, S: Store> Item<'a, S> {
 			&mut buf_heap[..]
 		});
 		self.kv.store.read(offt + 1, buf).await?;
-		Ok(&buf[..key.len()] == &**key)
+		Ok(Some(&buf[..key.len()] == &**key))
 	}
 
-	async fn hamt_get(&mut self, index: u8) -> Result<Option<Tag>, S::Error> {
+	async fn hamt_get(&mut self, index: u8) -> Result<(Tag, Option<Tag>), S::Error> {
 		debug_assert!(index < 16);
 		let mut buf = [0; 8];
 		let offt = self.offset.get() + u64::from(index) * HAMT_ENTRY_SIZE;
-		self.kv.store.read(offt, &mut buf[..6]).await?;
-		Ok(Tag::new(u64::from_le_bytes(buf)))
-	}
-
-	async fn hamt_set(&mut self, index: u8, value: u64) -> Result<(), S::Error> {
-		debug_assert!(index < 16);
-		let offt = self.offset.get() + u64::from(index) * HAMT_ENTRY_SIZE;
-		self.kv.store.write(offt, &value.to_le_bytes()[..6]).await
+		let offt = Tag::new(offt).unwrap();
+		self.kv.store.read(offt.get(), &mut buf[..6]).await?;
+		Ok((offt, Tag::new(u64::from_le_bytes(buf))))
 	}
 }
 

@@ -198,3 +198,27 @@ fn next_batch_child_step_reset() {
 		assert!(y.get().is_none());
 	});
 }
+
+#[test]
+fn reinsert_many_find_with_next() {
+	run(async {
+		let mut kv = mkkv().await;
+		for _ in 0..32 {
+			kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
+			assert!(kv.remove(b"\0".into()).await.unwrap());
+		}
+		let tag = kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
+		let t = &Cell::new(Some(tag));
+		let mut state = Default::default();
+		let kv = &ShareNrkv::new(&mut kv);
+		kv.next_batch(&mut state, |tag| async move {
+			if kv.borrow_mut().read_key(tag, &mut []).await? != 0 {
+				assert_eq!(t.take().unwrap(), tag);
+			}
+			Ok(true)
+		})
+		.await
+		.unwrap();
+		assert!(t.get().is_none());
+	});
+}
