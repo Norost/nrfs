@@ -37,17 +37,17 @@ pub trait Store {
 		&mut self,
 		offset: u64,
 		buf: &mut [u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>>;
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>>;
 	fn write(
 		&mut self,
 		offset: u64,
 		data: &[u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>>;
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>>;
 	fn write_zeros(
 		&mut self,
 		offset: u64,
 		len: u64,
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>>;
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>>;
 	fn len(&self) -> u64;
 }
 
@@ -213,24 +213,24 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		Item::new(self, tag).read_key(buf).await
 	}
 
-	pub fn read_user_data(
+	pub async fn read_user_data(
 		&mut self,
 		tag: Tag,
 		offset: u16,
 		buf: &mut [u8],
-	) -> impl Future<Output = Result<(), S::Error>> {
+	) -> Result<(), S::Error> {
 		assert!(usize::from(offset) + buf.len() <= usize::from(self.conf.item_offset()));
-		Item::new(self, tag).read_user(offset, buf)
+		Item::new(self, tag).read_user(offset, buf).await
 	}
 
-	pub fn write_user_data(
+	pub async fn write_user_data(
 		&mut self,
 		tag: Tag,
 		offset: u16,
 		data: &[u8],
-	) -> impl Future<Output = Result<(), S::Error>> {
+	) -> Result<(), S::Error> {
 		assert!(usize::from(offset) + data.len() <= usize::from(self.conf.item_offset()));
-		Item::new(self, tag).write_user(offset, data)
+		Item::new(self, tag).write_user(offset, data).await
 	}
 
 	pub async fn alloc(&mut self, amount: u64) -> Result<Tag, S::Error> {
@@ -249,7 +249,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		&mut self,
 		offset: u64,
 		buf: &mut [u8],
-	) -> impl Future<Output = Result<(), S::Error>> {
+	) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.store.read(offset, buf)
 	}
 
@@ -257,7 +257,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		&mut self,
 		offset: u64,
 		data: &[u8],
-	) -> impl Future<Output = Result<(), S::Error>> {
+	) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.store.write(offset, data)
 	}
 
@@ -265,7 +265,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		&mut self,
 		offset: u64,
 		len: u64,
-	) -> impl Future<Output = Result<(), S::Error>> {
+	) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.store.write_zeros(offset, len)
 	}
 }
@@ -435,11 +435,15 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 		self.hamt_offset() + HAMT_CHILD_LEN * HAMT_ENTRY_SIZE
 	}
 
-	fn read(&mut self, offt: u64, buf: &mut [u8]) -> impl Future<Output = Result<(), S::Error>> {
+	fn read(
+		&mut self,
+		offt: u64,
+		buf: &mut [u8],
+	) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.kv.read(self.offset.get() + offt, buf)
 	}
 
-	fn write(&mut self, offt: u64, data: &[u8]) -> impl Future<Output = Result<(), S::Error>> {
+	fn write(&mut self, offt: u64, data: &[u8]) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.kv.write(self.offset.get() + offt, data)
 	}
 
@@ -447,7 +451,7 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 		&mut self,
 		offset: u16,
 		buf: &mut [u8],
-	) -> impl Future<Output = Result<(), S::Error>> {
+	) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.read(offset.into(), buf)
 	}
 
@@ -455,21 +459,21 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 		&mut self,
 		offset: u16,
 		data: &[u8],
-	) -> impl Future<Output = Result<(), S::Error>> {
+	) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.write(offset.into(), data)
 	}
 
 	fn read_hamt(
 		&mut self,
 		buf: &mut [u8; (HAMT_CHILD_LEN * HAMT_ENTRY_SIZE) as _],
-	) -> impl Future<Output = Result<(), S::Error>> {
+	) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.read(self.hamt_offset(), buf)
 	}
 
 	fn write_hamt(
 		&mut self,
 		data: &[u8; (HAMT_CHILD_LEN * HAMT_ENTRY_SIZE) as _],
-	) -> impl Future<Output = Result<(), S::Error>> {
+	) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.write(self.hamt_offset(), data)
 	}
 
@@ -486,7 +490,7 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 		self.write(self.key_offset() + 1, key).await
 	}
 
-	fn erase_key(&mut self) -> impl Future<Output = Result<(), S::Error>> {
+	fn erase_key(&mut self) -> impl Future<Output = Result<(), S::Error>> + '_ {
 		self.write(self.key_offset(), &[0])
 	}
 }
@@ -498,7 +502,7 @@ impl Store for [u8] {
 		&mut self,
 		offset: u64,
 		buf: &mut [u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
 		let b = offset
 			.try_into()
 			.ok()
@@ -512,7 +516,7 @@ impl Store for [u8] {
 		&mut self,
 		offset: u64,
 		data: &[u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
 		offset
 			.try_into()
 			.ok()
@@ -526,7 +530,7 @@ impl Store for [u8] {
 		&mut self,
 		offset: u64,
 		len: u64,
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
 		let f = |n: u64| n.try_into().ok();
 		f(offset)
 			.and_then(|s| offset.checked_add(len).and_then(f).map(|e| s..e))
@@ -550,21 +554,21 @@ macro_rules! store_slice {
 				&mut self,
 				offset: u64,
 				buf: &mut [u8],
-			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
 				<[u8] as Store>::read(self, offset, buf)
 			}
 			fn write(
 				&mut self,
 				offset: u64,
 				data: &[u8],
-			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
 				<[u8] as Store>::write(self, offset, data)
 			}
 			fn write_zeros(
 				&mut self,
 				offset: u64,
 				len: u64,
-			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>>>> {
+			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
 				<[u8] as Store>::write_zeros(self, offset, len)
 			}
 			fn len(&self) -> u64 {
