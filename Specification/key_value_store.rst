@@ -14,17 +14,17 @@ Features
 Data structures
 ---------------
 
+The header is offset by a user-configurable amount of bytes.
+
 .. table:: Header
 
   ====== ====== =====
   Offset Length Field
   ====== ====== =====
        0     16 Hash key
-      16      8 Used
-      24      8 Free head
-      32      1 Entry user data length
-      40     24 User data
-      64 6*4096 HAMT root
+      16      6 Used
+      22      6 Free head
+      28 6*4096 HAMT root
   ====== ====== =====
 
 .. table:: HAMT entry
@@ -35,13 +35,14 @@ Data structures
        0      6 Offset
   ====== ====== =====
 
+Item data is offset by a user-configurable amount of bytes.
+
 .. table:: Item
 
-  ======== ====== =====
-  Offset   Length Field
-  ======== ====== =====
-         0   6*16 HAMT table
-      8*16      D User data
-    8*16+D      1 Name length
-  8*16+D+1      N Name
-  ======== ====== =====
+  ====== ====== =====
+  Offset Length Field
+  ====== ====== =====
+       0   6*16 HAMT table
+    8*16      1 Name length
+  1+8*16      N Name
+  ====== ====== =====

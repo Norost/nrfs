@@ -28,25 +28,41 @@ fn run(f: impl Future<Output = ()>) {
 	panic!("stuck");
 }
 
+#[derive(Clone, Copy, Debug, Arbitrary)]
+struct MiniConf {
+	header_offset: u16,
+	item_offset: u16,
+}
+
+impl nrkv::Conf for MiniConf {
+	fn header_offset(&self) -> u64 {
+		self.header_offset.into()
+	}
+	fn item_offset(&self) -> u16 {
+		self.item_offset.into()
+	}
+}
+
 #[derive(Debug, Arbitrary)]
 pub struct Test<'a> {
+	conf: MiniConf,
 	ops: Vec<Op<'a>>,
 }
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum Op<'a> {
-	Add { key: &'a Key, data: [u8; 16] },
+	Add { key: &'a Key, data: &'a [u8] },
 	Find { key: &'a Key },
 	Remove { key: &'a Key },
 	Get { tag_idx: u16 },
-	Set { tag_idx: u16, data: [u8; 16] },
+	Set { tag_idx: u16, data: &'a [u8] },
 	Iter { break_at: u16 },
 	Reload,
 }
 
 impl<'a> Test<'a> {
 	async fn run(self) {
-		let mut kv = Nrkv::init_with_key(vec![0; 1 << 20], [0; 16], 16)
+		let mut kv = Nrkv::init_with_key(vec![0; 1 << 28], self.conf, [0; 16])
 			.await
 			.unwrap();
 		let mut map = std::collections::BTreeMap::new();
@@ -55,9 +71,12 @@ impl<'a> Test<'a> {
 		for op in self.ops {
 			match op {
 				Op::Add { key, data } => {
+					let data = data.get(..self.conf.item_offset.into()).unwrap_or(data);
 					if let Some(tag) = kv.insert(key, &data).await.unwrap() {
 						let prev = map.insert(key, tag);
 						assert!(prev.is_none(), "key was already present");
+						let mut data = data.to_vec();
+						data.resize(self.conf.item_offset.into(), 0);
 						let prev = dat.insert(tag, data);
 						assert!(prev.is_none(), "tag reused");
 						tags.push(tag);
@@ -86,17 +105,18 @@ impl<'a> Test<'a> {
 						continue;
 					}
 					let tag = tags[usize::from(tag_idx) % tags.len()];
-					let mut buf = [0; 16];
+					let mut buf = vec![0; self.conf.item_offset.into()];
 					kv.read_user_data(tag, 0, &mut buf).await.unwrap();
 					assert_eq!(*dat.get(&tag).expect("invalid tag"), buf);
 				}
 				Op::Set { tag_idx, data } => {
+					let data = data.get(..self.conf.item_offset.into()).unwrap_or(data);
 					if tags.is_empty() {
 						continue;
 					}
 					let tag = tags[usize::from(tag_idx) % tags.len()];
 					kv.write_user_data(tag, 0, &data).await.unwrap();
-					*dat.get_mut(&tag).expect("invalid tag") = data;
+					dat.get_mut(&tag).expect("invalid tag")[..data.len()].copy_from_slice(data);
 				}
 				Op::Iter { break_at } => {
 					let live = &core::cell::RefCell::new(
@@ -127,8 +147,9 @@ impl<'a> Test<'a> {
 					assert!(live.borrow().is_empty(), "not all live tags visited");
 				}
 				Op::Reload => {
-					let store = kv.save().await.unwrap();
-					kv = Nrkv::load(store).await.unwrap();
+					kv.save().await.unwrap();
+					let (store, conf) = kv.into_inner();
+					kv = Nrkv::load(store, conf).await.unwrap();
 				}
 			}
 		}

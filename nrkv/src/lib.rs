@@ -23,12 +23,12 @@ use {
 	std::{rc::Rc, sync::Arc},
 };
 
-const HEADER_SIZE: u64 = 64;
+const HEADER_SIZE: u64 = 28;
 const HAMT_ENTRY_SIZE: u64 = 6;
 const HAMT_ROOT_LEN: u64 = 4096;
 const HAMT_CHILD_LEN: u64 = 16;
 
-type Tag = core::num::NonZeroU64;
+pub type Tag = core::num::NonZeroU64;
 
 pub trait Store {
 	type Error;
@@ -51,51 +51,55 @@ pub trait Store {
 	fn len(&self) -> u64;
 }
 
-pub struct Nrkv<S> {
-	hdr: Header,
-	store: S,
+pub trait Conf {
+	fn header_offset(&self) -> u64;
+	fn item_offset(&self) -> u16;
 }
 
-impl<S: Store> Nrkv<S> {
+pub struct Nrkv<S, C> {
+	hdr: Header,
+	store: S,
+	conf: C,
+}
+
+impl<S, C> Nrkv<S, C> {
+	pub fn into_inner(self) -> (S, C) {
+		(self.store, self.conf)
+	}
+}
+
+impl<S: Store, C: Conf> Nrkv<S, C> {
 	#[must_use]
-	pub async fn init<R>(store: S, random: &mut R, user_data_len: u8) -> Result<Self, S::Error>
+	pub async fn init<R>(store: S, conf: C, random: &mut R) -> Result<Self, S::Error>
 	where
 		R: RngCore + CryptoRng,
 	{
 		let mut hash_key = [0; 16];
 		random.fill_bytes(&mut hash_key);
-		Self::init_with_key(store, hash_key, user_data_len).await
+		Self::init_with_key(store, conf, hash_key).await
 	}
 
 	#[must_use]
-	pub async fn init_with_key(
-		store: S,
-		hash_key: [u8; 16],
-		user_data_len: u8,
-	) -> Result<Self, S::Error> {
-		let hdr = || Header {
-			hash_key,
-			used: HEADER_SIZE + HAMT_ENTRY_SIZE * HAMT_ROOT_LEN,
-			free_head: HEADER_SIZE + HAMT_ENTRY_SIZE * HAMT_ROOT_LEN,
-			user_data_len,
-			_reserved: [0; 7],
-			user_data: [0; 24],
-		};
-		let store = Self { hdr: hdr(), store }.save().await?;
-		Ok(Self { hdr: hdr(), store })
+	pub async fn init_with_key(store: S, conf: C, hash_key: [u8; 16]) -> Result<Self, S::Error> {
+		let used = conf.header_offset() + HEADER_SIZE + HAMT_ENTRY_SIZE * HAMT_ROOT_LEN;
+		let hdr = Header { hash_key, used: u64_to_u48(used), free_head: u64_to_u48(used) };
+		let mut slf = Self { hdr, store, conf };
+		slf.save().await?;
+		Ok(slf)
 	}
 
 	#[must_use]
-	pub async fn load(mut store: S) -> Result<Self, S::Error> {
+	pub async fn load(mut store: S, conf: C) -> Result<Self, S::Error> {
 		let mut hdr = [0; _];
-		store.read(0, &mut hdr).await?;
+		store.read(conf.header_offset(), &mut hdr).await?;
 		let hdr = Header::from_raw(&hdr);
-		Ok(Self { hdr, store })
+		Ok(Self { hdr, store, conf })
 	}
 
-	pub async fn save(mut self) -> Result<S, S::Error> {
-		self.store.write(0, &self.hdr.to_raw()).await?;
-		Ok(self.store)
+	pub async fn save(&mut self) -> Result<(), S::Error> {
+		self.store
+			.write(self.conf.header_offset(), &self.hdr.to_raw())
+			.await
 	}
 
 	pub async fn insert(&mut self, key: &Key, data: &[u8]) -> Result<Option<Tag>, S::Error> {
@@ -150,15 +154,14 @@ impl<S: Store> Nrkv<S> {
 
 	pub async fn remove(&mut self, key: &Key) -> Result<bool, S::Error> {
 		let Some(tag) = self.find(key).await? else { return Ok(false) };
-		let offt = tag.get() + u64::from(self.key_offset());
-		self.store.write(offt, &[0]).await?;
+		Item::new(self, tag).erase_key().await?;
 		Ok(true)
 	}
 
 	async fn hamt_root_get(&mut self, index: u16) -> Result<(Tag, Option<Tag>), S::Error> {
 		debug_assert!(u64::from(index) < HAMT_ROOT_LEN);
 		let mut buf = [0; 8];
-		let offt = 64 + u64::from(index) * HAMT_ENTRY_SIZE;
+		let offt = self.conf.header_offset() + HEADER_SIZE + u64::from(index) * HAMT_ENTRY_SIZE;
 		let offt = Tag::new(offt).unwrap();
 		self.store.read(offt.get(), &mut buf[..6]).await?;
 		Ok((offt, Tag::new(u64::from_le_bytes(buf))))
@@ -177,31 +180,26 @@ impl<S: Store> Nrkv<S> {
 		key: &Key,
 		data: &[u8],
 	) -> Result<Tag, S::Error> {
-		assert!(data.len() <= usize::from(self.hdr.user_data_len));
-		let offt = self.alloc(self.item_len(key.len() as _).into()).await?;
-		let offt_user = offt.get() + u64::from(self.user_offset());
+		assert!(data.len() <= usize::from(self.conf.item_offset()));
+		let offt = self.alloc(self.item_len(key.len_u8())).await?;
+
+		Item::new(self, offt).write_user(0, data).await?;
+
 		if let Some(prev_slot) = prev_slot {
-			let mut buf = [0; (HAMT_ENTRY_SIZE * HAMT_CHILD_LEN) as _];
-			self.store.read(prev_slot.get(), &mut buf).await?;
-			self.store.write(offt.get(), &mut buf).await?;
+			let mut buf = [0; _];
+			Item::new(self, prev_slot).read_hamt(&mut buf).await?;
+			Item::new(self, offt).write_hamt(&buf).await?;
 		}
-		self.store.write(offt_user, data).await?;
-		let offt_key = offt.get() + u64::from(self.key_offset());
-		self.store.write(offt_key, &[key.len() as _]).await?;
-		self.store.write(offt_key + 1, key).await?;
+
+		Item::new(self, offt).write_key(key).await?;
+
 		Ok(offt)
 	}
 
-	fn user_offset(&self) -> u16 {
-		u16::try_from(HAMT_ENTRY_SIZE * HAMT_CHILD_LEN).unwrap()
-	}
-
-	fn key_offset(&self) -> u16 {
-		self.user_offset() + u16::from(self.hdr.user_data_len)
-	}
-
-	fn item_len(&self, key_len: u8) -> u16 {
-		self.key_offset() + 1 + u16::from(key_len)
+	fn item_len(&self, key_len: u8) -> u64 {
+		u64::from(self.conf.item_offset())
+			+ (HAMT_CHILD_LEN * HAMT_ENTRY_SIZE)
+			+ (1 + u64::from(key_len))
 	}
 
 	fn hash(&self, key: &Key) -> u128 {
@@ -214,71 +212,72 @@ impl<S: Store> Nrkv<S> {
 		self.hdr.hash_key
 	}
 
-	pub fn user_data(&self) -> &[u8; 24] {
-		&self.hdr.user_data
-	}
-
-	pub fn user_data_mut(&mut self) -> &mut [u8; 24] {
-		&mut self.hdr.user_data
-	}
-
 	pub async fn read_key(&mut self, tag: Tag, buf: &mut [u8]) -> Result<u8, S::Error> {
-		let len = &mut [0];
-		let offt = tag.get() + u64::from(self.key_offset());
-		self.store.read(offt, len).await?;
-		let l = buf.len().min(usize::from(len[0]));
-		self.store.read(offt + 1, &mut buf[..l]);
-		Ok(len[0])
+		Item::new(self, tag).read_key(buf).await
 	}
 
-	pub async fn read_user_data(
+	pub fn read_user_data(
 		&mut self,
 		tag: Tag,
-		offset: u8,
+		offset: u16,
 		buf: &mut [u8],
-	) -> Result<(), S::Error> {
-		assert!(usize::from(offset) + buf.len() <= usize::from(self.hdr.user_data_len));
-		let offt = tag.get() + HAMT_CHILD_LEN * HAMT_ENTRY_SIZE + u64::from(offset);
-		self.store.read(offt, buf).await
+	) -> impl Future<Output = Result<(), S::Error>> {
+		assert!(usize::from(offset) + buf.len() <= usize::from(self.conf.item_offset()));
+		Item::new(self, tag).read_user(offset, buf)
 	}
 
-	pub async fn write_user_data(
+	pub fn write_user_data(
 		&mut self,
 		tag: Tag,
-		offset: u8,
+		offset: u16,
 		data: &[u8],
-	) -> Result<(), S::Error> {
-		assert!(usize::from(offset) + data.len() <= usize::from(self.hdr.user_data_len));
-		let offt = tag.get() + HAMT_CHILD_LEN * HAMT_ENTRY_SIZE + u64::from(offset);
-		self.store.write(offt, data).await
+	) -> impl Future<Output = Result<(), S::Error>> {
+		assert!(usize::from(offset) + data.len() <= usize::from(self.conf.item_offset()));
+		Item::new(self, tag).write_user(offset, data)
 	}
 
 	pub async fn alloc(&mut self, amount: u64) -> Result<Tag, S::Error> {
-		let offt = Tag::new(self.hdr.free_head).unwrap();
-		self.hdr.free_head += u64::from(amount);
+		let offt = Tag::new(u48_to_u64(self.hdr.free_head)).unwrap();
+		apply_u48(&mut self.hdr.free_head, |n| n + u64::from(amount));
 		Ok(offt)
 	}
 
 	pub async fn dealloc(&mut self, offset: u64, amount: u64) -> Result<(), S::Error> {
-		self.hdr.used -= amount;
+		apply_u48(&mut self.hdr.used, |n| n - amount);
 		self.store.write_zeros(offset, amount).await?;
 		Ok(())
 	}
+
+	pub fn read(
+		&mut self,
+		offset: Tag,
+		buf: &mut [u8],
+	) -> impl Future<Output = Result<(), S::Error>> {
+		self.store.read(offset.get(), buf)
+	}
+
+	pub fn write(
+		&mut self,
+		offset: Tag,
+		data: &[u8],
+	) -> impl Future<Output = Result<(), S::Error>> {
+		self.store.write(offset.get(), data)
+	}
 }
 
-pub struct ShareNrkv<'a, S>(RefCell<&'a mut Nrkv<S>>);
+pub struct ShareNrkv<'a, S, C>(RefCell<&'a mut Nrkv<S, C>>);
 
-impl<'a, S> ShareNrkv<'a, S> {
-	pub fn new(kv: &'a mut Nrkv<S>) -> Self {
+impl<'a, S, C> ShareNrkv<'a, S, C> {
+	pub fn new(kv: &'a mut Nrkv<S, C>) -> Self {
 		Self(RefCell::new(kv))
 	}
 
-	pub fn borrow_mut(&self) -> RefMut<Nrkv<S>> {
+	pub fn borrow_mut(&self) -> RefMut<Nrkv<S, C>> {
 		RefMut::map(self.0.borrow_mut(), |b| *b)
 	}
 }
 
-impl<'a, S: Store> ShareNrkv<'a, S> {
+impl<'a, S: Store, C: Conf> ShareNrkv<'a, S, C> {
 	pub async fn next_batch<F, Fut>(&self, state: &mut IterState, mut f: F) -> Result<(), S::Error>
 	where
 		F: FnMut(Tag) -> Fut,
@@ -305,8 +304,8 @@ impl<'a, S: Store> ShareNrkv<'a, S> {
 		let (_, Some(root)) = self.borrow_mut().hamt_root_get(state.root()).await?
 			else { return Ok(true) };
 
-		async fn rec<S: Store, F, Fut>(
-			slf: &ShareNrkv<'_, S>,
+		async fn rec<S: Store, C: Conf, F, Fut>(
+			slf: &ShareNrkv<'_, S, C>,
 			item: Tag,
 			depth: u8,
 			state: &mut IterState,
@@ -350,33 +349,27 @@ impl<'a, S: Store> ShareNrkv<'a, S> {
 #[repr(C)]
 struct Header {
 	hash_key: [u8; 16],
-	used: u64,
-	free_head: u64,
-	user_data_len: u8,
-	_reserved: [u8; 7],
-	user_data: [u8; 24],
+	used: [u8; 6],
+	free_head: [u8; 6],
 }
 
 impl Header {
-	fn to_raw(&self) -> [u8; 64] {
+	fn to_raw(&self) -> [u8; HEADER_SIZE as _] {
 		fn f<const N: usize>(s: &mut [u8], v: [u8; N]) -> &mut [u8] {
 			let (x, y) = s.split_array_mut::<N>();
 			*x = v;
 			y
 		}
 
-		let mut buf = [0; 64];
+		let mut buf = [0; _];
 		let b = f(&mut buf, self.hash_key);
-		let b = f(b, self.used.to_le_bytes());
-		let b = f(b, self.free_head.to_le_bytes());
-		let b = f(b, self.user_data_len.to_le_bytes());
-		let b = f(b, self._reserved);
-		let b = f(b, self.user_data);
+		let b = f(b, self.used);
+		let b = f(b, self.free_head);
 		assert!(b.is_empty());
 		buf
 	}
 
-	fn from_raw(raw: &[u8; 64]) -> Self {
+	fn from_raw(raw: &[u8; HEADER_SIZE as _]) -> Self {
 		fn f<const N: usize>(s: &mut &[u8]) -> [u8; N] {
 			let (x, y) = s.split_array_ref::<N>();
 			*s = y;
@@ -384,35 +377,27 @@ impl Header {
 		}
 
 		let mut raw = &raw[..];
-		let s = Self {
-			hash_key: f(&mut raw),
-			used: u64::from_le_bytes(f(&mut raw)),
-			free_head: u64::from_le_bytes(f(&mut raw)),
-			user_data_len: u8::from_le_bytes(f(&mut raw)),
-			_reserved: f(&mut raw),
-			user_data: f(&mut raw),
-		};
+		let s = Self { hash_key: f(&mut raw), used: f(&mut raw), free_head: f(&mut raw) };
 		assert!(raw.is_empty());
 		s
 	}
 }
 
-struct Item<'a, S> {
-	kv: &'a mut Nrkv<S>,
+struct Item<'a, S, C> {
+	kv: &'a mut Nrkv<S, C>,
 	offset: Tag,
 }
 
-impl<'a, S> Item<'a, S> {
-	fn new(kv: &'a mut Nrkv<S>, offset: Tag) -> Self {
+impl<'a, S, C> Item<'a, S, C> {
+	fn new(kv: &'a mut Nrkv<S, C>, offset: Tag) -> Self {
 		Self { kv, offset }
 	}
 }
 
-impl<'a, S: Store> Item<'a, S> {
+impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 	async fn key_eq(&mut self, key: &Key) -> Result<Option<bool>, S::Error> {
-		let offt = self.offset.get() + u64::from(self.kv.key_offset());
 		let len = &mut [0];
-		self.kv.store.read(offt, len).await?;
+		self.read(self.key_offset(), len).await?;
 		if len[0] == 0 {
 			return Ok(None);
 		} else if usize::from(len[0]) != key.len() {
@@ -424,17 +409,80 @@ impl<'a, S: Store> Item<'a, S> {
 			buf_heap.resize(key.len(), 0);
 			&mut buf_heap[..]
 		});
-		self.kv.store.read(offt + 1, buf).await?;
+		self.read(self.key_offset() + 1, buf).await?;
 		Ok(Some(&buf[..key.len()] == &**key))
 	}
 
 	async fn hamt_get(&mut self, index: u8) -> Result<(Tag, Option<Tag>), S::Error> {
-		debug_assert!(index < 16);
-		let mut buf = [0; 8];
-		let offt = self.offset.get() + u64::from(index) * HAMT_ENTRY_SIZE;
+		debug_assert!(u64::from(index) < HAMT_CHILD_LEN);
+		let offt = self.offset.get() + self.hamt_offset() + u64::from(index) * HAMT_ENTRY_SIZE;
 		let offt = Tag::new(offt).unwrap();
+		let mut buf = [0; 8];
 		self.kv.store.read(offt.get(), &mut buf[..6]).await?;
 		Ok((offt, Tag::new(u64::from_le_bytes(buf))))
+	}
+
+	fn hamt_offset(&self) -> u64 {
+		u64::from(self.kv.conf.item_offset())
+	}
+
+	fn key_offset(&self) -> u64 {
+		self.hamt_offset() + HAMT_CHILD_LEN * HAMT_ENTRY_SIZE
+	}
+
+	fn read(&mut self, offt: u64, buf: &mut [u8]) -> impl Future<Output = Result<(), S::Error>> {
+		self.kv.store.read(self.offset.get() + offt, buf)
+	}
+
+	fn write(&mut self, offt: u64, data: &[u8]) -> impl Future<Output = Result<(), S::Error>> {
+		self.kv.store.write(self.offset.get() + offt, data)
+	}
+
+	fn read_user(
+		&mut self,
+		offset: u16,
+		buf: &mut [u8],
+	) -> impl Future<Output = Result<(), S::Error>> {
+		self.read(offset.into(), buf)
+	}
+
+	fn write_user(
+		&mut self,
+		offset: u16,
+		data: &[u8],
+	) -> impl Future<Output = Result<(), S::Error>> {
+		self.write(offset.into(), data)
+	}
+
+	fn read_hamt(
+		&mut self,
+		buf: &mut [u8; (HAMT_CHILD_LEN * HAMT_ENTRY_SIZE) as _],
+	) -> impl Future<Output = Result<(), S::Error>> {
+		self.read(self.hamt_offset(), buf)
+	}
+
+	fn write_hamt(
+		&mut self,
+		data: &[u8; (HAMT_CHILD_LEN * HAMT_ENTRY_SIZE) as _],
+	) -> impl Future<Output = Result<(), S::Error>> {
+		self.write(self.hamt_offset(), data)
+	}
+
+	async fn read_key(&mut self, buf: &mut [u8]) -> Result<u8, S::Error> {
+		let len = &mut [0];
+		self.read(self.key_offset(), len).await?;
+		let l = buf.len().min(usize::from(len[0]));
+		self.read(self.key_offset() + 1, &mut buf[..l]).await?;
+		Ok(len[0])
+	}
+
+	async fn write_key(&mut self, key: &Key) -> Result<(), S::Error> {
+		self.write(self.key_offset(), &[key.len_u8()]).await?;
+		self.write(self.key_offset() + 1, key).await
+	}
+
+	fn erase_key(&mut self) -> impl Future<Output = Result<(), S::Error>> {
+		self.write(self.key_offset(), &[0])
 	}
 }
 
@@ -524,6 +572,35 @@ macro_rules! store_slice {
 store_slice!(Box<[u8]>);
 #[cfg(feature = "alloc")]
 store_slice!(Vec<u8>);
+
+#[derive(Debug)]
+pub struct DynConf {
+	pub header_offset: u64,
+	pub item_offset: u16,
+}
+
+impl Conf for DynConf {
+	fn header_offset(&self) -> u64 {
+		self.header_offset
+	}
+	fn item_offset(&self) -> u16 {
+		self.item_offset
+	}
+}
+
+#[derive(Debug)]
+pub struct StaticConf<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16>;
+
+impl<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16> Conf
+	for StaticConf<HEADER_OFFSET, ITEM_OFFSET>
+{
+	fn header_offset(&self) -> u64 {
+		HEADER_OFFSET
+	}
+	fn item_offset(&self) -> u16 {
+		ITEM_OFFSET
+	}
+}
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -755,4 +832,18 @@ impl fmt::Debug for IterState {
 			.field("children", &format_args!("{:016x}", self.children))
 			.finish()
 	}
+}
+
+fn u64_to_u48(n: u64) -> [u8; 6] {
+	n.to_le_bytes()[..6].try_into().unwrap()
+}
+
+fn u48_to_u64(n: [u8; 6]) -> u64 {
+	let mut b = [0; 8];
+	b[..6].copy_from_slice(&n);
+	u64::from_le_bytes(b)
+}
+
+fn apply_u48(n: &mut [u8; 6], f: impl FnOnce(u64) -> u64) {
+	*n = u64_to_u48(f(u48_to_u64(*n)));
 }

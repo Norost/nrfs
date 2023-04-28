@@ -1,3 +1,5 @@
+use crate::StaticConf;
+
 use {
 	crate::{Nrkv, ShareNrkv},
 	alloc::vec,
@@ -29,16 +31,19 @@ fn mkstore() -> alloc::vec::Vec<u8> {
 	vec![0; 1 << 17]
 }
 
-async fn mkkv() -> Nrkv<Vec<u8>> {
-	Nrkv::init_with_key(mkstore(), [0; 16], 32).await.unwrap()
+async fn mkkv() -> Nrkv<Vec<u8>, StaticConf<64, 32>> {
+	Nrkv::init_with_key(mkstore(), StaticConf, [0; 16])
+		.await
+		.unwrap()
 }
 
 #[test]
 fn load() {
 	run(async {
-		let kv = mkkv().await;
-		let sto = kv.save().await.unwrap();
-		let _ = Nrkv::load(sto).await.unwrap();
+		let mut kv = mkkv().await;
+		kv.save().await.unwrap();
+		let (sto, conf) = kv.into_inner();
+		let _ = Nrkv::load(sto, conf).await.unwrap();
 	});
 }
 
