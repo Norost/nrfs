@@ -97,8 +97,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 	}
 
 	pub async fn save(&mut self) -> Result<(), S::Error> {
-		self.store
-			.write(self.conf.header_offset(), &self.hdr.to_raw())
+		self.write(self.conf.header_offset(), &self.hdr.to_raw())
 			.await
 	}
 
@@ -163,15 +162,13 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		let mut buf = [0; 8];
 		let offt = self.conf.header_offset() + HEADER_SIZE + u64::from(index) * HAMT_ENTRY_SIZE;
 		let offt = Tag::new(offt).unwrap();
-		self.store.read(offt.get(), &mut buf[..6]).await?;
+		self.read(offt.get(), &mut buf[..6]).await?;
 		Ok((offt, Tag::new(u64::from_le_bytes(buf))))
 	}
 
 	async fn hamt_set_entry(&mut self, offset: Tag, value: u64) -> Result<(), S::Error> {
 		assert!(value < 1 << 48);
-		self.store
-			.write(offset.get(), &value.to_le_bytes()[..6])
-			.await
+		self.write(offset.get(), &value.to_le_bytes()[..6]).await
 	}
 
 	async fn replace_item(
@@ -244,24 +241,32 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 
 	pub async fn dealloc(&mut self, offset: u64, amount: u64) -> Result<(), S::Error> {
 		apply_u48(&mut self.hdr.used, |n| n - amount);
-		self.store.write_zeros(offset, amount).await?;
+		self.write_zeros(offset, amount).await?;
 		Ok(())
 	}
 
 	pub fn read(
 		&mut self,
-		offset: Tag,
+		offset: u64,
 		buf: &mut [u8],
 	) -> impl Future<Output = Result<(), S::Error>> {
-		self.store.read(offset.get(), buf)
+		self.store.read(offset, buf)
 	}
 
 	pub fn write(
 		&mut self,
-		offset: Tag,
+		offset: u64,
 		data: &[u8],
 	) -> impl Future<Output = Result<(), S::Error>> {
-		self.store.write(offset.get(), data)
+		self.store.write(offset, data)
+	}
+
+	pub fn write_zeros(
+		&mut self,
+		offset: u64,
+		len: u64,
+	) -> impl Future<Output = Result<(), S::Error>> {
+		self.store.write_zeros(offset, len)
 	}
 }
 
@@ -418,7 +423,7 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 		let offt = self.offset.get() + self.hamt_offset() + u64::from(index) * HAMT_ENTRY_SIZE;
 		let offt = Tag::new(offt).unwrap();
 		let mut buf = [0; 8];
-		self.kv.store.read(offt.get(), &mut buf[..6]).await?;
+		self.kv.read(offt.get(), &mut buf[..6]).await?;
 		Ok((offt, Tag::new(u64::from_le_bytes(buf))))
 	}
 
@@ -431,11 +436,11 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 	}
 
 	fn read(&mut self, offt: u64, buf: &mut [u8]) -> impl Future<Output = Result<(), S::Error>> {
-		self.kv.store.read(self.offset.get() + offt, buf)
+		self.kv.read(self.offset.get() + offt, buf)
 	}
 
 	fn write(&mut self, offt: u64, data: &[u8]) -> impl Future<Output = Result<(), S::Error>> {
-		self.kv.store.write(self.offset.get() + offt, data)
+		self.kv.write(self.offset.get() + offt, data)
 	}
 
 	fn read_user(
