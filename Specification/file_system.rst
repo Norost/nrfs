@@ -57,12 +57,11 @@ The filesystem header contains:
 
 .. table:: Filesystem header
 
-  ====== =====
-  Offset Field
-  ====== =====
-       0 Root directory item data
-      16 Extensions
-  ====== =====
+  ====== ====== =====
+  Offset Length Field
+  ====== ====== =====
+       0     16 Root directory item data
+  ====== ====== =====
 
 
 Embedded data
@@ -75,157 +74,154 @@ data can be placed directly on a directory's heap.
 Directory
 ---------
 
-A directory is an object that contains a list of items.
-Each item describes another object.
-
-The item list is a variant of a HTree, with a variable depth and no probing.
-
-Directory space is allocated in chunks of 1KiB.
+Directories use the key-value store defined in
 
 Header
 ~~~~~~
 
-Every directory begins with a 1KiB header.
+The directory header is stored in the 32 bytes of user data of the key-value
+store.
 
 .. table:: Directory header
 
-  ====== =====
-  Offset Field
-  ====== =====
-       0 Hash key
-      16 Chunks used
-      20 Highest chunk
-      24 New directory
-  ====== =====
+  ====== ====== =====
+  Offset Length Field
+  ====== ====== =====
+       0    512 Attribute key lengths + hashes
+     512   7672 Attribute key strings
+    8184      8 Old directory
+  ====== ====== =====
 
-* Hash key: Secret key used with SipHash13.
+.. table:: Attribute key length + hash
 
-* Chunks used: The total amount of chunks in use.
+  ====== ====== =====
+  Offset Length Field
+  ====== ====== =====
+       0      1 Length
+       1      1 Hash
+  ====== ====== =====
 
-* Highest chunk: The highest chunk in use.
-
-* New directory: New directory data is being transferred to.
+* Old directory: Old directory data is being transferred from.
 
   Only valid if not -1.
 
-HTree
-~~~~~
+* Length: Length of the key.
 
-The HTree contains references to all items in the directory.
-The root is located directly after the directory header.
+  If 0, it is the end of the attribute key list.
 
-When inserting an item, the name is hashed.
-The hash is split into chunks of 10 bits.
-The lowest 8 bits are used as index into the root node.
-If the slot is empty, the item is inserted.
-If the slot points to a child node, the next 8 bits are used as index in the
-child node.
-If an item is already present at the index, a new parent node is inserted and
-the conflicting item is moved downwards.
-This process repeats until an empty slot is found or no more hash bits are
-left.
-
-SipHash13 with a random key is used to provide resistance against HashDOS.
-
-.. table:: HTree entry
-
-   ============= ============= =====
-   Offset (bits) Length (bits) Field
-   ============= ============= =====
-               0             1 Is parent
-               1            31 Chunk
-   ============= ============= =====
-
+* Hash: Low 8 bits of the SipHash13 of the attribute key.
 
 Item
 ~~~~
 
 An item describes a single object.
 
-.. table:: Object
+.. table:: Item
 
    ====== ====== =====
    Offset Length Field
    ====== ====== =====
-        0      2 Chunks
-        2      1 Name length
-        3      1 Type
-        4      4 Attribute list length
-        8      N Name
-      8+N      A Attributes
-    8+N+A      D Data
+        0     16 Data
+       16      6 Attribute list offset
+       22      2 Attribute list length
    ====== ====== =====
 
-* Chunks: Chunks occupied by this node.
+.. table:: Embedded file / symlink data
 
-* Name length
+   ============= ============= =====
+   Offset (bits) Length (bits) Field
+   ============= ============= =====
+               0             3 Type
+              16            48 Offset
+              64            16 Length
+              96            16 Capacity
+   ============= ============= =====
 
-  If 0, the item has no name and is dangling,
-  i.e. not referenced by the HTree.
+.. table:: File / symlink data
 
-* Type
+   ============= ============= =====
+   Offset (bits) Length (bits) Field
+   ============= ============= =====
+               0             3 Type
+               3            61 Object ID
+              64            64 Length
+   ============= ============= =====
 
-* Attribute list length: Length of the attribute list in bytes.
+.. table:: Directory data
 
-* Name
+   ============= ============= =====
+   Offset (bits) Length (bits) Field
+   ============= ============= =====
+               0             3 Type
+               3            61 Object ID
+               64           32 Item count
+   ============= ============= =====
 
-* Attributes
 
-* Data
+Item attributes
+~~~~~~~~~~~~~~~
 
-.. table:: Item data for file & symlink types.
+.. table:: Item attributes
 
-   ====== ====== =====
-   Offset Length Field
-   ====== ====== =====
-        0      8 Object ID
-        8      8 Length
-   ====== ====== =====
+  ====== ====== =====
+  Offset Length Field
+  ====== ====== =====
+       0      1 Max attribute ID (inclusive)
+       1      L Attribute length list
+       L      S Attribute values
+  ====== ====== =====
 
-.. table:: Item data for embedded file & symlink types.
+.. table:: Attribute value if length == 255
 
-   ====== ====== =====
-   Offset Length Field
-   ====== ====== =====
-        0      3 Length
-   ====== ====== =====
-
-.. table:: Item data for directory types.
-
-   ====== ====== =====
-   Offset Length Field
-   ====== ====== =====
-        0      8 Object ID
-   ====== ====== =====
-
-* Object ID: The ID of the object.
-
-* Offset: Offset of the data on the heap.
-
-* Length: The length of the file or symlink in bytes.
-
-After the data block comes an arbitrary amount of extension data.
+  ====== ====== =====
+  Offset Length Field
+  ====== ====== =====
+       0      2 Length
+       1      6 Offset
+  ====== ====== =====
 
 
 Standard attributes
 -------------------
 
+Modification time
+~~~~~~~~~~~~~~~~~
+
+name: "nrfs.mtime"
+
+The modification time attribute adds a signed time stamp.
+The length is variable.
+
+The timestamp is relative to the UNIX epoch.
+
+
+UID
+~~~
+
+name: "nrfs.uid"
+
+This attribute adds a user ID.
+The length is variable.
+
+
+GID
+~~~
+
+name: "nrfs.gid"
+
+This attribute adds a group ID.
+The length is variable.
+
+
 UNIX
 ~~~~
 
-name: "nrfs.unix"
+name: "nrfs.unixmode"
 
-The UNIX extension adds 16-bit permissions and 24-bit UID & GID to all entries.
-
-.. table:: UNIX attribute data
-
-   ====== ====== =====
-   Offset Length Field
-   ====== ====== =====
-        0      2 Permissions
-        2      3 UID
-        3      6 GID
-   ====== ====== =====
+The UNIX mode attribute adds a mode field.
+It is at least 2 bytes long.
+The first 9 bits indicate global, group and user permissions respectively.
+Other bits are reserved.
 
 .. table:: UNIX attribute permissions
 
@@ -236,14 +232,3 @@ The UNIX extension adds 16-bit permissions and 24-bit UID & GID to all entries.
               3             3 Group RWX
               6             3 User RWX
   ============= ============= =====
-
-
-Modification time
-~~~~~~~~~~~~~~~~~
-
-name: "nrfs.mtime"
-
-The modification time extension adds a signed 64-bit time stamp to all entries.
-
-It is expressed in microseconds, which gives it a range of ~585000 years.
-The timestamp is relative to the UNIX epoch.
