@@ -3,16 +3,16 @@ name = "nrfs-fuzz"
 version = "0.0.0"
 authors = ["Automatically generated"]
 publish = false
-edition = "2018"
+edition = "2021"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
-
-[dependencies.nrfs]
-path = ".."
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+futures-util = "0.3"
+nrfs = { path = ".." }
+rangemap = "1.0"
 
 # Prevent this from interfering with workspaces
 [workspace]

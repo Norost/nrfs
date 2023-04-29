@@ -1,8 +1,7 @@
 //#![cfg_attr(not(test), no_std)]
 #![forbid(unused_must_use)]
 #![forbid(elided_lifetimes_in_paths)]
-#![feature(iterator_try_collect)]
-#![feature(cell_update)]
+#![feature(slice_as_chunks, cell_update, const_option)]
 #![feature(split_array)]
 #![feature(error_in_core)]
 #![feature(if_let_guard)]
@@ -59,31 +58,25 @@ extern crate alloc;
 
 mod config;
 pub mod dir;
-mod ext;
 mod file;
 mod item;
-mod name;
-#[cfg(any(test, fuzzing))]
-pub mod test;
+#[cfg(test)]
+mod test;
 
 pub use {
 	config::{LoadConfig, NewConfig},
 	core::cell::RefCell,
-	dir::{CreateError, Dir, DirDestroyError, DirKey, TransferError},
-	ext::{EnableExt, MTime, Unix},
-	file::{File, FileKey, LengthTooLong},
-	item::{Item, ItemExt, ItemInfo, ItemKey},
-	name::Name,
+	dir::{CreateError, Dir, RemoveError, TransferError},
+	file::{File, LengthTooLong},
+	item::{Item, ItemInfo, ItemKey, ItemTy},
+	nrkv::Key,
 	nros::{
 		dev, BlockSize, CipherType, Compression, Dev, KeyDeriver, KeyPassword, MaxRecordSize,
 		Resource,
 	},
 };
 
-use {
-	core::{fmt, future::Future},
-	ext::{Ext, ExtMap},
-};
+use core::{fmt, future::Future};
 
 /// NRFS filesystem manager.
 #[derive(Debug)]
@@ -92,8 +85,6 @@ pub struct Nrfs<D: Dev> {
 	storage: nros::Nros<D, nros::StdResource>,
 	/// Whether this filesystem is mounted as read-only.
 	read_only: bool,
-	/// Extension map.
-	ext: RefCell<ExtMap>,
 }
 
 impl<D: Dev> Nrfs<D> {
@@ -108,7 +99,6 @@ impl<D: Dev> Nrfs<D> {
 			max_record_size,
 			compression,
 			cache_size,
-			dir,
 		} = config;
 		let conf = nros::NewConfig {
 			mirrors,
@@ -122,9 +112,9 @@ impl<D: Dev> Nrfs<D> {
 			magic: Self::MAGIC,
 		};
 		let storage = nros::Nros::new(conf).await?;
-		let ext = ExtMap::default().into();
-		let s = Self { storage, ext, read_only: false };
-		Dir::init(&s, dir).await?;
+		let s = Self { storage, read_only: false };
+		let id = Dir::init(&s).await?;
+		s.storage.header_data()[..8].copy_from_slice(&(id << 3 | 1).to_le_bytes());
 		Ok(s)
 	}
 
@@ -140,17 +130,15 @@ impl<D: Dev> Nrfs<D> {
 			magic: Self::MAGIC,
 		};
 		let storage = nros::Nros::load(conf).await?;
-		let ext = RefCell::new(ExtMap::parse(&storage.header_data()[16..]));
-		trace!("--> {:#?}", ext.borrow());
-		Ok(Self { storage, ext, read_only: !allow_repair })
+		Ok(Self { storage, read_only: !allow_repair })
 	}
 
 	/// Get a reference to the root directory.
 	pub fn root_dir(&self) -> Dir<'_, D> {
 		let data = self.storage.header_data();
 		let id = u64::from_le_bytes(data[..8].try_into().unwrap()) >> 8;
-		let key = DirKey { dir: u64::MAX, index: u32::MAX, id };
-		Dir::new(self, key)
+		let key = ItemKey { dir: u64::MAX, tag: nrkv::Tag::MAX };
+		Dir::new(self, key, id)
 	}
 
 	pub async fn run<V, E, F>(&self, f: F) -> Result<V, E>
@@ -198,12 +186,33 @@ impl<D: Dev> Nrfs<D> {
 		self.storage.get(id)
 	}
 
-	pub fn dir(&self, key: DirKey) -> Dir<'_, D> {
-		Dir::new(self, key)
+	pub async fn dir(&self, key: ItemKey) -> Result<Dir<'_, D>, Error<D>> {
+		trace!("dir {:?}", key);
+		let mut a = [0; 8];
+		if key.dir != u64::MAX {
+			let mut kv = Dir::new(self, ItemKey::INVAL, key.dir).kv().await?;
+			kv.read_user_data(key.tag, 0, &mut a).await?;
+		} else {
+			a.copy_from_slice(&self.storage.header_data()[..8]);
+		}
+		assert_eq!(a[0] & 7, 1, "ty not a dir ({})", a[0] & 7);
+		Ok(Dir::new(self, key, u64::from_le_bytes(a) >> 3))
 	}
 
-	pub fn file(&self, key: FileKey) -> File<'_, D> {
-		File::new(self, key)
+	pub fn file(&self, key: ItemKey) -> File<'_, D> {
+		File { item: Item::new(self, key) }
+	}
+
+	pub fn item(&self, key: ItemKey) -> Item<'_, D> {
+		Item::new(self, key)
+	}
+
+	pub fn resource(&self) -> &nros::StdResource {
+		self.storage.resource()
+	}
+
+	pub fn max_len(&self) -> u64 {
+		self.storage.obj_max_len()
 	}
 }
 

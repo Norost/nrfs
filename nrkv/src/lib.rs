@@ -33,21 +33,21 @@ pub type Tag = core::num::NonZeroU64;
 pub trait Store {
 	type Error;
 
-	fn read(
-		&mut self,
+	fn read<'a>(
+		&'a mut self,
 		offset: u64,
-		buf: &mut [u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>>;
-	fn write(
-		&mut self,
+		buf: &'a mut [u8],
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>>;
+	fn write<'a>(
+		&'a mut self,
 		offset: u64,
-		data: &[u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>>;
-	fn write_zeros(
-		&mut self,
+		data: &'a [u8],
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>>;
+	fn write_zeros<'a>(
+		&'a mut self,
 		offset: u64,
 		len: u64,
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>>;
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>>;
 	fn len(&self) -> u64;
 }
 
@@ -151,10 +151,8 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		Ok(None)
 	}
 
-	pub async fn remove(&mut self, key: &Key) -> Result<bool, S::Error> {
-		let Some(tag) = self.find(key).await? else { return Ok(false) };
-		Item::new(self, tag).erase_key().await?;
-		Ok(true)
+	pub async fn remove(&mut self, tag: Tag) -> Result<(), S::Error> {
+		Item::new(self, tag).erase_key().await
 	}
 
 	async fn hamt_root_get(&mut self, index: u16) -> Result<(Tag, Option<Tag>), S::Error> {
@@ -199,9 +197,9 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 			+ (1 + u64::from(key_len))
 	}
 
-	fn hash(&self, key: &Key) -> u128 {
+	pub fn hash(&self, data: &[u8]) -> u128 {
 		let mut h = SipHasher13::new_with_key(&self.hdr.hash_key);
-		h.write(key);
+		h.write(data);
 		h.finish128().as_u128()
 	}
 
@@ -245,28 +243,16 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		Ok(())
 	}
 
-	pub fn read(
-		&mut self,
-		offset: u64,
-		buf: &mut [u8],
-	) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.store.read(offset, buf)
+	pub async fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), S::Error> {
+		self.store.read(offset, buf).await
 	}
 
-	pub fn write(
-		&mut self,
-		offset: u64,
-		data: &[u8],
-	) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.store.write(offset, data)
+	pub async fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), S::Error> {
+		self.store.write(offset, data).await
 	}
 
-	pub fn write_zeros(
-		&mut self,
-		offset: u64,
-		len: u64,
-	) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.store.write_zeros(offset, len)
+	pub async fn write_zeros(&mut self, offset: u64, len: u64) -> Result<(), S::Error> {
+		self.store.write_zeros(offset, len).await
 	}
 }
 
@@ -435,46 +421,34 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 		self.hamt_offset() + HAMT_CHILD_LEN * HAMT_ENTRY_SIZE
 	}
 
-	fn read(
-		&mut self,
-		offt: u64,
-		buf: &mut [u8],
-	) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.kv.read(self.offset.get() + offt, buf)
+	async fn read(&mut self, offt: u64, buf: &mut [u8]) -> Result<(), S::Error> {
+		self.kv.read(self.offset.get() + offt, buf).await
 	}
 
-	fn write(&mut self, offt: u64, data: &[u8]) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.kv.write(self.offset.get() + offt, data)
+	async fn write(&mut self, offt: u64, data: &[u8]) -> Result<(), S::Error> {
+		self.kv.write(self.offset.get() + offt, data).await
 	}
 
-	fn read_user(
-		&mut self,
-		offset: u16,
-		buf: &mut [u8],
-	) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.read(offset.into(), buf)
+	async fn read_user(&mut self, offset: u16, buf: &mut [u8]) -> Result<(), S::Error> {
+		self.read(offset.into(), buf).await
 	}
 
-	fn write_user(
-		&mut self,
-		offset: u16,
-		data: &[u8],
-	) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.write(offset.into(), data)
+	async fn write_user(&mut self, offset: u16, data: &[u8]) -> Result<(), S::Error> {
+		self.write(offset.into(), data).await
 	}
 
-	fn read_hamt(
+	async fn read_hamt(
 		&mut self,
 		buf: &mut [u8; (HAMT_CHILD_LEN * HAMT_ENTRY_SIZE) as _],
-	) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.read(self.hamt_offset(), buf)
+	) -> Result<(), S::Error> {
+		self.read(self.hamt_offset(), buf).await
 	}
 
-	fn write_hamt(
+	async fn write_hamt(
 		&mut self,
 		data: &[u8; (HAMT_CHILD_LEN * HAMT_ENTRY_SIZE) as _],
-	) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.write(self.hamt_offset(), data)
+	) -> Result<(), S::Error> {
+		self.write(self.hamt_offset(), data).await
 	}
 
 	async fn read_key(&mut self, buf: &mut [u8]) -> Result<u8, S::Error> {
@@ -490,8 +464,8 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 		self.write(self.key_offset() + 1, key).await
 	}
 
-	fn erase_key(&mut self) -> impl Future<Output = Result<(), S::Error>> + '_ {
-		self.write(self.key_offset(), &[0])
+	async fn erase_key(&mut self) -> Result<(), S::Error> {
+		self.write(self.key_offset(), &[0]).await
 	}
 }
 
@@ -550,25 +524,25 @@ macro_rules! store_slice {
 		impl Store for $ty {
 			type Error = !;
 
-			fn read(
-				&mut self,
+			fn read<'a>(
+				&'a mut self,
 				offset: u64,
-				buf: &mut [u8],
-			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
+				buf: &'a mut [u8],
+			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>> {
 				<[u8] as Store>::read(self, offset, buf)
 			}
-			fn write(
-				&mut self,
+			fn write<'a>(
+				&'a mut self,
 				offset: u64,
-				data: &[u8],
-			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
+				data: &'a [u8],
+			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>> {
 				<[u8] as Store>::write(self, offset, data)
 			}
-			fn write_zeros(
-				&mut self,
+			fn write_zeros<'a>(
+				&'a mut self,
 				offset: u64,
 				len: u64,
-			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
+			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>> {
 				<[u8] as Store>::write_zeros(self, offset, len)
 			}
 			fn len(&self) -> u64 {
@@ -599,6 +573,10 @@ impl Conf for DynConf {
 
 #[derive(Debug)]
 pub struct StaticConf<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16>;
+
+impl<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16> StaticConf<HEADER_OFFSET, ITEM_OFFSET> {
+	pub const CONF: Self = Self;
+}
 
 impl<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16> Conf
 	for StaticConf<HEADER_OFFSET, ITEM_OFFSET>

@@ -53,7 +53,7 @@ pub struct Test<'a> {
 pub enum Op<'a> {
 	Add { key: &'a Key, data: &'a [u8] },
 	Find { key: &'a Key },
-	Remove { key: &'a Key },
+	Remove { tag_idx: u16 },
 	Get { tag_idx: u16 },
 	Set { tag_idx: u16, data: &'a [u8] },
 	Iter { break_at: u16 },
@@ -79,7 +79,7 @@ impl<'a> Test<'a> {
 						data.resize(self.conf.item_offset.into(), 0);
 						let prev = dat.insert(tag, data);
 						assert!(prev.is_none(), "tag reused");
-						tags.push(tag);
+						tags.push((tag, key));
 					} else {
 						assert!(map.contains_key(key), "key isn't present");
 					}
@@ -92,19 +92,20 @@ impl<'a> Test<'a> {
 						assert!(!map.contains_key(key), "key is present");
 					}
 				}
-				Op::Remove { key } => {
-					if kv.remove(key).await.unwrap() {
-						let prev = map.remove(key);
-						assert!(prev.is_some(), "key wasn't present");
-					} else {
-						assert!(!map.contains_key(key), "key is present");
+				Op::Remove { tag_idx } => {
+					if tags.is_empty() {
+						continue;
 					}
+					let (tag, key) = tags.swap_remove(usize::from(tag_idx) % tags.len());
+					kv.remove(tag).await.unwrap();
+					let prev = map.remove(key);
+					assert!(prev.is_some(), "key wasn't present");
 				}
 				Op::Get { tag_idx } => {
 					if tags.is_empty() {
 						continue;
 					}
-					let tag = tags[usize::from(tag_idx) % tags.len()];
+					let (tag, _) = tags[usize::from(tag_idx) % tags.len()];
 					let mut buf = vec![0; self.conf.item_offset.into()];
 					kv.read_user_data(tag, 0, &mut buf).await.unwrap();
 					assert_eq!(*dat.get(&tag).expect("invalid tag"), buf);
@@ -114,7 +115,7 @@ impl<'a> Test<'a> {
 					if tags.is_empty() {
 						continue;
 					}
-					let tag = tags[usize::from(tag_idx) % tags.len()];
+					let (tag, _) = tags[usize::from(tag_idx) % tags.len()];
 					kv.write_user_data(tag, 0, &data).await.unwrap();
 					dat.get_mut(&tag).expect("invalid tag")[..data.len()].copy_from_slice(data);
 				}

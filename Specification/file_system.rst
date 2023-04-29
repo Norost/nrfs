@@ -163,15 +163,16 @@ Item attributes
 
 .. table:: Item attributes
 
-  ====== ====== =====
-  Offset Length Field
-  ====== ====== =====
-       0      1 Max attribute ID (inclusive)
-       1      L Attribute length list
-       L      S Attribute values
-  ====== ====== =====
+  ====== ========== =====
+  Offset   Length   Field
+  ====== ========== =====
+       0          1 Max attribute ID (inclusive)
+       1  ceil(L/8) Valid bits
+       1          L Lengths
+       L          S Values
+  ====== ========== =====
 
-.. table:: Attribute value if length == 255
+.. table:: Value if length == 255
 
   ====== ====== =====
   Offset Length Field

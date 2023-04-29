@@ -126,13 +126,12 @@ fn find_collide() {
 fn remove() {
 	run(async {
 		let mut kv = mkkv().await;
-		kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap();
-		kv.insert(b"RV".into(), &[]).await.unwrap().unwrap();
-		assert!(kv.remove((&[17, 4]).into()).await.unwrap());
+		let a = kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap();
+		let b = kv.insert(b"RV".into(), &[]).await.unwrap().unwrap();
+		kv.remove(a).await.unwrap();
 		assert!(kv.find((&[17, 4]).into()).await.unwrap().is_none());
-		assert!(!kv.remove((&[17, 4]).into()).await.unwrap());
-		assert!(!kv.remove(b"AA".into()).await.unwrap());
-		assert!(kv.remove(b"RV".into()).await.unwrap());
+		assert!(kv.find(b"AA".into()).await.unwrap().is_none());
+		kv.remove(b).await.unwrap();
 	});
 }
 
@@ -183,11 +182,11 @@ fn user_data() {
 fn next_batch_child_step_reset() {
 	run(async {
 		let mut kv = mkkv().await;
-		kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
-		assert!(kv.remove(b"\0".into()).await.unwrap());
+		let a = kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
+		kv.remove(a).await.unwrap();
 		let b = kv.insert(b"J\x07\xC7\xC7\xC7\xC7\xC7\xF1\xF1\xF1\0\0\0\0J\x07\xC7\xC7\xC7\xC7\xC7\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\x10\0\0\0\0\0\0\0{\xF1\xF1\xF1\xF1\xD1\xF1\xF1\xF1\xF1\xF1\xFF\xFF\xFF\xFE\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x15\x0e\xFB\xF1\x0e\x0e\x0e\x0e\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xF1\xC7\xF1\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\0\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\0\0\0\0\0\0\0\0\0\xC7\0\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\0\0\0\0\0\0\0\0\0\0\0H\0\0\0\0\0]\0\0\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xC7\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".into(), &[]).await.unwrap().unwrap();
-		kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
-		assert!(kv.remove(b"\0".into()).await.unwrap());
+		let c = kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
+		kv.remove(c).await.unwrap();
 		let d = kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
 		let mut state = Default::default();
 		let (x, y) = (&Cell::new(Some(b)), &Cell::new(Some(d)));
@@ -209,8 +208,8 @@ fn reinsert_many_find_with_next() {
 	run(async {
 		let mut kv = mkkv().await;
 		for _ in 0..32 {
-			kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
-			assert!(kv.remove(b"\0".into()).await.unwrap());
+			let t = kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
+			kv.remove(t).await.unwrap();
 		}
 		let tag = kv.insert(b"\0".into(), &[]).await.unwrap().unwrap();
 		let t = &Cell::new(Some(tag));

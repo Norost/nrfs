@@ -358,28 +358,37 @@ source = "git+https://github.com/Demindiro/nora_endian#07bd2d0463c74a597dde43379
 
 [[package]]
 name = "nrfs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
- "arbitrary",
  "bstr",
- "futures-util",
  "nora_endian 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nrkv",
  "nros",
- "rangemap",
- "siphasher",
 ]
 
 [[package]]
 name = "nrfs-fuzz"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
  "libfuzzer-sys",
  "nrfs",
+ "rangemap",
+]
+
+[[package]]
+name = "nrkv"
+version = "0.1.0"
+dependencies = [
+ "arbitrary",
+ "bstr",
+ "rand_core",
+ "siphasher",
 ]
 
 [[package]]
 name = "nros"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arbitrary",
  "arena",
