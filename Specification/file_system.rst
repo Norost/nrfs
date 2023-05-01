@@ -61,6 +61,8 @@ The filesystem header contains:
   Offset Length Field
   ====== ====== =====
        0     16 Root directory item data
+      16     16 Attribute keys directory
+      32      8 Attribute ID to key map
   ====== ====== =====
 
 
@@ -71,10 +73,38 @@ To reduce space usage and improve performance files with less than 64KiB of
 data can be placed directly on a directory's heap.
 
 
+Attribute keys
+--------------
+
+Attribute keys are shared between all directories.
+They are stored in a hidden directory.
+
+  The key map reuses the directory structure to reduce code duplication.
+
+.. table:: Attribute key data
+
+   ====== ====== =====
+   Offset Length Field
+   ====== ====== =====
+        0      8 ID
+        8      8 Reference count
+   ====== ====== =====
+
+ID to key mappings use a plain list in another object.
+
+.. table:: Attribute ID to key
+
+   ====== ====== =====
+   Offset Length Field
+   ====== ====== =====
+        0      6 Tag
+   ====== ====== =====
+
+
 Directory
 ---------
 
-Directories use the key-value store defined in
+Directories use the key-value store defined in ``key_value_store.rst``.
 
 Header
 ~~~~~~
@@ -87,18 +117,7 @@ store.
   ====== ====== =====
   Offset Length Field
   ====== ====== =====
-       0    512 Attribute key lengths + hashes
-     512   7672 Attribute key strings
-    8184      8 Old directory
-  ====== ====== =====
-
-.. table:: Attribute key length + hash
-
-  ====== ====== =====
-  Offset Length Field
-  ====== ====== =====
-       0      1 Length
-       1      1 Hash
+       0      8 Old directory
   ====== ====== =====
 
 * Old directory: Old directory data is being transferred from.
@@ -161,25 +180,31 @@ An item describes a single object.
 Item attributes
 ~~~~~~~~~~~~~~~
 
-.. table:: Item attributes
-
-  ====== ========== =====
-  Offset   Length   Field
-  ====== ========== =====
-       0          1 Max attribute ID (inclusive)
-       1  ceil(L/8) Valid bits
-       1          L Lengths
-       L          S Values
-  ====== ========== =====
-
-.. table:: Value if length == 255
+.. table:: Attribute value if length < 2555
 
   ====== ====== =====
   Offset Length Field
   ====== ====== =====
-       0      2 Length
-       1      6 Offset
+       0      I ID
+       I      1 Length
+     1+I      N Value
   ====== ====== =====
+
+.. table:: Attribute value if length == 255
+
+  ====== ====== =====
+  Offset Length Field
+  ====== ====== =====
+       0      I ID
+       I      1 255
+     1+I      2 Length
+     3+I      6 Offset
+  ====== ====== =====
+
+ID is encoded as a variable-length little-endian integer.
+The high bit indicates whether the next byte is part of the integer.
+
+  Examples: 0x20 = 32, 0x80 0x01 = 128
 
 
 Standard attributes
