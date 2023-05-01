@@ -92,3 +92,13 @@ fn list_attr_keys() {
 		}
 	});
 }
+
+#[test]
+fn list_attr_empty() {
+	let fs = new();
+	run(&fs, async {
+		let f = mkfile(&fs.root_dir(), b"file").await;
+		let keys = f.attr_keys().await.unwrap();
+		assert!(keys.is_empty());
+	});
+}

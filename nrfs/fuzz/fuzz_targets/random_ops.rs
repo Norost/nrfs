@@ -45,6 +45,7 @@ struct RefDir<'a> {
 	name: &'a Key,
 	children: BTreeMap<&'a Key, u8>,
 	parent: u8,
+	attrs: BTreeMap<&'a Key, &'a [u8]>,
 }
 
 #[derive(Debug)]
@@ -54,6 +55,7 @@ struct RefFile<'a> {
 	data: RangeSet<u64>,
 	len: u64,
 	parent: u8,
+	attrs: BTreeMap<&'a Key, &'a [u8]>,
 }
 
 #[derive(Debug)]
@@ -77,6 +79,7 @@ impl<'a> Ref<'a> {
 	f!(name &'a Key);
 	f!(parent u8);
 	f!(key ItemKey);
+	f!(attrs BTreeMap<&'a Key, &'a [u8]>);
 }
 
 #[derive(Debug)]
@@ -92,25 +95,67 @@ pub struct Test<'a> {
 #[derive(Clone, Debug, Arbitrary)]
 pub enum Op<'a> {
 	/// Create a file.
-	CreateFile { dir_idx: u8, name: &'a Key },
+	CreateFile {
+		dir_idx: u8,
+		name: &'a Key,
+	},
 	/// Create a directory.
-	CreateDir { dir_idx: u8, name: &'a Key },
+	CreateDir {
+		dir_idx: u8,
+		name: &'a Key,
+	},
 	/// Get an entry.
-	Search { dir_idx: u8, name: &'a Key },
+	Search {
+		dir_idx: u8,
+		name: &'a Key,
+	},
 	/// Write to a file.
-	Write { file_idx: u8, offset: u32, amount: u16 },
+	Write {
+		file_idx: u8,
+		offset: u32,
+		amount: u16,
+	},
 	/// Write to a file, growing it if necessary.
-	WriteGrow { file_idx: u8, offset: u32, amount: u16 },
+	WriteGrow {
+		file_idx: u8,
+		offset: u32,
+		amount: u16,
+	},
 	/// Read from a file.
-	Read { file_idx: u8, offset: u32, amount: u16 },
+	Read {
+		file_idx: u8,
+		offset: u32,
+		amount: u16,
+	},
 	/// Resize a file.
-	Resize { file_idx: u8, len: u32 },
+	Resize {
+		file_idx: u8,
+		len: u32,
+	},
 	/// Transfer an item.
-	Transfer { idx: u8, to_idx: u8, to: &'a Key },
+	Transfer {
+		idx: u8,
+		to_idx: u8,
+		to: &'a Key,
+	},
 	/// Remove an item.
-	Remove { idx: u8 },
+	Remove {
+		idx: u8,
+	},
 	/// Remount filesystem.
 	Remount,
+	GetAttr {
+		idx: u8,
+		key: &'a Key,
+	},
+	SetAttr {
+		idx: u8,
+		key: &'a Key,
+		value: &'a [u8],
+	},
+	ListAttr {
+		idx: u8,
+	},
 }
 
 impl<'a> Arbitrary<'a> for Test<'a> {
@@ -137,6 +182,7 @@ impl<'a> Test<'a> {
 			name: b"\0".into(),
 			children: Default::default(),
 			parent: u8::MAX,
+			attrs: Default::default(),
 		})));
 		macro_rules! get {
 			($idx:expr) => {{
@@ -167,6 +213,7 @@ impl<'a> Test<'a> {
 											data: Default::default(),
 											len: 0,
 											parent: dir_idx,
+											attrs: Default::default(),
 										})));
 									}
 									Err(CreateError::Duplicate) => {
@@ -189,6 +236,7 @@ impl<'a> Test<'a> {
 											name,
 											children: Default::default(),
 											parent: dir_idx,
+											attrs: Default::default(),
 										})));
 									}
 									Err(CreateError::Duplicate) => {
@@ -355,6 +403,34 @@ impl<'a> Test<'a> {
 										assert!(!s.children.is_empty(), "dir is empty");
 									}
 								}
+							}
+							Op::GetAttr { idx, key } => {
+								let r = get!(idx);
+								if let Some(val) = self.fs.item(*r.key()).attr(key).await.unwrap() {
+									let v = *r.attrs().get(key).expect("no attr");
+									assert_eq!(&*val, v);
+								} else {
+									assert!(!r.attrs().contains_key(key), "expected attr");
+								}
+							}
+							Op::SetAttr { idx, key, value } => {
+								let r = get!(idx);
+								self.fs
+									.item(*r.key())
+									.set_attr(key, value)
+									.await
+									.unwrap()
+									.unwrap();
+								r.attrs().insert(key, value);
+							}
+							Op::ListAttr { idx } => {
+								let r = get!(idx);
+								let mut keys = self.fs.item(*r.key()).attr_keys().await.unwrap();
+								keys.sort();
+								r.attrs()
+									.keys()
+									.zip(keys)
+									.for_each(|(x, y)| assert_eq!(&**x, &*y));
 							}
 							Op::Remount => break,
 						}
