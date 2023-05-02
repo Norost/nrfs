@@ -77,8 +77,8 @@ fn find_none() {
 fn insert_dup() {
 	run(async {
 		let mut kv = mkkv().await;
-		kv.insert(b"hello".into(), &[]).await.unwrap().unwrap();
-		assert!(kv.insert(b"hello".into(), &[]).await.unwrap().is_none());
+		let t = kv.insert(b"hello".into(), &[]).await.unwrap().unwrap();
+		assert_eq!(kv.insert(b"hello".into(), &[]).await.unwrap(), Err(t));
 	});
 }
 
@@ -106,8 +106,8 @@ fn insert_collide_dup() {
 	run(async {
 		let mut kv = mkkv().await;
 		kv.insert((&[17, 4]).into(), &[]).await.unwrap().unwrap();
-		kv.insert(b"RV".into(), &[]).await.unwrap().unwrap();
-		assert!(kv.insert(b"RV".into(), &[]).await.unwrap().is_none());
+		let t = kv.insert(b"RV".into(), &[]).await.unwrap().unwrap();
+		assert_eq!(kv.insert(b"RV".into(), &[]).await.unwrap(), Err(t));
 	});
 }
 

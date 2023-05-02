@@ -13,6 +13,20 @@ fn add_attr() {
 }
 
 #[test]
+fn get_attr() {
+	let fs = new();
+	run(&fs, async {
+		let f = mkfile(&fs.root_dir(), b"file").await;
+		f.set_attr(b"hello".into(), b"world")
+			.await
+			.unwrap()
+			.unwrap();
+		let v = f.attr(b"hello".into()).await.unwrap().unwrap();
+		assert_eq!(b"world", &*v);
+	});
+}
+
+#[test]
 fn mod_attr() {
 	let fs = new();
 	run(&fs, async {
@@ -25,11 +39,13 @@ fn mod_attr() {
 			.await
 			.unwrap()
 			.unwrap();
+		let v = f.attr(b"hello".into()).await.unwrap().unwrap();
+		assert_eq!(b"earth", &*v);
 	});
 }
 
 #[test]
-fn get_attr() {
+fn del_attr() {
 	let fs = new();
 	run(&fs, async {
 		let f = mkfile(&fs.root_dir(), b"file").await;
@@ -37,8 +53,11 @@ fn get_attr() {
 			.await
 			.unwrap()
 			.unwrap();
-		let v = f.attr(b"hello".into()).await.unwrap().unwrap();
-		assert_eq!(b"world", &*v);
+		let r = f.del_attr(b"hello".into()).await.unwrap();
+		assert!(r);
+		assert!(f.attr(b"hello".into()).await.unwrap().is_none());
+		let r = f.del_attr(b"hello".into()).await.unwrap();
+		assert!(!r);
 	});
 }
 

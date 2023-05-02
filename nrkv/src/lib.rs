@@ -101,7 +101,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 			.await
 	}
 
-	pub async fn insert(&mut self, key: &Key, data: &[u8]) -> Result<Option<Tag>, S::Error> {
+	pub async fn insert(&mut self, key: &Key, data: &[u8]) -> Result<Result<Tag, Tag>, S::Error> {
 		let h = self.hash(key);
 		let next = |h, d| (h / u128::from(d), h % u128::from(d));
 		let (mut h, mut i) = next(h, HAMT_ROOT_LEN);
@@ -109,7 +109,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		let Some(mut slot) = slot else {
 			let offt = self.replace_item(None, key, data).await?;
 			self.hamt_set_entry(slot_offt, offt.get()).await?;
-			return Ok(Some(offt));
+			return Ok(Ok(offt));
 		};
 
 		let mut replace = None;
@@ -120,7 +120,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 					replace.get_or_insert((slot_offt, slot));
 				}
 				Some(false) => {}
-				Some(true) => return Ok(None),
+				Some(true) => return Ok(Err(slot)),
 			}
 			(h, i) = next(h, HAMT_CHILD_LEN);
 			let (o, s) = item.hamt_get(i as _).await?;
@@ -128,7 +128,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 				let (o, prev_slot) = replace.map_or((o, None), |(o, s)| (o, Some(s)));
 				let offt = item.kv.replace_item(prev_slot, key, data).await?;
 				self.hamt_set_entry(o, offt.get()).await?;
-				return Ok(Some(offt));
+				return Ok(Ok(offt));
 			};
 			(slot_offt, slot) = (o, s);
 		}

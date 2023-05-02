@@ -72,16 +72,19 @@ impl<'a> Test<'a> {
 			match op {
 				Op::Add { key, data } => {
 					let data = data.get(..self.conf.item_offset.into()).unwrap_or(data);
-					if let Some(tag) = kv.insert(key, &data).await.unwrap() {
-						let prev = map.insert(key, tag);
-						assert!(prev.is_none(), "key was already present");
-						let mut data = data.to_vec();
-						data.resize(self.conf.item_offset.into(), 0);
-						let prev = dat.insert(tag, data);
-						assert!(prev.is_none(), "tag reused");
-						tags.push((tag, key));
-					} else {
-						assert!(map.contains_key(key), "key isn't present");
+					match kv.insert(key, &data).await.unwrap() {
+						Ok(tag) => {
+							let prev = map.insert(key, tag);
+							assert!(prev.is_none(), "key was already present");
+							let mut data = data.to_vec();
+							data.resize(self.conf.item_offset.into(), 0);
+							let prev = dat.insert(tag, data);
+							assert!(prev.is_none(), "tag reused");
+							tags.push((tag, key));
+						}
+						Err(tag) => {
+							assert_eq!(*map.get(key).expect("key isn't present"), tag)
+						}
 					}
 				}
 				Op::Find { key } => {

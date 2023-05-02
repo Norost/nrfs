@@ -1,8 +1,6 @@
-use std::cell::RefCell;
-
 use {
-	crate::{Dev, Error, File, ItemInfo, ItemKey, ItemTy, Nrfs},
-	core::{fmt, future::Future, pin::Pin},
+	crate::{Dev, Error, File, ItemInfo, ItemKey, ItemTy, Nrfs, Store},
+	core::{cell::RefCell, fmt, future::Future},
 	nrkv::Key,
 	nros::Resource,
 	std::borrow::Cow,
@@ -16,51 +14,8 @@ pub struct Dir<'a, D: Dev> {
 	pub(crate) id: u64,
 }
 
-pub(crate) struct DirStore<'a, D: Dev>(nros::Object<'a, D, nros::StdResource>);
-
-type Conf = nrkv::StaticConf<8192, 24>;
-pub(crate) type Kv<'a, D> = nrkv::Nrkv<DirStore<'a, D>, Conf>;
-
-impl<'a, D: Dev> nrkv::Store for DirStore<'a, D> {
-	type Error = Error<D>;
-
-	fn read<'s>(
-		&'s mut self,
-		offset: u64,
-		buf: &'s mut [u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 's>> {
-		Box::pin(async move {
-			self.0.read(offset, buf).await?;
-			Ok(())
-		})
-	}
-
-	fn write<'s>(
-		&'s mut self,
-		offset: u64,
-		data: &'s [u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 's>> {
-		Box::pin(async move {
-			self.0.write(offset, data).await?;
-			Ok(())
-		})
-	}
-
-	fn write_zeros<'s>(
-		&'s mut self,
-		offset: u64,
-		len: u64,
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 's>> {
-		Box::pin(async move {
-			self.0.write_zeros(offset, len).await?;
-			Ok(())
-		})
-	}
-
-	fn len(&self) -> u64 {
-		todo!()
-	}
-}
+type Conf = nrkv::StaticConf<0, 24>;
+pub(crate) type Kv<'a, D> = nrkv::Nrkv<Store<'a, D>, Conf>;
 
 impl<'a, D: Dev> Dir<'a, D> {
 	/// Create a [`Dir`] helper structure.
@@ -76,7 +31,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		trace!("--> {:#x}", id);
 		let mut key = [0; 16];
 		fs.resource().crng_fill(&mut key);
-		nrkv::Nrkv::init_with_key(DirStore(dir), Conf::CONF, key).await?;
+		nrkv::Nrkv::init_with_key(Store(dir), Conf::CONF, key).await?;
 		Ok(id)
 	}
 
@@ -95,7 +50,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		assert!(!self.fs.read_only, "read only");
 
 		let mut kv = self.kv().await?;
-		let Some(tag) = kv.insert(key, &[]).await? else {
+		let Ok(tag) = kv.insert(key, &[]).await? else {
 			return Ok(Err(CreateError::Duplicate))
 		};
 		kv.save().await?;
@@ -312,7 +267,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 	}
 
 	pub(crate) fn kv(&self) -> impl Future<Output = Result<Kv<'a, D>, Error<D>>> {
-		nrkv::Nrkv::load(DirStore(self.fs.get(self.id)), nrkv::StaticConf)
+		nrkv::Nrkv::load(Store(self.fs.get(self.id)), nrkv::StaticConf)
 	}
 
 	async fn update_item_count(&self, incr: bool) -> Result<(), Error<D>> {

@@ -56,6 +56,7 @@ mod trace {
 
 extern crate alloc;
 
+mod attr;
 mod config;
 pub mod dir;
 mod file;
@@ -76,7 +77,7 @@ pub use {
 	},
 };
 
-use core::{fmt, future::Future};
+use core::{fmt, future::Future, pin::Pin};
 
 /// NRFS filesystem manager.
 #[derive(Debug)]
@@ -112,9 +113,14 @@ impl<D: Dev> Nrfs<D> {
 			magic: Self::MAGIC,
 		};
 		let storage = nros::Nros::new(conf).await?;
+
 		let s = Self { storage, read_only: false };
 		let id = Dir::init(&s).await?;
 		s.storage.header_data()[..8].copy_from_slice(&(id << 3 | 1).to_le_bytes());
+
+		let id = attr::AttrMap::init(&s.storage).await?;
+		s.storage.header_data()[24..32].copy_from_slice(&id.to_le_bytes());
+
 		Ok(s)
 	}
 
@@ -269,4 +275,47 @@ impl<D: Dev> From<nros::Error<D>> for Error<D> {
 pub struct Statistics {
 	/// Object store statistics.
 	pub object_store: nros::Statistics,
+}
+
+pub(crate) struct Store<'a, D: Dev>(nros::Object<'a, D, nros::StdResource>);
+
+impl<'a, D: Dev> nrkv::Store for Store<'a, D> {
+	type Error = Error<D>;
+
+	fn read<'s>(
+		&'s mut self,
+		offset: u64,
+		buf: &'s mut [u8],
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 's>> {
+		Box::pin(async move {
+			self.0.read(offset, buf).await?;
+			Ok(())
+		})
+	}
+
+	fn write<'s>(
+		&'s mut self,
+		offset: u64,
+		data: &'s [u8],
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 's>> {
+		Box::pin(async move {
+			self.0.write(offset, data).await?;
+			Ok(())
+		})
+	}
+
+	fn write_zeros<'s>(
+		&'s mut self,
+		offset: u64,
+		len: u64,
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 's>> {
+		Box::pin(async move {
+			self.0.write_zeros(offset, len).await?;
+			Ok(())
+		})
+	}
+
+	fn len(&self) -> u64 {
+		todo!()
+	}
 }

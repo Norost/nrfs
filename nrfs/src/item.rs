@@ -65,7 +65,7 @@ impl<'a, D: Dev> Item<'a, D> {
 		Self { fs, key }
 	}
 
-	async fn get_attr(&self) -> Result<(Kv<'a, D>, Vec<u8>, (u64, u16), Vec<u8>), Error<D>> {
+	async fn read_attr(&self) -> Result<(Kv<'a, D>, (u64, u16), Vec<u8>), Error<D>> {
 		let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv().await?;
 
 		let a = &mut [0; 8];
@@ -76,58 +76,54 @@ impl<'a, D: Dev> Item<'a, D> {
 		let mut attr = vec![0; len.into()];
 		kv.read(offt, &mut attr).await?;
 
-		let count = attr.get(0).map_or(0, |&x| usize::from(x) + 1);
-		let mut keyarr = vec![0; count * 2];
-		kv.read(0, &mut keyarr).await?;
-		Ok((kv, keyarr, (offt, len), attr))
+		Ok((kv, (offt, len), attr))
+	}
+
+	async fn write_attr(
+		&self,
+		mut kv: Kv<'a, D>,
+		(offt, len): (u64, u16),
+		attr: Vec<u8>,
+	) -> Result<(), Error<D>> {
+		kv.dealloc(offt, len.into()).await?;
+		let attr_len = u16::try_from(attr.len()).unwrap();
+		let offt = kv.alloc(attr_len.into()).await?;
+		kv.write(offt.get(), &attr).await?;
+		let a = offt.get() << 16 | u64::from(attr_len);
+		kv.write_user_data(self.key.tag, 16, &a.to_le_bytes())
+			.await?;
+		Ok(())
 	}
 
 	pub async fn attr_keys(&self) -> Result<Vec<Box<Key>>, Error<D>> {
-		let (mut kv, keyarr, _, attr) = self.get_attr().await?;
-		let mut offt = 0;
+		if self.key.dir == u64::MAX {
+			return Ok(vec![]);
+		}
+		let mut attr_map = self.fs.attr_map().await?;
+		let (_, _, attr) = self.read_attr().await?;
+		let mut attr = &*attr;
 		let mut keys = vec![];
-		for (i, len) in keyarr.into_iter().step_by(2).enumerate() {
-			let (u, v) = (i / 8, i % 8);
-			if attr[1 + u] >> v & 1 != 0 {
-				let mut key = vec![0; len.into()];
-				kv.read(512 + offt, &mut key).await?;
-				keys.push(key.into_boxed_slice().try_into().unwrap());
-			}
-			offt += u64::from(len);
+		while let Some((id, _)) = attr_next(&mut attr) {
+			keys.push(attr_map.key(id).await?);
 		}
 		Ok(keys)
 	}
 
 	pub async fn attr(&self, key: &Key) -> Result<Option<Vec<u8>>, Error<D>> {
-		let (mut kv, keyarr, _, attr) = self.get_attr().await?;
-		let count = keyarr.len() / 2;
-		let mut k_offt = 512;
-		let hash = kv.hash(key) as u8;
-
-		let bits_len = (count + 7) / 8;
-		let mut v_offt =
-			1 + bits_len + (0..bits_len).fold(0, |s, i| s + attr[1 + i].count_ones() as usize);
-
-		let mut c = 0;
-		for (i, &[len, h]) in keyarr.as_chunks::<2>().0.iter().enumerate() {
-			if test_bit(&attr[1..], i) {
-				dbg!(&attr, &keyarr);
-				let l = usize::from(attr[dbg!(1 + (keyarr.len() / 2 + 7) / 8) + c]);
-				if len == key.len_u8() && h == hash {
-					let mut k = vec![0; len.into()];
-					kv.read(k_offt, &mut k).await?;
-					if &**key == &*k {
-						if l < 255 {
-							return Ok(Some(attr[v_offt..v_offt + l].into()));
-						} else {
-							todo!()
-						}
-					}
+		if self.key.dir == u64::MAX {
+			return Ok(None);
+		}
+		let mut attr_map = self.fs.attr_map().await?;
+		let Some(id) = attr_map.get_attr(key).await? else { return Ok(None) };
+		let (_, _, attr) = self.read_attr().await?;
+		let mut attr = &*attr;
+		while let Some((i, val)) = attr_next(&mut attr) {
+			if i == id {
+				match val {
+					AttrVal::Short(v) => return Ok(Some(v.into())),
+					AttrVal::Long { offset, len } => todo!(),
 				}
-				v_offt += if l == 255 { 8 } else { l };
-				c += 1;
 			}
-			k_offt += u64::from(len);
 		}
 		Ok(None)
 	}
@@ -137,169 +133,109 @@ impl<'a, D: Dev> Item<'a, D> {
 		key: &Key,
 		value: &[u8],
 	) -> Result<Result<(), SetAttrError>, Error<D>> {
-		let (mut kv, keyarr, (offt, len), attr) = self.get_attr().await?;
-		let Some(i) = self.get_or_add_key(&mut kv, key, &keyarr).await?
-			else { todo!("too many keys, try GC") };
-		let value = if value.len() <= 32 {
-			AttrVal::Short(value)
-		} else {
-			todo!()
-		};
-		let new_attr = insert_attr_at(&attr, i, value);
-		drop(attr);
-		if new_attr.len() <= usize::from(len) {
-			kv.write(offt, &new_attr).await?;
-		} else {
-			kv.dealloc(offt, len.into()).await?;
-			let len = u16::try_from(new_attr.len()).unwrap();
-			let offt = kv.alloc(len.into()).await?;
-			let a = offt.get() << 16 | u64::from(len);
-			kv.write_user_data(self.key.tag, 16, &a.to_le_bytes())
-				.await?;
-			kv.write(offt.get(), &new_attr).await?;
+		let (mut kv, addr, mut attr) = self.read_attr().await?;
+		if attr.len() + (8 + 1 + value.len().min(8)) > usize::from(u16::MAX) {
+			return Ok(Err(SetAttrError::Full));
 		}
+
+		let mut attr_map = self.fs.attr_map().await?;
+		let id = attr_map.ref_attr(key).await?;
+
+		let mut a = &*attr;
+		let mut start = 0;
+		while let Some((i, val)) = attr_next(&mut a) {
+			if i == id {
+				if let AttrVal::Long { offset, len } = val {
+					todo!();
+				}
+				let end = attr.len() - a.len();
+				attr.drain(start..end);
+				break;
+			}
+			start = attr.len() - a.len();
+		}
+
+		let mut id = id.get();
+		while id > 0x7fff {
+			let b = (id as u16 | 0x8000).to_le_bytes();
+			attr.extend_from_slice(&b);
+			id >>= 15;
+		}
+		let b = (id as u16).to_le_bytes();
+		attr.extend_from_slice(&b);
+
+		if value.len() <= 32 {
+			attr.push(value.len() as _);
+			attr.extend_from_slice(value);
+		} else {
+			todo!();
+		}
+
+		self.write_attr(kv, addr, attr).await?;
+
 		Ok(Ok(()))
 	}
 
-	async fn get_or_add_key(
-		&self,
-		kv: &mut Kv<'a, D>,
-		key: &Key,
-		keyarr: &[u8],
-	) -> Result<Option<u8>, Error<D>> {
-		let mut k_offt = 512;
-		let hash = kv.hash(key) as u8;
-		for (i, &[len, h]) in keyarr.as_chunks::<2>().0.iter().enumerate() {
-			if len == key.len_u8() && h == hash {
-				let mut k = vec![0; len.into()];
-				kv.read(k_offt, &mut k).await?;
-				if &**key == &*k {
-					return Ok(Some(i.try_into().unwrap()));
+	pub async fn del_attr(&self, key: &Key) -> Result<bool, Error<D>> {
+		let mut attr_map = self.fs.attr_map().await?;
+		let Some(id) = attr_map.get_attr(key).await? else { return Ok(false) };
+
+		let (kv, addr, mut attr) = self.read_attr().await?;
+		let mut a = &*attr;
+		let mut start = 0;
+		while let Some((i, val)) = attr_next(&mut a) {
+			if i == id {
+				if let AttrVal::Long { offset, len } = val {
+					todo!();
 				}
+				let end = attr.len() - a.len();
+				attr.drain(start..end);
+				self.write_attr(kv, addr, attr).await?;
+				attr_map.unref_attr(id).await?;
+				return Ok(true);
 			}
-			k_offt += u64::from(len);
+			start = attr.len() - a.len();
 		}
-		if k_offt + u64::from(key.len_u8()) > KEYSTR_CAP {
-			return Ok(None);
-		}
-		let Ok(i) = u8::try_from(keyarr.len() / 2) else { return Ok(None) };
-		kv.write(k_offt, key).await?;
-		kv.write(u64::from(i) * 2, &[key.len_u8(), hash]).await?;
-		Ok(Some(i))
+		Ok(false)
 	}
 }
 
-const KEYSTR_CAP: u64 = (1 << 13) - (1 << 5) - 8;
-
 #[derive(Clone, Debug)]
-pub enum SetAttrError {}
+pub enum SetAttrError {
+	Full,
+}
 
 enum AttrVal<'a> {
 	Short(&'a [u8]),
 	Long { offset: u64, len: u16 },
 }
 
-fn insert_attr_at(attr: &[u8], at: u8, value: AttrVal<'_>) -> Vec<u8> {
-	let mut v_offt = 0;
-	let mut buf = vec![];
-
-	let (cur_count, attr) = if let Some((&max, attr)) = attr.split_first() {
-		buf.push(max.max(at));
-		(usize::from(max) + 1, attr)
-	} else {
-		buf.push(at);
-		(0, attr)
-	};
-	let new_count = cur_count.max(usize::from(at) + 1);
-
-	let bits_cur_len = (cur_count + 7) / 8;
-	let bits_new_len = (new_count + 7) / 8;
-	let (bits, attr) = attr.split_at(bits_cur_len);
-	buf.extend_from_slice(bits);
-	buf.resize(1 + bits_new_len, 0);
-	buf[1 + usize::from(at / 8)] |= 1 << at % 8;
-
-	let test = |i| test_bit(bits, i);
-	let mut i @ mut c = 0;
-	while i < usize::from(at) {
-		if test(i) {
-			let l = usize::from(attr[c]);
-			v_offt += if l == 255 { 8 } else { l };
-			c += 1;
-		}
-		i += 1;
+fn attr_next<'a>(attr: &mut &'a [u8]) -> Option<(nrkv::Tag, AttrVal<'a>)> {
+	if attr.is_empty() {
+		return None;
 	}
-
-	let prev_len = usize::from(if test(i) { attr[c] } else { 0 });
-	let prev_len = if prev_len == 255 { 8 } else { prev_len };
-
-	let mut d = c;
-	while i <= cur_count {
-		d += usize::from(test(i));
-		i += 1;
-	}
-
-	buf.extend_from_slice(&attr[..c]);
-	buf.push(if let AttrVal::Short(v) = value {
-		v.len() as _
-	} else {
-		255
-	});
-	c += usize::from(test(i));
-	buf.extend_from_slice(&attr[c..d + v_offt]);
-	match value {
-		AttrVal::Short(v) => buf.extend_from_slice(v),
-		AttrVal::Long { offset, len } => {
-			buf.extend_from_slice(&len.to_le_bytes());
-			buf.extend_from_slice(&offset.to_le_bytes()[..6]);
+	let mut id = 0;
+	for i in 0.. {
+		let b;
+		(b, *attr) = attr.split_array_ref::<2>();
+		let b = u16::from_le_bytes(*b);
+		id |= u64::from(b & 0x7fff) << i * 15;
+		if b & 0x8000 == 0 {
+			break;
 		}
 	}
-	buf.extend_from_slice(&attr[d + v_offt + prev_len..]);
-
-	buf
-}
-
-fn test_bit(bits: &[u8], i: usize) -> bool {
-	let (u, v) = (i / 8, i % 8);
-	*bits.get(u).unwrap_or(&0) >> v & 1 != 0
-}
-
-#[cfg(test)]
-mod test {
-	use super::*;
-
-	#[test]
-	fn attr_insert_short() {
-		let a = insert_attr_at(&[], 0, AttrVal::Short(b"hello"));
-		assert_eq!(&[0, 1 << 0, 5, b'h', b'e', b'l', b'l', b'o'], &*a);
-	}
-
-	#[test]
-	fn attr_insert_long() {
-		let a = insert_attr_at(&[], 0, AttrVal::Long { offset: 0xc0dedeadbeef, len: 42 });
-		assert_eq!(
-			&[0, 1 << 0, 255, 42, 0, 0xef, 0xbe, 0xad, 0xde, 0xde, 0xc0],
-			&*a
-		);
-	}
-
-	#[test]
-	fn attr_insert_mid() {
-		let a = insert_attr_at(&[], 20, AttrVal::Short(b"hello"));
-		assert_eq!(&[20, 0, 0, 1 << 4, 5, b'h', b'e', b'l', b'l', b'o'], &*a);
-	}
-
-	#[test]
-	fn attr_insert_multi() {
-		let a = insert_attr_at(&[], 0, AttrVal::Short(b"hello"));
-		let a = insert_attr_at(&a, 20, AttrVal::Short(b"world"));
-		let a = insert_attr_at(&a, 3, AttrVal::Short(b"big"));
-		let mut t = vec![0u8; 0];
-		t.extend(&[20, 1 << 0 | 1 << 3, 0, 1 << 4]);
-		t.extend(&[5, 3, 5]);
-		t.extend(b"hello");
-		t.extend(b"big");
-		t.extend(b"world");
-		assert_eq!(t, a);
+	let id = id.try_into().unwrap();
+	let len;
+	(len, *attr) = attr.split_array_ref::<1>();
+	if len[0] < 255 {
+		let val;
+		(val, *attr) = attr.split_at(len[0].into());
+		Some((id, AttrVal::Short(val)))
+	} else {
+		let l;
+		(l, *attr) = attr.split_array_ref::<8>();
+		let l = u64::from_le_bytes(*l);
+		let (offset, len) = (l >> 16, l as u16);
+		Some((id, AttrVal::Long { offset, len }))
 	}
 }
