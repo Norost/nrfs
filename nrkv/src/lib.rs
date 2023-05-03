@@ -1,26 +1,29 @@
-//#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![deny(unused_must_use)]
 #![feature(const_waker, generic_arg_infer, never_type, split_array)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
+mod conf;
+mod key;
+mod store;
 #[cfg(test)]
 mod test;
 
-extern crate alloc;
+pub use {conf::*, key::*, store::*};
 
 use {
 	alloc::boxed::Box,
 	core::{
 		cell::{RefCell, RefMut},
 		fmt,
-		future::{self, Future},
+		future::Future,
 		hash::Hasher,
-		num::NonZeroU8,
-		ops::{Deref, DerefMut},
 		pin::Pin,
 	},
 	rand_core::{CryptoRng, RngCore},
 	siphasher::sip128::{Hasher128, SipHasher13},
-	std::{rc::Rc, sync::Arc},
 };
 
 const HEADER_SIZE: u64 = 28;
@@ -29,32 +32,6 @@ const HAMT_ROOT_LEN: u64 = 4096;
 const HAMT_CHILD_LEN: u64 = 16;
 
 pub type Tag = core::num::NonZeroU64;
-
-pub trait Store {
-	type Error;
-
-	fn read<'a>(
-		&'a mut self,
-		offset: u64,
-		buf: &'a mut [u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>>;
-	fn write<'a>(
-		&'a mut self,
-		offset: u64,
-		data: &'a [u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>>;
-	fn write_zeros<'a>(
-		&'a mut self,
-		offset: u64,
-		len: u64,
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>>;
-	fn len(&self) -> u64;
-}
-
-pub trait Conf {
-	fn header_offset(&self) -> u64;
-	fn item_offset(&self) -> u16;
-}
 
 pub struct Nrkv<S, C> {
 	hdr: Header,
@@ -295,6 +272,7 @@ impl<'a, S: Store, C: Conf> ShareNrkv<'a, S, C> {
 		let (_, Some(root)) = self.borrow_mut().hamt_root_get(state.root()).await?
 			else { return Ok(true) };
 
+		// FIXME make non-recursive to avoid alloc
 		async fn rec<S: Store, C: Conf, F, Fut>(
 			slf: &ShareNrkv<'_, S, C>,
 			item: Tag,
@@ -394,12 +372,7 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 		} else if usize::from(len[0]) != key.len() {
 			return Ok(Some(false));
 		}
-		let mut buf_stack = [0; 32];
-		let mut buf_heap = vec![];
-		let buf = buf_stack.get_mut(..key.len()).unwrap_or_else(|| {
-			buf_heap.resize(key.len(), 0);
-			&mut buf_heap[..]
-		});
+		let buf = &mut [0; 255][..key.len()];
 		self.read(self.key_offset() + 1, buf).await?;
 		Ok(Some(&buf[..key.len()] == &**key))
 	}
@@ -466,285 +439,6 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 
 	async fn erase_key(&mut self) -> Result<(), S::Error> {
 		self.write(self.key_offset(), &[0]).await
-	}
-}
-
-impl Store for [u8] {
-	type Error = !;
-
-	fn read(
-		&mut self,
-		offset: u64,
-		buf: &mut [u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
-		let b = offset
-			.try_into()
-			.ok()
-			.and_then(|o| self.get(o..o + buf.len()))
-			.expect("out of bounds");
-		buf.copy_from_slice(b);
-		Box::pin(future::ready(Ok(())))
-	}
-
-	fn write(
-		&mut self,
-		offset: u64,
-		data: &[u8],
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
-		offset
-			.try_into()
-			.ok()
-			.and_then(|o| self.get_mut(o..o + data.len()))
-			.expect("out of bounds")
-			.copy_from_slice(data);
-		Box::pin(future::ready(Ok(())))
-	}
-
-	fn write_zeros(
-		&mut self,
-		offset: u64,
-		len: u64,
-	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + '_>> {
-		let f = |n: u64| n.try_into().ok();
-		f(offset)
-			.and_then(|s| offset.checked_add(len).and_then(f).map(|e| s..e))
-			.and_then(|r| self.get_mut(r))
-			.expect("out of bounds")
-			.fill(0);
-		Box::pin(future::ready(Ok(())))
-	}
-
-	fn len(&self) -> u64 {
-		<[u8]>::len(self).try_into().unwrap_or(u64::MAX)
-	}
-}
-
-macro_rules! store_slice {
-	($ty:ty) => {
-		impl Store for $ty {
-			type Error = !;
-
-			fn read<'a>(
-				&'a mut self,
-				offset: u64,
-				buf: &'a mut [u8],
-			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>> {
-				<[u8] as Store>::read(self, offset, buf)
-			}
-			fn write<'a>(
-				&'a mut self,
-				offset: u64,
-				data: &'a [u8],
-			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>> {
-				<[u8] as Store>::write(self, offset, data)
-			}
-			fn write_zeros<'a>(
-				&'a mut self,
-				offset: u64,
-				len: u64,
-			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>> {
-				<[u8] as Store>::write_zeros(self, offset, len)
-			}
-			fn len(&self) -> u64 {
-				<[u8] as Store>::len(self)
-			}
-		}
-	};
-}
-#[cfg(feature = "alloc")]
-store_slice!(Box<[u8]>);
-#[cfg(feature = "alloc")]
-store_slice!(Vec<u8>);
-
-#[derive(Debug)]
-pub struct DynConf {
-	pub header_offset: u64,
-	pub item_offset: u16,
-}
-
-impl Conf for DynConf {
-	fn header_offset(&self) -> u64 {
-		self.header_offset
-	}
-	fn item_offset(&self) -> u16 {
-		self.item_offset
-	}
-}
-
-#[derive(Debug)]
-pub struct StaticConf<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16>;
-
-impl<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16> StaticConf<HEADER_OFFSET, ITEM_OFFSET> {
-	pub const CONF: Self = Self;
-}
-
-impl<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16> Conf
-	for StaticConf<HEADER_OFFSET, ITEM_OFFSET>
-{
-	fn header_offset(&self) -> u64 {
-		HEADER_OFFSET
-	}
-	fn item_offset(&self) -> u16 {
-		ITEM_OFFSET
-	}
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct Key([u8]);
-
-#[derive(Debug)]
-pub struct TooLong;
-
-impl Key {
-	pub fn len_u8(&self) -> u8 {
-		self.len_nonzero_u8().get()
-	}
-
-	pub fn len_nonzero_u8(&self) -> NonZeroU8 {
-		debug_assert!(!self.0.is_empty());
-		// SAFETY: names are always non-zero length.
-		unsafe { NonZeroU8::new_unchecked(self.0.len() as _) }
-	}
-}
-
-impl<'a> TryFrom<&'a [u8]> for &'a Key {
-	type Error = TooLong;
-
-	fn try_from(s: &'a [u8]) -> Result<Self, Self::Error> {
-		// SAFETY: Key is repr(transparent)
-		(1..=255)
-			.contains(&s.len())
-			.then(|| unsafe { &*(s as *const _ as *const _) })
-			.ok_or(TooLong)
-	}
-}
-
-impl<'a> TryFrom<&'a mut [u8]> for &'a mut Key {
-	type Error = TooLong;
-
-	fn try_from(s: &'a mut [u8]) -> Result<Self, Self::Error> {
-		// SAFETY: Key is repr(transparent)
-		(1..=255)
-			.contains(&s.len())
-			.then(|| unsafe { &mut *(s as *mut _ as *mut _) })
-			.ok_or(TooLong)
-	}
-}
-
-impl<'a> TryFrom<&'a str> for &'a Key {
-	type Error = TooLong;
-
-	fn try_from(s: &'a str) -> Result<Self, Self::Error> {
-		s.as_bytes().try_into()
-	}
-}
-
-impl TryFrom<Box<[u8]>> for Box<Key> {
-	type Error = TooLong;
-
-	fn try_from(s: Box<[u8]>) -> Result<Self, Self::Error> {
-		// SAFETY: Key is repr(transparent)
-		(1..=255)
-			.contains(&s.len())
-			.then(|| unsafe { Box::from_raw(Box::into_raw(s) as *mut Key) })
-			.ok_or(TooLong)
-	}
-}
-
-struct KeyLen<const B: usize>;
-trait True {}
-
-// TODO CGE pls
-macro_rules! from {
-	($x:literal, $($y:literal)*) => {
-		$(impl True for KeyLen<{$x * 16 + $y}> {})*
-	};
-	(rept $($x:literal)*) => {
-		$(from!($x, 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);)*
-	};
-}
-from!(0, 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
-from!(rept 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
-
-impl<'a, const N: usize> From<&'a [u8; N]> for &'a Key
-where
-	KeyLen<N>: True,
-{
-	fn from(s: &'a [u8; N]) -> Self {
-		// SAFETY: Key is repr(transparent)
-		unsafe { &*(s.as_slice() as *const _ as *const _) }
-	}
-}
-
-impl<'a, const N: usize> From<&'a mut [u8; N]> for &'a mut Key
-where
-	KeyLen<N>: True,
-{
-	fn from(s: &'a mut [u8; N]) -> Self {
-		// SAFETY: Key is repr(transparent)
-		unsafe { &mut *(s.as_mut_slice() as *mut _ as *mut _) }
-	}
-}
-
-impl Deref for Key {
-	type Target = [u8];
-
-	fn deref(&self) -> &Self::Target {
-		&self.0
-	}
-}
-
-impl DerefMut for Key {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		&mut self.0
-	}
-}
-
-macro_rules! alloc {
-	($($ty:ident)*) => {
-		$(
-			impl From<&Key> for $ty<Key> {
-				fn from(name: &Key) -> Self {
-					// SAFETY: Key is repr(transparent)
-					unsafe { $ty::from_raw($ty::into_raw($ty::<[u8]>::from(&name.0)) as *mut _) }
-				}
-			}
-		)*
-	};
-}
-
-alloc!(Box Rc Arc);
-
-impl ToOwned for Key {
-	type Owned = Box<Key>;
-
-	fn to_owned(&self) -> Self::Owned {
-		self.into()
-	}
-}
-
-impl fmt::Debug for Key {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		bstr::BStr::new(&self.0).fmt(f)
-	}
-}
-
-impl fmt::Display for Key {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		bstr::BStr::new(&self.0).fmt(f)
-	}
-}
-
-#[cfg(fuzzing)]
-impl<'a> arbitrary::Arbitrary<'a> for &'a Key {
-	fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-		let len = u.int_in_range::<usize>(1..=255)?;
-		u.bytes(len).map(|b| b.try_into().unwrap())
-	}
-
-	fn size_hint(_depth: usize) -> (usize, Option<usize>) {
-		(2, Some(256))
 	}
 }
 
