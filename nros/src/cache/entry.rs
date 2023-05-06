@@ -76,7 +76,7 @@ impl<'a, B: Buf> EntryRef<'a, B> {
 		let data = util::slice_trim_zeros_end(data);
 
 		let entry = &mut self.entry;
-		if entry.data.len() < offset + data.len() {
+		if !data.is_empty() && entry.data.len() < offset + data.len() {
 			entry.data.resize(offset, 0);
 			entry.data.extend_from_slice(data);
 		} else if offset + total_len < entry.data.len() {
@@ -90,6 +90,7 @@ impl<'a, B: Buf> EntryRef<'a, B> {
 			entry.data.extend_from_slice(data);
 			util::trim_zeros_end(&mut entry.data);
 		}
+		debug_assert_ne!(entry.data.get().last(), Some(&0), "entry not trimmed");
 
 		self.dirty.insert(self.key);
 	}

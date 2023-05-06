@@ -34,7 +34,7 @@ package = "nora_endian"
 git = "https://github.com/Demindiro/nora_endian"
 
 [dependencies.rangemap]
-version = "1.0"
+version = "1.3"
 
 [dependencies.lz4_flex]
 version = "0.9"
