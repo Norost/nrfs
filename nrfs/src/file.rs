@@ -5,7 +5,7 @@ use crate::Item;
 use {
 	crate::{
 		dir::{Dir, Kv},
-		Dev, Error, ItemKey, Nrfs,
+		Dev, Error, ItemKey,
 	},
 	core::fmt,
 };

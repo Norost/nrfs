@@ -1,5 +1,5 @@
 use {
-	crate::{dir::Kv, Error, Nrfs, Store},
+	crate::{Error, Nrfs, Store},
 	nrkv::{Key, Nrkv, StaticConf},
 	nros::{Dev, Nros, Resource, StdResource},
 };

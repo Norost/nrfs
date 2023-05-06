@@ -78,6 +78,7 @@ impl Header {
 				let offt = Tag::new(u48_to_u64(r.offset))?;
 				r.offset = apply_u48(r.offset, |n| n + amount)?;
 				r.length = apply_u48(r.length, |n| n - amount)?;
+				self.used = apply_u48(self.used, |n| n + amount).unwrap();
 				return Some((offt, l));
 			}
 		}

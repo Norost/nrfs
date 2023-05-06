@@ -69,7 +69,7 @@ pub use {
 	core::cell::RefCell,
 	dir::{CreateError, Dir, RemoveError, TransferError},
 	file::{File, LengthTooLong},
-	item::{Item, ItemInfo, ItemKey, ItemTy},
+	item::{Item, ItemInfo, ItemKey, ItemTy, SetAttrError},
 	nrkv::Key,
 	nros::{
 		dev, BlockSize, CipherType, Compression, Dev, KeyDeriver, KeyPassword, MaxRecordSize,

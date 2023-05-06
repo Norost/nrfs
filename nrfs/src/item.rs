@@ -92,6 +92,7 @@ impl<'a, D: Dev> Item<'a, D> {
 		let a = offt.get() << 16 | u64::from(attr_len);
 		kv.write_user_data(self.key.tag, 16, &a.to_le_bytes())
 			.await?;
+		kv.save().await?;
 		Ok(())
 	}
 
@@ -119,10 +120,7 @@ impl<'a, D: Dev> Item<'a, D> {
 		let mut attr = &*attr;
 		while let Some((i, val)) = attr_next(&mut attr) {
 			if i == id {
-				match val {
-					AttrVal::Short(v) => return Ok(Some(v.into())),
-					AttrVal::Long { offset, len } => todo!(),
-				}
+				return Ok(Some(val.into()));
 			}
 		}
 		Ok(None)
@@ -133,7 +131,11 @@ impl<'a, D: Dev> Item<'a, D> {
 		key: &Key,
 		value: &[u8],
 	) -> Result<Result<(), SetAttrError>, Error<D>> {
-		let (mut kv, addr, mut attr) = self.read_attr().await?;
+		if self.key.dir == u64::MAX {
+			return Ok(Err(SetAttrError::IsRoot));
+		}
+
+		let (kv, addr, mut attr) = self.read_attr().await?;
 		if attr.len() + (8 + 1 + value.len().min(8)) > usize::from(u16::MAX) {
 			return Ok(Err(SetAttrError::Full));
 		}
@@ -143,16 +145,13 @@ impl<'a, D: Dev> Item<'a, D> {
 
 		let mut a = &*attr;
 		let mut start = 0;
-		while let Some((i, val)) = attr_next(&mut a) {
+		while let Some((i, _)) = attr_next(&mut a) {
+			let end = attr.len() - a.len();
 			if i == id {
-				if let AttrVal::Long { offset, len } = val {
-					todo!();
-				}
-				let end = attr.len() - a.len();
 				attr.drain(start..end);
 				break;
 			}
-			start = attr.len() - a.len();
+			start = end;
 		}
 
 		let mut id = id.get();
@@ -164,12 +163,14 @@ impl<'a, D: Dev> Item<'a, D> {
 		let b = (id as u16).to_le_bytes();
 		attr.extend_from_slice(&b);
 
-		if value.len() <= 32 {
+		if value.len() < 255 {
 			attr.push(value.len() as _);
-			attr.extend_from_slice(value);
 		} else {
-			todo!();
+			let l = u32::try_from(value.len()).unwrap();
+			attr.push(255);
+			attr.extend_from_slice(&l.to_le_bytes());
 		}
+		attr.extend_from_slice(value);
 
 		self.write_attr(kv, addr, attr).await?;
 
@@ -183,18 +184,15 @@ impl<'a, D: Dev> Item<'a, D> {
 		let (kv, addr, mut attr) = self.read_attr().await?;
 		let mut a = &*attr;
 		let mut start = 0;
-		while let Some((i, val)) = attr_next(&mut a) {
+		while let Some((i, _)) = attr_next(&mut a) {
+			let end = attr.len() - a.len();
 			if i == id {
-				if let AttrVal::Long { offset, len } = val {
-					todo!();
-				}
-				let end = attr.len() - a.len();
 				attr.drain(start..end);
 				self.write_attr(kv, addr, attr).await?;
 				attr_map.unref_attr(id).await?;
 				return Ok(true);
 			}
-			start = attr.len() - a.len();
+			start = end;
 		}
 		Ok(false)
 	}
@@ -203,14 +201,10 @@ impl<'a, D: Dev> Item<'a, D> {
 #[derive(Clone, Debug)]
 pub enum SetAttrError {
 	Full,
+	IsRoot,
 }
 
-enum AttrVal<'a> {
-	Short(&'a [u8]),
-	Long { offset: u64, len: u16 },
-}
-
-fn attr_next<'a>(attr: &mut &'a [u8]) -> Option<(nrkv::Tag, AttrVal<'a>)> {
+fn attr_next<'a>(attr: &mut &'a [u8]) -> Option<(nrkv::Tag, &'a [u8])> {
 	if attr.is_empty() {
 		return None;
 	}
@@ -227,15 +221,14 @@ fn attr_next<'a>(attr: &mut &'a [u8]) -> Option<(nrkv::Tag, AttrVal<'a>)> {
 	let id = id.try_into().unwrap();
 	let len;
 	(len, *attr) = attr.split_array_ref::<1>();
-	if len[0] < 255 {
-		let val;
-		(val, *attr) = attr.split_at(len[0].into());
-		Some((id, AttrVal::Short(val)))
+	let len = if len[0] < 255 {
+		u32::from(len[0])
 	} else {
-		let l;
-		(l, *attr) = attr.split_array_ref::<8>();
-		let l = u64::from_le_bytes(*l);
-		let (offset, len) = (l >> 16, l as u16);
-		Some((id, AttrVal::Long { offset, len }))
-	}
+		let len;
+		(len, *attr) = attr.split_array_ref::<4>();
+		u32::from_le_bytes(*len)
+	};
+	let val;
+	(val, *attr) = attr.split_at(len.try_into().unwrap());
+	Some((id, val))
 }

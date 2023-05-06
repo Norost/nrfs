@@ -415,13 +415,13 @@ impl<'a> Test<'a> {
 							}
 							Op::SetAttr { idx, key, value } => {
 								let r = get!(idx);
-								self.fs
-									.item(*r.key())
-									.set_attr(key, value)
-									.await
-									.unwrap()
-									.unwrap();
-								r.attrs().insert(key, value);
+								match self.fs.item(*r.key()).set_attr(key, value).await.unwrap() {
+									Ok(()) => {
+										r.attrs().insert(key, value);
+									}
+									Err(SetAttrError::Full) => todo!(),
+									Err(SetAttrError::IsRoot) => assert_eq!(idx, 0),
+								}
 							}
 							Op::ListAttr { idx } => {
 								let r = get!(idx);
