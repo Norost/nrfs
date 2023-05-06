@@ -259,7 +259,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 					Box::<Key>::try_from(key.into_boxed_slice()).unwrap(),
 				)),
 				key: ItemKey { dir: self.id, tag },
-				ty: ItemTy::from_raw(ty[0]).unwrap(),
+				ty: ItemTy::from_raw(ty[0] & 7).unwrap(),
 			}));
 			Ok(false)
 		})
