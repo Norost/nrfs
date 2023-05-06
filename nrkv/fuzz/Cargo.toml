@@ -24,3 +24,9 @@ name = "random_ops"
 path = "fuzz_targets/random_ops.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "leak_space"
+path = "fuzz_targets/leak_space.rs"
+test = false
+doc = false

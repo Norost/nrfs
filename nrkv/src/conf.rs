@@ -1,3 +1,5 @@
+use core::fmt;
+
 pub trait Conf {
 	fn header_offset(&self) -> u64;
 	fn item_offset(&self) -> u16;
@@ -18,7 +20,6 @@ impl Conf for DynConf {
 	}
 }
 
-#[derive(Debug)]
 pub struct StaticConf<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16>;
 
 impl<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16> StaticConf<HEADER_OFFSET, ITEM_OFFSET> {
@@ -33,5 +34,13 @@ impl<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16> Conf
 	}
 	fn item_offset(&self) -> u16 {
 		ITEM_OFFSET
+	}
+}
+
+impl<const HEADER_OFFSET: u64, const ITEM_OFFSET: u16> fmt::Debug
+	for StaticConf<HEADER_OFFSET, ITEM_OFFSET>
+{
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		format_args!("StaticConf<{}, {}>", HEADER_OFFSET, ITEM_OFFSET).fmt(f)
 	}
 }

@@ -6,6 +6,7 @@
 extern crate alloc;
 
 mod conf;
+mod header;
 mod key;
 mod store;
 #[cfg(test)]
@@ -22,11 +23,12 @@ use {
 		hash::Hasher,
 		pin::Pin,
 	},
+	header::*,
 	rand_core::{CryptoRng, RngCore},
 	siphasher::sip128::{Hasher128, SipHasher13},
 };
 
-const HEADER_SIZE: u64 = 28;
+const HEADER_SIZE: u64 = 64;
 const HAMT_ENTRY_SIZE: u64 = 6;
 const HAMT_ROOT_LEN: u64 = 4096;
 const HAMT_CHILD_LEN: u64 = 16;
@@ -58,8 +60,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 
 	#[must_use]
 	pub async fn init_with_key(store: S, conf: C, hash_key: [u8; 16]) -> Result<Self, S::Error> {
-		let used = conf.header_offset() + HEADER_SIZE + HAMT_ENTRY_SIZE * HAMT_ROOT_LEN;
-		let hdr = Header { hash_key, used: u64_to_u48(used), free_head: u64_to_u48(used) };
+		let hdr = Header::new(hash_key, conf.header_offset());
 		let mut slf = Self { hdr, store, conf };
 		slf.save().await?;
 		Ok(slf)
@@ -194,7 +195,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		offset: u16,
 		buf: &mut [u8],
 	) -> Result<(), S::Error> {
-		assert!(usize::from(offset) + buf.len() <= usize::from(self.conf.item_offset()));
+		assert!(usize::from(offset) + <[u8]>::len(buf) <= usize::from(self.conf.item_offset()));
 		Item::new(self, tag).read_user(offset, buf).await
 	}
 
@@ -208,15 +209,68 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		Item::new(self, tag).write_user(offset, data).await
 	}
 
-	pub async fn alloc(&mut self, amount: u64) -> Result<Tag, S::Error> {
-		let offt = Tag::new(u48_to_u64(self.hdr.free_head)).unwrap();
-		apply_u48(&mut self.hdr.free_head, |n| n + u64::from(amount));
-		Ok(offt)
+	pub async fn alloc(&mut self, len: u64) -> Result<Tag, S::Error> {
+		if len == 0 {
+			return Ok(Tag::new(16).unwrap());
+		}
+		let len = (len + 15) & !15;
+		let len = 8 + len + 8;
+		assert!(len < 1 << 48);
+		let (offt, prev_region_len) = self.hdr.alloc(len).unwrap();
+
+		let marker = &(len << 16 | 1).to_le_bytes();
+		self.write(offt.get(), marker).await?;
+		self.write(offt.get() + len - 8, marker).await?;
+
+		if prev_region_len > 0 && prev_region_len - len > 0 {
+			let marker = &(prev_region_len - len << 16 | 0).to_le_bytes();
+			self.write(offt.get() + len, marker).await?;
+			self.write(offt.get() + prev_region_len - 8, marker).await?;
+		}
+
+		Ok(offt.checked_add(8).unwrap())
 	}
 
-	pub async fn dealloc(&mut self, offset: u64, amount: u64) -> Result<(), S::Error> {
-		apply_u48(&mut self.hdr.used, |n| n - amount);
-		self.write_zeros(offset, amount).await?;
+	pub async fn dealloc(&mut self, offset: u64, len: u64) -> Result<(), S::Error> {
+		if len == 0 {
+			return Ok(());
+		}
+		let len = (len + 15) & !15;
+		let len = 8 + len + 8;
+		let mut start @ mut zero_start = offset - 8;
+		let mut end @ mut zero_end = start + len;
+		self.hdr.dealloc(end - start).unwrap();
+
+		let f = |b: [u8; 8]| {
+			let b = u64::from_le_bytes(b);
+			(b >> 16, b as u16)
+		};
+
+		let mut b = [0; 8];
+		self.read(start - 8, &mut b).await?;
+		let (l, flags) = f(b);
+		if flags & 1 == 0 {
+			start -= l;
+			zero_start -= 8 * u64::from(l > 0);
+		}
+
+		self.read(end, &mut b).await?;
+		let (l, flags) = f(b);
+		if flags & 1 == 0 {
+			end += l;
+			zero_end += 8 * u64::from(l > 0);
+		}
+
+		self.write_zeros(zero_start, zero_end - zero_start).await?;
+
+		let l = end - start;
+		if self.hdr.insert_free_region(start, l) {
+			self.write_zeros(start, 8).await?;
+		} else {
+			let marker = &(l << 16 | 0).to_le_bytes();
+			self.write(start, marker).await?;
+			self.write(end - 8, marker).await?;
+		}
 		Ok(())
 	}
 
@@ -230,6 +284,15 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 
 	pub async fn write_zeros(&mut self, offset: u64, len: u64) -> Result<(), S::Error> {
 		self.store.write_zeros(offset, len).await
+	}
+}
+
+impl<S, C: fmt::Debug> fmt::Debug for Nrkv<S, C> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct(stringify!(Nrkv))
+			.field("hdr", &self.hdr)
+			.field("conf", &self.conf)
+			.finish_non_exhaustive()
 	}
 }
 
@@ -315,43 +378,6 @@ impl<'a, S: Store, C: Conf> ShareNrkv<'a, S, C> {
 	}
 }
 
-#[repr(C)]
-struct Header {
-	hash_key: [u8; 16],
-	used: [u8; 6],
-	free_head: [u8; 6],
-}
-
-impl Header {
-	fn to_raw(&self) -> [u8; HEADER_SIZE as _] {
-		fn f<const N: usize>(s: &mut [u8], v: [u8; N]) -> &mut [u8] {
-			let (x, y) = s.split_array_mut::<N>();
-			*x = v;
-			y
-		}
-
-		let mut buf = [0; _];
-		let b = f(&mut buf, self.hash_key);
-		let b = f(b, self.used);
-		let b = f(b, self.free_head);
-		assert!(b.is_empty());
-		buf
-	}
-
-	fn from_raw(raw: &[u8; HEADER_SIZE as _]) -> Self {
-		fn f<const N: usize>(s: &mut &[u8]) -> [u8; N] {
-			let (x, y) = s.split_array_ref::<N>();
-			*s = y;
-			*x
-		}
-
-		let mut raw = &raw[..];
-		let s = Self { hash_key: f(&mut raw), used: f(&mut raw), free_head: f(&mut raw) };
-		assert!(raw.is_empty());
-		s
-	}
-}
-
 struct Item<'a, S, C> {
 	kv: &'a mut Nrkv<S, C>,
 	offset: Tag,
@@ -427,7 +453,7 @@ impl<'a, S: Store, C: Conf> Item<'a, S, C> {
 	async fn read_key(&mut self, buf: &mut [u8]) -> Result<u8, S::Error> {
 		let len = &mut [0];
 		self.read(self.key_offset(), len).await?;
-		let l = buf.len().min(usize::from(len[0]));
+		let l = <[u8]>::len(buf).min(usize::from(len[0]));
 		self.read(self.key_offset() + 1, &mut buf[..l]).await?;
 		Ok(len[0])
 	}
@@ -515,8 +541,8 @@ impl fmt::Debug for IterState {
 	}
 }
 
-fn u64_to_u48(n: u64) -> [u8; 6] {
-	n.to_le_bytes()[..6].try_into().unwrap()
+fn u64_to_u48(n: u64) -> Option<[u8; 6]> {
+	(n < 1 << 48).then(|| n.to_le_bytes()[..6].try_into().unwrap())
 }
 
 fn u48_to_u64(n: [u8; 6]) -> u64 {
@@ -525,6 +551,6 @@ fn u48_to_u64(n: [u8; 6]) -> u64 {
 	u64::from_le_bytes(b)
 }
 
-fn apply_u48(n: &mut [u8; 6], f: impl FnOnce(u64) -> u64) {
-	*n = u64_to_u48(f(u48_to_u64(*n)));
+fn apply_u48(n: [u8; 6], f: impl FnOnce(u64) -> u64) -> Option<[u8; 6]> {
+	u64_to_u48(f(u48_to_u64(n)))
 }

@@ -226,3 +226,29 @@ fn reinsert_many_find_with_next() {
 		assert!(t.get().is_none());
 	});
 }
+
+#[test]
+fn dealloc_merge_small() {
+	run(async {
+		let mut kv = mkkv().await;
+		let a = kv.alloc(32).await.unwrap();
+		let b = kv.alloc(32).await.unwrap();
+		let c = kv.alloc(32).await.unwrap();
+		kv.dealloc(a.get(), 32).await.unwrap();
+		kv.dealloc(b.get(), 32).await.unwrap();
+		kv.dealloc(c.get(), 32).await.unwrap();
+	});
+}
+
+#[test]
+fn dealloc_merge_large() {
+	run(async {
+		let mut kv = mkkv().await;
+		let a = kv.alloc(96).await.unwrap();
+		let b = kv.alloc(96).await.unwrap();
+		let c = kv.alloc(96).await.unwrap();
+		kv.dealloc(a.get(), 96).await.unwrap();
+		kv.dealloc(b.get(), 96).await.unwrap();
+		kv.dealloc(c.get(), 96).await.unwrap();
+	});
+}

@@ -41,7 +41,7 @@ impl Store for [u8] {
 		let b = offset
 			.try_into()
 			.ok()
-			.and_then(|o| self.get(o..o + buf.len()))
+			.and_then(|o| self.get(o..o + <[u8]>::len(buf)))
 			.expect("out of bounds");
 		buf.copy_from_slice(b);
 		Box::pin(future::ready(Ok(())))
@@ -82,7 +82,6 @@ impl Store for [u8] {
 
 macro_rules! store_slice {
 	($ty:ty) => {
-		#[cfg(feature = "alloc")]
 		impl Store for $ty {
 			type Error = !;
 
@@ -113,5 +112,8 @@ macro_rules! store_slice {
 		}
 	};
 }
+store_slice!(&mut [u8]);
+#[cfg(feature = "alloc")]
 store_slice!(Box<[u8]>);
+#[cfg(feature = "alloc")]
 store_slice!(Vec<u8>);
