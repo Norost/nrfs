@@ -124,7 +124,7 @@ An item describes a single object.
    Offset (bits) Length (bits) Field
    ============= ============= =====
                0             3 Type
-               3            61 Object ID
+               5            59 Object ID
               64            64 Length
    ============= ============= =====
 
@@ -134,7 +134,7 @@ An item describes a single object.
    Offset (bits) Length (bits) Field
    ============= ============= =====
                0             3 Type
-               3            61 Object ID
+               5            59 Object ID
               64            32 Item count
    ============= ============= =====
 

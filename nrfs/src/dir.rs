@@ -70,7 +70,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 			Err(e) => Ok(Err(e)),
 			Ok((key, mut kv)) => {
 				let id = Dir::init(self.fs).await?;
-				kv.write_user_data(key.tag, 0, &(id << 3 | 1).to_le_bytes())
+				kv.write_user_data(key.tag, 0, &(id << 5 | 1).to_le_bytes())
 					.await?;
 				Ok(Ok(Dir::new(self.fs, key, id)))
 			}
@@ -146,7 +146,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 				if ty == 1 && b != 0 {
 					return Ok(Err(RemoveError::NotEmpty));
 				}
-				self.fs.get(a >> 3).dealloc().await?;
+				self.fs.get(a >> 5).dealloc().await?;
 			}
 			4 | 5 => {
 				let (len, offt) = (b & 0xffff, b >> 16);

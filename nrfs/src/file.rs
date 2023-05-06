@@ -302,7 +302,7 @@ impl Data {
 
 		let is_sym = ty & 1 != 0; // 3, 5
 		match ty {
-			2 | 3 => Self::Object { is_sym, id: a >> 3, length: b },
+			2 | 3 => Self::Object { is_sym, id: a >> 5, length: b },
 			4 | 5 => Self::Embed {
 				is_sym,
 				offset: a >> 16,
@@ -317,7 +317,7 @@ impl Data {
 		let (a, b);
 		match self {
 			Self::Object { is_sym, id, length } => {
-				a = (2 | u64::from(is_sym)) | (id << 3);
+				a = (2 | u64::from(is_sym)) | (id << 5);
 				b = length;
 			}
 			Self::Embed { is_sym, offset, length, capacity } => {

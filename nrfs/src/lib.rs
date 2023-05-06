@@ -116,7 +116,7 @@ impl<D: Dev> Nrfs<D> {
 
 		let s = Self { storage, read_only: false };
 		let id = Dir::init(&s).await?;
-		s.storage.header_data()[..8].copy_from_slice(&(id << 3 | 1).to_le_bytes());
+		s.storage.header_data()[..8].copy_from_slice(&(id << 5 | 1).to_le_bytes());
 
 		let id = attr::AttrMap::init(&s.storage).await?;
 		s.storage.header_data()[24..32].copy_from_slice(&id.to_le_bytes());
@@ -202,7 +202,7 @@ impl<D: Dev> Nrfs<D> {
 			a.copy_from_slice(&self.storage.header_data()[..8]);
 		}
 		assert_eq!(a[0] & 7, 1, "ty not a dir ({})", a[0] & 7);
-		Ok(Dir::new(self, key, u64::from_le_bytes(a) >> 3))
+		Ok(Dir::new(self, key, u64::from_le_bytes(a) >> 5))
 	}
 
 	pub fn file(&self, key: ItemKey) -> File<'_, D> {
