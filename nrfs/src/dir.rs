@@ -196,6 +196,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 		kv.read_user_data(key.tag, 0, item).await?;
 		kv.remove(key.tag).await?;
 
+		assert_ne!(key, to_dir.key, "transfer causes cycle");
+
 		if let Some(from_kv) = from_kv.as_mut() {
 			let mut buf = vec![];
 			if matches!(item[0] & 7, 4 | 5) {
@@ -224,7 +226,10 @@ impl<'a, D: Dev> Dir<'a, D> {
 		to_kv.save().await?;
 		if let Some(mut from_kv) = from_kv {
 			from_kv.save().await?;
+			self.update_item_count(false).await?;
+			to_dir.update_item_count(true).await?;
 		}
+
 		Ok(Ok(ItemKey { dir: to_dir.id, tag }))
 	}
 

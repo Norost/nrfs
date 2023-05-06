@@ -342,7 +342,7 @@ impl<'a> Test<'a> {
 								}
 							}
 							Op::Transfer { idx, to_idx, to } => {
-								if idx == 0 {
+								if idx == 0 || idx == to_idx {
 									continue;
 								}
 								let r = get!(idx);
