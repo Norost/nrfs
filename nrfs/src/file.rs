@@ -232,7 +232,7 @@ impl<'a, D: Dev> File<'a, D> {
 	}
 
 	pub async fn len(&self) -> Result<u64, Error<D>> {
-		trace!("len");
+		trace!("File::len");
 		Ok(self.data().await?.1.len())
 	}
 

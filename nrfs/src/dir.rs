@@ -1,6 +1,6 @@
 use {
-	crate::{Dev, Error, File, ItemInfo, ItemKey, ItemTy, Nrfs, Store},
-	core::{cell::RefCell, fmt, future::Future},
+	crate::{Dev, Error, File, Item, ItemInfo, ItemKey, ItemTy, Nrfs, Store},
+	core::{cell::RefCell, fmt, future::Future, ops::Deref},
 	nrkv::Key,
 	nros::Resource,
 	std::borrow::Cow,
@@ -9,8 +9,7 @@ use {
 /// Helper structure for working with directories.
 #[derive(Debug)]
 pub struct Dir<'a, D: Dev> {
-	pub(crate) fs: &'a Nrfs<D>,
-	pub(crate) key: ItemKey,
+	pub(crate) item: Item<'a, D>,
 	pub(crate) id: u64,
 }
 
@@ -20,7 +19,7 @@ pub(crate) type Kv<'a, D> = nrkv::Nrkv<Store<'a, D>, Conf>;
 impl<'a, D: Dev> Dir<'a, D> {
 	/// Create a [`Dir`] helper structure.
 	pub fn new(fs: &'a Nrfs<D>, key: ItemKey, id: u64) -> Self {
-		Self { fs, key, id }
+		Self { item: Item::new(fs, key), id }
 	}
 
 	/// Create a new directory.
@@ -271,6 +270,14 @@ impl<'a, D: Dev> Dir<'a, D> {
 		self.key
 	}
 
+	pub async fn len(&self) -> Result<u32, Error<D>> {
+		trace!("Dir::len");
+		let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv().await?;
+		let buf = &mut [0; 4];
+		kv.read_user_data(self.key.tag, 8, buf).await?;
+		Ok(u32::from_le_bytes(*buf))
+	}
+
 	pub(crate) fn kv(&self) -> impl Future<Output = Result<Kv<'a, D>, Error<D>>> {
 		nrkv::Nrkv::load(Store(self.fs.get(self.id)), nrkv::StaticConf)
 	}
@@ -290,6 +297,14 @@ impl<'a, D: Dev> Dir<'a, D> {
 		};
 		kv.write_user_data(self.key.tag, 8, &num.to_le_bytes())
 			.await
+	}
+}
+
+impl<'a, D: Dev> Deref for Dir<'a, D> {
+	type Target = Item<'a, D>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.item
 	}
 }
 

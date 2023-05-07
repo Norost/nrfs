@@ -204,6 +204,18 @@ pub enum SetAttrError {
 	IsRoot,
 }
 
+impl fmt::Display for SetAttrError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Full => "full",
+			Self::IsRoot => "is root",
+		}
+		.fmt(f)
+	}
+}
+
+impl core::error::Error for SetAttrError {}
+
 fn attr_next<'a>(attr: &mut &'a [u8]) -> Option<(nrkv::Tag, &'a [u8])> {
 	if attr.is_empty() {
 		return None;
