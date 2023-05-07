@@ -1,18 +1,19 @@
 [package]
-name = "nrfs-fuzz"
+name = "nrkv-fuzz"
 version = "0.0.0"
 authors = ["Automatically generated"]
 publish = false
-edition = "2021"
+edition = "2018"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
-futures-util = "0.3"
-nrfs = { path = ".." }
-rangemap = "1.0"
+libfuzzer-sys = "0.4"
+arbitrary = { version = "*", features = ["derive"] }
+
+[dependencies.nrkv]
+path = ".."
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -21,5 +22,11 @@ members = ["."]
 [[bin]]
 name = "random_ops"
 path = "fuzz_targets/random_ops.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "leak_space"
+path = "fuzz_targets/leak_space.rs"
 test = false
 doc = false

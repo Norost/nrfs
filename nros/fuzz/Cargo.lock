@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "nros"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arbitrary",
  "arena",
@@ -474,9 +474,9 @@ dependencies = [
 
 [[package]]
 name = "rangemap"
-version = "1.2.0"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fa20df61fa7daf0ecf0735b9841ced4a0d25962d1b1eb2dd28dcdd37bb688f2"
+checksum = "8b9283c6b06096b47afc7109834fdedab891175bb5241ee5d4f7d2546549f263"
 
 [[package]]
 name = "rayon"

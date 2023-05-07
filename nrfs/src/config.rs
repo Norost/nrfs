@@ -1,6 +1,4 @@
-use crate::{
-	BlockSize, CipherType, Compression, Dev, EnableExt, KeyDeriver, KeyPassword, MaxRecordSize,
-};
+use crate::{BlockSize, CipherType, Compression, Dev, KeyDeriver, KeyPassword, MaxRecordSize};
 
 pub struct NewConfig<'a, D: Dev> {
 	/// Mirror of chains of devices.
@@ -24,7 +22,6 @@ pub struct NewConfig<'a, D: Dev> {
 	/// This is a soft limit.
 	/// Real usage may exceed this.
 	pub cache_size: usize,
-	pub dir: EnableExt,
 }
 
 pub struct LoadConfig<'a, D: Dev> {

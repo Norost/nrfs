@@ -2,16 +2,20 @@ use super::*;
 
 impl Fs {
 	pub async fn create(&self, job: crate::job::Create) {
-		let Ok(name) = job.name.as_bytes().try_into() else { return job.reply.error(libc::ENAMETOOLONG) };
+		let Ok(name) = job.name.as_bytes().try_into()
+			else { return job.reply.error(libc::ENAMETOOLONG) };
 
-		let d = self.ino().get_dir(job.parent);
-		let d = self.fs.dir(d);
+		let dir = match self.ino().get(job.parent).unwrap() {
+			Get::Key(Key::Dir(d)) => self.fs.dir(d).await.unwrap(),
+			Get::Key(_) => return job.reply.error(libc::ENOTDIR),
+			Get::Stale => return job.reply.error(libc::ESTALE),
+		};
 
-		let ext = mkext(job.mode as _, job.uid, job.gid);
-		match d.create_file(name, ext.clone()).await.unwrap() {
+		match dir.create_file(name).await.unwrap() {
 			Ok(f) => {
-				let ino = self.ino().add_file(f.into_key());
-				let attr = self.attr(ino, FileType::RegularFile, 0, ext);
+				let attrs = init_attrs(&f, job.uid, job.gid, Some(job.mode as u16 & 0o777)).await;
+				let ino = self.ino().add(Key::File(f.key()));
+				let attr = self.attr(ino, FileType::RegularFile, 0, attrs);
 				job.reply.created(&TTL, &attr, 0, 0, 0);
 			}
 			Err(CreateError::Duplicate) => job.reply.error(libc::EEXIST),

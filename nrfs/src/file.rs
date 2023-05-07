@@ -1,6 +1,11 @@
+use std::ops::Deref;
+
+use crate::Item;
+
 use {
 	crate::{
-		dir::Dir, item::ItemData, Dev, DirKey, Error, ItemExt, ItemKey, Name, Nrfs, TransferError,
+		dir::{Dir, Kv},
+		Dev, Error, ItemKey,
 	},
 	core::fmt,
 };
@@ -28,52 +33,13 @@ use {
 /// * Maximum waste = how much data may be padding if stored as an object.
 const EMBED_FACTOR: u64 = 4;
 
-/// Key to a file.
-///
-/// Can be paired with a [`Nrfs`] object to create a [`File`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FileKey {
-	/// High ID of parent directory.
-	dir_hi: u32,
-	/// Low ID of parent directory.
-	dir_lo: u32,
-	/// Index to corresponding item *data* in parent directory.
-	/// The key does *not* point to the name but the *data* of the item.
-	pub(crate) index: u32,
-}
-
-impl FileKey {
-	pub(crate) fn new(dir: u64, index: u32) -> Self {
-		Self { dir_hi: (dir >> 32) as u32, dir_lo: dir as u32, index }
-	}
-
-	/// Get ID of parent directory.
-	pub(crate) fn dir(&self) -> u64 {
-		u64::from(self.dir_hi) << 32 | u64::from(self.dir_lo)
-	}
-
-	/// Set ID of parent directory.
-	pub(crate) fn set_dir(&mut self, id: u64) {
-		self.dir_hi = (id >> 32) as u32;
-		self.dir_lo = id as u32;
-	}
-}
-
 /// Helper structure for working with files.
 #[derive(Debug)]
 pub struct File<'a, D: Dev> {
-	/// The filesystem containing the file's data.
-	fs: &'a Nrfs<D>,
-	/// Key to file.
-	key: FileKey,
+	pub(crate) item: Item<'a, D>,
 }
 
 impl<'a, D: Dev> File<'a, D> {
-	/// Create a [`File`] helper structure.
-	pub fn new(fs: &'a Nrfs<D>, key: FileKey) -> Self {
-		Self { fs, key }
-	}
-
 	/// Read data.
 	///
 	/// The returned value indicates how many bytes were actually read.
@@ -83,106 +49,24 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 
-		let dir = self.dir();
-		let item = dir.item_get_data(self.key.index).await?;
-		let end = offset + u64::try_from(buf.len()).unwrap();
+		let (mut kv, dat) = self.data().await?;
+		let end = calc_end(offset, buf.len()).unwrap_or(u64::MAX);
 
-		if offset >= item.len {
+		if offset >= dat.len() {
 			return Ok(0);
 		}
-		if end > item.len {
-			buf = &mut buf[..usize::try_from(item.len - offset).unwrap()];
+		if end > dat.len() {
+			buf = &mut buf[..usize::try_from(dat.len() - offset).unwrap()];
 		}
 
-		match item.ty {
-			ItemData::TY_FILE | ItemData::TY_SYM => {
-				let obj = self.fs.get(item.id_or_offset);
-				obj.read(offset, buf).await?;
+		match dat {
+			Data::Object { id, .. } => {
+				self.fs.get(id).read(offset, buf).await?;
 			}
-			ItemData::TY_EMBED_FILE | ItemData::TY_EMBED_SYM => {
-				let hdr = self.dir().header().await?;
-				let heap = self.dir().heap(&hdr);
-				heap.read(item.id_or_offset + offset, buf).await?;
-			}
-			_ => todo!(),
+			Data::Embed { offset: offt, .. } => kv.read(offt + offset, buf).await?,
 		}
 
 		Ok(buf.len())
-	}
-
-	/// Write data in-place.
-	///
-	/// # Note
-	///
-	/// This does not check bounds!
-	async fn write_inplace(
-		&self,
-		offset: u64,
-		data: &[u8],
-		item: ItemData,
-	) -> Result<(), Error<D>> {
-		trace!("write_inplace {}+{} {:?}", offset, data.len(), &item);
-		match item.ty {
-			ItemData::TY_FILE | ItemData::TY_SYM => {
-				let obj = self.fs.get(item.id_or_offset);
-				obj.write(offset, data).await?;
-			}
-			ItemData::TY_EMBED_FILE | ItemData::TY_EMBED_SYM => {
-				let offt = item.id_or_offset + offset;
-				let hdr = self.dir().header().await?;
-				self.dir().heap(&hdr).write(offt, data).await?;
-			}
-			_ => todo!(),
-		}
-		Ok(())
-	}
-
-	/// Write data, replacing the tail and growing the embedded file.
-	///
-	/// Sets the new total length of the file in `item` as well as other properties.
-	///
-	/// # Note
-	///
-	/// This does not check bounds!
-	async fn write_embed_replace_tail(
-		&self,
-		offset: u64,
-		data: &[u8],
-		item: &mut ItemData,
-	) -> Result<(), Error<D>> {
-		trace!(
-			"write_embed_replace_tail {}+{} {:?}",
-			offset,
-			data.len(),
-			item
-		);
-		let dir = self.dir();
-		let keep_len = offset.min(item.len);
-		let new_len = offset + u64::try_from(data.len()).unwrap();
-
-		let mut buf = vec![0; keep_len.try_into().unwrap()];
-		let mut hdr = dir.header().await?;
-		let heap = dir.heap(&hdr);
-		heap.read(item.id_or_offset, &mut buf).await?;
-		heap.dealloc(&mut hdr, item.id_or_offset, item.len).await?;
-
-		if new_len <= self.embed_factor() {
-			item.id_or_offset = heap.alloc(&mut hdr, new_len).await?;
-			heap.write(item.id_or_offset, &buf).await?;
-			heap.write(item.id_or_offset + offset, data).await?;
-		} else {
-			let obj = self.fs.storage.create().await?;
-			obj.write(0, &buf).await?;
-			obj.write(offset, data).await?;
-			item.ty = match item.ty {
-				ItemData::TY_EMBED_FILE => ItemData::TY_FILE,
-				ItemData::TY_EMBED_SYM => ItemData::TY_SYM,
-				_ => unreachable!(),
-			};
-			item.id_or_offset = obj.id();
-		};
-		dir.set_header(hdr).await?;
-		Ok(())
 	}
 
 	/// Write data.
@@ -195,18 +79,21 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 
-		let dir = self.dir();
-		let item = dir.item_get_data(self.key.index).await?;
-		let end = offset + u64::try_from(data.len()).unwrap();
-
-		if offset >= item.len {
+		let end = calc_end(offset, data.len()).unwrap_or(u64::MAX);
+		let (mut kv, dat) = self.data().await?;
+		if offset >= dat.len() {
 			return Ok(0);
 		}
-		if end > item.len {
-			data = &data[..usize::try_from(item.len - offset).unwrap()];
+		if end > dat.len() {
+			data = &data[..usize::try_from(dat.len() - offset).unwrap()];
 		}
 
-		self.write_inplace(offset, data, item).await?;
+		match dat {
+			Data::Object { id, .. } => {
+				self.fs.get(id).write(offset, data).await?;
+			}
+			Data::Embed { offset: offt, .. } => kv.write(offt + offset, data).await?,
+		}
 
 		Ok(data.len())
 	}
@@ -224,33 +111,62 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(Ok(()));
 		}
 
-		let end = offset + u64::try_from(data.len()).unwrap();
+		let Some(end) = calc_end(offset, data.len()) else { return Ok(Err(LengthTooLong)) };
 		if end > self.fs.storage.obj_max_len() {
 			return Ok(Err(LengthTooLong));
 		}
 
-		let dir = self.dir();
-		let mut item = dir.item_get_data(self.key.index).await?;
-		if end <= item.len {
-			self.write_inplace(offset, data, item).await?;
-			return Ok(Ok(()));
-		}
+		let (mut kv, mut dat) = self.data().await?;
 
-		match item.ty {
-			ItemData::TY_FILE | ItemData::TY_SYM => {
-				let obj = self.fs.get(item.id_or_offset);
-				obj.write(offset, data).await?;
+		if end <= dat.len() {
+			match dat {
+				Data::Object { id, .. } => {
+					self.fs.get(id).write(offset, data).await?;
+				}
+				Data::Embed { offset: offt, .. } => kv.write(offt + offset, data).await?,
 			}
-			ItemData::TY_EMBED_FILE | ItemData::TY_EMBED_SYM => {
-				self.write_embed_replace_tail(offset, data, &mut item)
-					.await?;
+		} else {
+			match &mut dat {
+				Data::Object { id, length, .. } => {
+					self.fs.get(*id).write(offset, data).await?;
+					*length = end;
+				}
+				Data::Embed { offset: offt, length, capacity, .. }
+					if u64::from(*capacity) >= end =>
+				{
+					kv.write(*offt + offset, data).await?;
+					*length = end.try_into().unwrap();
+				}
+				Data::Embed { offset: offt, length, capacity, .. }
+					if self.embed_factor() >= end =>
+				{
+					let keep_len = u64::from(*length).min(end).try_into().unwrap();
+					let new_cap = (end * 3 / 2).min(u16::MAX.into());
+					let mut buf = vec![0; keep_len];
+					kv.read(*offt, &mut buf).await?;
+					kv.dealloc(*offt, (*capacity).into()).await?;
+					let o = kv.alloc(new_cap).await?;
+					kv.write(o.get(), &buf).await?;
+					kv.write(o.get() + offset, data).await?;
+					kv.save().await?;
+					*offt = o.get();
+					*length = end.try_into().unwrap();
+					*capacity = new_cap.try_into().unwrap();
+				}
+				&mut Data::Embed { offset: offt, length, capacity, is_sym } => {
+					let keep_len = u64::from(length).min(end).try_into().unwrap();
+					let mut buf = vec![0; keep_len];
+					kv.read(offt, &mut buf).await?;
+					kv.dealloc(offt, capacity.into()).await?;
+					kv.save().await?;
+					let obj = self.fs.storage.create().await?;
+					obj.write(0, &buf).await?;
+					obj.write(offset, data).await?;
+					dat = Data::Object { is_sym, id: obj.id(), length: end };
+				}
 			}
-			ty => todo!("bad ty {:?}", ty),
+			self.set_data(kv, dat).await?;
 		}
-
-		item.len = end;
-		dir.item_set_data(self.key.index, item).await?;
-
 		Ok(Ok(()))
 	}
 
@@ -263,131 +179,159 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(Err(LengthTooLong));
 		}
 
-		let dir = self.dir();
-		let mut item = dir.item_get_data(self.key.index).await?;
-		if item.len == new_len {
+		let (mut kv, mut dat) = self.data().await?;
+		if dat.len() == new_len {
 			return Ok(Ok(()));
 		}
-
-		match item.ty {
-			ItemData::TY_FILE | ItemData::TY_SYM => {
-				if new_len == 0 {
-					// Just destroy the object and mark ourselves as embedded again.
-					item.ty = match item.ty {
-						ItemData::TY_FILE => ItemData::TY_EMBED_FILE,
-						ItemData::TY_SYM => ItemData::TY_EMBED_SYM,
-						_ => unreachable!(),
-					};
-					self.fs.get(item.id_or_offset).dealloc().await?;
-				} else if new_len < item.len {
-					// TODO consider re-embedding.
-					let obj = self.fs.get(item.id_or_offset);
-					obj.write_zeros(new_len, item.len - new_len).await?;
+		if dat.len() > new_len {
+			match &mut dat {
+				&mut Data::Object { id, is_sym, .. } if new_len == 0 => {
+					self.fs.get(id).dealloc().await?;
+					dat = Data::Embed { is_sym, offset: 0, length: 0, capacity: 0 };
+				}
+				Data::Object { id, length, .. } => {
+					self.fs.get(*id).write_zeros(new_len, u64::MAX).await?;
+					*length = new_len;
+				}
+				Data::Embed { offset, length, .. } => {
+					kv.write_zeros(*offset + new_len, u64::from(*length) - new_len)
+						.await?;
+					*length = new_len.try_into().unwrap();
 				}
 			}
-			ItemData::TY_EMBED_FILE | ItemData::TY_EMBED_SYM => {
-				if new_len <= item.len {
-					let mut hdr = dir.header().await?;
-					dir.heap(&hdr)
-						.dealloc(&mut hdr, item.id_or_offset + new_len, item.len - new_len)
-						.await?;
-					dir.set_header(hdr).await?;
-				} else {
-					self.write_embed_replace_tail(new_len, &[], &mut item)
-						.await?;
+		} else {
+			match &mut dat {
+				Data::Object { length, .. } => *length = new_len,
+				Data::Embed { length, capacity, .. } if u64::from(*capacity) >= new_len => {
+					*length = new_len.try_into().unwrap()
+				}
+				Data::Embed { length, capacity, offset, .. } if self.embed_factor() >= new_len => {
+					let mut buf = vec![0; (*length).into()];
+					kv.read(*offset, &mut buf).await?;
+					kv.dealloc(*offset, (*capacity).into()).await?;
+					let offt = kv.alloc(new_len).await?;
+					kv.write(offt.get(), &buf).await?;
+					kv.save().await?;
+					*offset = offt.get();
+					*length = new_len.try_into().unwrap();
+					*capacity = new_len.try_into().unwrap();
+				}
+				&mut Data::Embed { length, capacity, offset, is_sym } => {
+					let mut buf = vec![0; length.into()];
+					kv.read(offset, &mut buf).await?;
+					kv.dealloc(offset, capacity.into()).await?;
+					kv.save().await?;
+					let obj = self.fs.storage.create().await?;
+					obj.write(0, &buf).await?;
+					dat = Data::Object { is_sym, id: obj.id(), length: new_len };
 				}
 			}
-			_ => todo!(),
 		}
-
-		item.len = new_len;
-		dir.item_set_data(self.key.index, item).await?;
-
+		self.set_data(kv, dat).await?;
 		Ok(Ok(()))
 	}
 
 	pub async fn len(&self) -> Result<u64, Error<D>> {
-		trace!("len");
-		Ok(self.dir().item_get_data(self.key.index).await?.len)
+		trace!("File::len");
+		Ok(self.data().await?.1.len())
 	}
 
 	pub async fn is_embed(&self) -> Result<bool, Error<D>> {
 		trace!("is_embed");
-		let ty = self.dir().item_get_data(self.key.index).await?.ty;
-		Ok(matches!(
-			ty,
-			ItemData::TY_EMBED_FILE | ItemData::TY_EMBED_SYM
-		))
-	}
-
-	pub async fn ext(&self) -> Result<ItemExt, Error<D>> {
-		trace!("ext");
-		let hdr = self.dir().header().await?;
-		Ok(self.dir().item_get_data_ext(&hdr, self.key.index).await?.1)
+		let ty = &mut [0];
+		self.dir()
+			.kv()
+			.await?
+			.read_user_data(self.key.tag, 0, ty)
+			.await?;
+		Ok(matches!(ty[0], 4 | 5))
 	}
 
 	/// Create stub dir helper.
 	///
 	/// # Note
 	///
-	/// This doesn't set a valid parent directory & index.
+	/// This doesn't set a valid parent directory & chunk.
 	fn dir(&self) -> Dir<'a, D> {
-		Dir::new(self.fs, DirKey::inval(self.key.dir()))
-	}
-
-	/// Destroy this file.
-	pub async fn destroy(self) -> Result<(), Error<D>> {
-		trace!("destroy {:?}", self.key);
-		assert!(!self.fs.read_only, "read only");
-		let mut hdr = self.dir().header().await?;
-		self.dir().item_destroy(&mut hdr, self.key.index).await?;
-		self.dir().set_header(hdr).await?;
-		Ok(())
-	}
-
-	/// Transfer this file.
-	pub async fn transfer(
-		&mut self,
-		to_dir: &Dir<'a, D>,
-		to_name: &Name,
-	) -> Result<Result<FileKey, TransferError>, Error<D>> {
-		trace!(
-			"transfer {:?} -> {:#x} {:?}",
-			self.key,
-			to_dir.key.id,
-			to_name
-		);
-		assert!(!self.fs.read_only, "read only");
-		let to_index = match self
-			.dir()
-			.item_transfer(self.key.index, to_dir, to_name)
-			.await?
-		{
-			Ok(i) => i,
-			Err(e) => return Ok(Err(e)),
-		};
-		self.key.set_dir(to_dir.key.id);
-		self.key.index = to_index;
-		Ok(Ok(self.key))
-	}
-
-	pub fn into_key(self) -> FileKey {
-		self.key
-	}
-
-	pub fn key(&self) -> FileKey {
-		self.key
-	}
-
-	/// Erase the name of this item.
-	pub async fn erase_name(&self) -> Result<(), Error<D>> {
-		self.fs.item(ItemKey::File(self.key)).erase_name().await
+		Dir::new(self.fs, ItemKey::INVAL, self.key.dir)
 	}
 
 	/// Determine the embed factor.
 	fn embed_factor(&self) -> u64 {
 		let embed_lim = EMBED_FACTOR << self.fs.block_size().to_raw();
 		u64::from(u16::MAX).min(embed_lim)
+	}
+
+	async fn data(&self) -> Result<(Kv<'a, D>, Data), Error<D>> {
+		let mut kv = self.dir().kv().await?;
+		let buf = &mut [0; 16];
+		kv.read_user_data(self.key.tag, 0, buf).await?;
+		Ok((kv, Data::from_raw(*buf)))
+	}
+
+	async fn set_data(&self, mut kv: Kv<'_, D>, data: Data) -> Result<(), Error<D>> {
+		kv.write_user_data(self.key.tag, 0, &data.into_raw()).await
+	}
+}
+
+impl<'a, D: Dev> Deref for File<'a, D> {
+	type Target = Item<'a, D>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.item
+	}
+}
+
+enum Data {
+	Object { is_sym: bool, id: u64, length: u64 },
+	Embed { is_sym: bool, offset: u64, length: u16, capacity: u16 },
+}
+
+impl Data {
+	fn from_raw(raw: [u8; 16]) -> Self {
+		let (a, _) = raw.split_array_ref::<8>();
+		let (_, b) = raw.rsplit_array_ref::<8>();
+		let a = u64::from_le_bytes(*a);
+		let b = u64::from_le_bytes(*b);
+
+		let ty = a & 7;
+
+		let is_sym = ty & 1 != 0; // 3, 5
+		match ty {
+			2 | 3 => Self::Object { is_sym, id: a >> 5, length: b },
+			4 | 5 => Self::Embed {
+				is_sym,
+				offset: a >> 16,
+				length: b as u16,
+				capacity: (b >> 32) as u16,
+			},
+			_ => todo!("invalid ty"),
+		}
+	}
+
+	fn into_raw(self) -> [u8; 16] {
+		let (a, b);
+		match self {
+			Self::Object { is_sym, id, length } => {
+				a = (2 | u64::from(is_sym)) | (id << 5);
+				b = length;
+			}
+			Self::Embed { is_sym, offset, length, capacity } => {
+				a = (4 | u64::from(is_sym)) | (u64::from(offset) << 16);
+				b = u64::from(length) | u64::from(capacity) << 32;
+			}
+		}
+		let mut raw = [0; 16];
+		raw[..8].copy_from_slice(&a.to_le_bytes());
+		raw[8..].copy_from_slice(&b.to_le_bytes());
+		raw
+	}
+
+	fn len(&self) -> u64 {
+		match self {
+			Self::Object { length, .. } => *length,
+			Self::Embed { length, .. } => u64::from(*length),
+		}
 	}
 }
 
@@ -402,3 +346,8 @@ impl fmt::Display for LengthTooLong {
 }
 
 impl core::error::Error for LengthTooLong {}
+
+fn calc_end(offset: u64, len: usize) -> Option<u64> {
+	let len = u64::try_from(len).ok()?;
+	offset.checked_add(len)
+}

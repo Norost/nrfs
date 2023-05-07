@@ -1,235 +1,266 @@
+use crate::{dir::Kv, Dir};
+
 use {
-	crate::{ext, Dev, Dir, DirKey, EnableExt, Error, Ext, FileKey, Name, Nrfs, TransferError},
-	std::borrow::Cow,
+	crate::{Error, Nrfs},
+	alloc::borrow::Cow,
+	core::fmt,
+	nrkv::{Key, Tag},
+	nros::Dev,
 };
 
 #[derive(Debug)]
 pub struct ItemInfo<'n> {
-	pub(crate) dir: u64,
-	pub(crate) index: u32,
-	pub name: Option<Cow<'n, Name>>,
-	pub(crate) data: ItemData,
-	pub ext: ItemExt,
+	pub key: ItemKey,
+	pub name: Cow<'n, Key>,
+	pub ty: ItemTy,
 }
 
-impl<'n> ItemInfo<'n> {
-	/// Get a key to access this item.
-	pub fn key(&self) -> ItemKey {
-		match self.data.ty {
-			ItemData::TY_DIR => ItemKey::Dir(DirKey {
-				id: self.data.id_or_offset,
-				dir: self.dir,
-				index: self.index,
-			}),
-			ItemData::TY_FILE | ItemData::TY_EMBED_FILE => {
-				ItemKey::File(FileKey::new(self.dir, self.index))
-			}
-			ItemData::TY_SYM | ItemData::TY_EMBED_SYM => {
-				ItemKey::Sym(FileKey::new(self.dir, self.index))
-			}
-			ty => todo!("invalid ty {}", ty),
-		}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ItemKey {
+	pub(crate) dir: u64,
+	pub(crate) tag: Tag,
+}
+
+impl ItemKey {
+	pub(crate) const INVAL: Self =
+		Self { dir: 0xdeaddeaddeaddead, tag: Tag::new(0xbeefbeef).unwrap() };
+}
+
+impl fmt::Debug for ItemKey {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		format_args!("{:#x}:{:#x}", self.dir, self.tag.get()).fmt(f)
+	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ItemTy {
+	Dir = 1,
+	File = 2,
+	Sym = 3,
+	EmbedFile = 4,
+	EmbedSym = 5,
+}
+
+impl ItemTy {
+	pub fn from_raw(raw: u8) -> Option<Self> {
+		Some(match raw {
+			1 => Self::Dir,
+			2 => Self::File,
+			3 => Self::Sym,
+			4 => Self::EmbedFile,
+			5 => Self::EmbedSym,
+			_ => return None,
+		})
 	}
 }
 
 #[derive(Debug)]
 pub struct Item<'a, D: Dev> {
-	fs: &'a Nrfs<D>,
-	key: ItemKey,
+	pub(crate) fs: &'a Nrfs<D>,
+	pub(crate) key: ItemKey,
 }
 
 impl<'a, D: Dev> Item<'a, D> {
-	/// Transfer this item to another directory.
-	pub async fn transfer(
-		&mut self,
-		to_dir: &Dir<'a, D>,
-		to_name: &Name,
-	) -> Result<Result<ItemKey, TransferError>, Error<D>> {
-		let res = match &mut self.key {
-			ItemKey::Dir(d) => self
-				.fs
-				.dir(*d)
-				.transfer(to_dir, to_name)
-				.await?
-				.map(|key| *d = key),
-			ItemKey::File(f) => self
-				.fs
-				.file(*f)
-				.transfer(to_dir, to_name)
-				.await?
-				.map(|key| *f = key),
-			ItemKey::Sym(f) => self
-				.fs
-				.file(*f)
-				.transfer(to_dir, to_name)
-				.await?
-				.map(|key| *f = key),
-		};
-		Ok(res.map(|()| self.key))
+	pub(crate) fn new(fs: &'a Nrfs<D>, key: ItemKey) -> Self {
+		Self { fs, key }
 	}
 
-	/// Erase the name of this item.
-	pub async fn erase_name(&self) -> Result<(), Error<D>> {
-		let (dir, index) = self.get_loc();
-		if dir == u64::MAX {
-			return Ok(());
+	async fn read_attr(&self) -> Result<(Kv<'a, D>, (u64, u16), Vec<u8>), Error<D>> {
+		let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv().await?;
+
+		let a = &mut [0; 8];
+		kv.read_user_data(self.key.tag, 16, a).await?;
+		let a = u64::from_le_bytes(*a);
+		let (offt, len) = (a >> 16, a as u16);
+
+		let mut attr = vec![0; len.into()];
+		kv.read(offt, &mut attr).await?;
+
+		Ok((kv, (offt, len), attr))
+	}
+
+	async fn write_attr(
+		&self,
+		mut kv: Kv<'a, D>,
+		(offt, len): (u64, u16),
+		attr: Vec<u8>,
+	) -> Result<(), Error<D>> {
+		kv.dealloc(offt, len.into()).await?;
+		let attr_len = u16::try_from(attr.len()).unwrap();
+		let offt = kv.alloc(attr_len.into()).await?;
+		kv.write(offt.get(), &attr).await?;
+		let a = offt.get() << 16 | u64::from(attr_len);
+		kv.write_user_data(self.key.tag, 16, &a.to_le_bytes())
+			.await?;
+		kv.save().await?;
+		Ok(())
+	}
+
+	pub async fn attr_keys(&self) -> Result<Vec<Box<Key>>, Error<D>> {
+		if self.key.dir == u64::MAX {
+			return Ok(vec![]);
 		}
-		let dir = self.fs.dir(DirKey::inval(dir));
-		let mut hdr = dir.header().await?;
-		dir.item_erase_name(&mut hdr, index).await?;
-		dir.set_header(hdr).await
+		let mut attr_map = self.fs.attr_map().await?;
+		let (_, _, attr) = self.read_attr().await?;
+		let mut attr = &*attr;
+		let mut keys = vec![];
+		while let Some((id, _)) = attr_next(&mut attr) {
+			keys.push(attr_map.key(id).await?);
+		}
+		Ok(keys)
 	}
 
-	pub async fn ext(&self) -> Result<ItemExt, Error<D>> {
-		let (dir, index) = self.get_loc();
-		if dir == u64::MAX {
-			let map = self.fs.ext.borrow_mut();
-			let data = &self.fs.storage.header_data()[16..];
-			Ok(ItemExt {
-				unix: map
-					.get_id(Ext::Unix)
-					.map(|(_, offt)| ext::Unix::from_raw(data[offt..offt + 8].try_into().unwrap())),
-				mtime: map.get_id(Ext::MTime).map(|(_, offt)| {
-					ext::MTime::from_raw(data[offt..offt + 8].try_into().unwrap())
-				}),
-			})
+	pub async fn attr(&self, key: &Key) -> Result<Option<Vec<u8>>, Error<D>> {
+		if self.key.dir == u64::MAX {
+			return Ok(None);
+		}
+		let mut attr_map = self.fs.attr_map().await?;
+		let Some(id) = attr_map.get_attr(key).await? else { return Ok(None) };
+		let (_, _, attr) = self.read_attr().await?;
+		let mut attr = &*attr;
+		while let Some((i, val)) = attr_next(&mut attr) {
+			if i == id {
+				return Ok(Some(val.into()));
+			}
+		}
+		Ok(None)
+	}
+
+	pub async fn set_attr(
+		&self,
+		key: &Key,
+		value: &[u8],
+	) -> Result<Result<(), SetAttrError>, Error<D>> {
+		if self.key.dir == u64::MAX {
+			return Ok(Err(SetAttrError::IsRoot));
+		}
+
+		let (kv, addr, mut attr) = self.read_attr().await?;
+		if attr.len() + (8 + 1 + value.len().min(8)) > usize::from(u16::MAX) {
+			return Ok(Err(SetAttrError::Full));
+		}
+
+		let mut attr_map = self.fs.attr_map().await?;
+		let id = attr_map.ref_attr(key).await?;
+
+		let mut a = &*attr;
+		let mut start = 0;
+		while let Some((i, _)) = attr_next(&mut a) {
+			let end = attr.len() - a.len();
+			if i == id {
+				attr.drain(start..end);
+				break;
+			}
+			start = end;
+		}
+
+		let mut id = id.get();
+		while id > 0x7fff {
+			let b = (id as u16 | 0x8000).to_le_bytes();
+			attr.extend_from_slice(&b);
+			id >>= 15;
+		}
+		let b = (id as u16).to_le_bytes();
+		attr.extend_from_slice(&b);
+
+		if value.len() < 255 {
+			attr.push(value.len() as _);
 		} else {
-			let dir = Dir::new(self.fs, DirKey::inval(dir));
-			let hdr = dir.header().await?;
-			Ok(dir.item_get_data_ext(&hdr, index).await?.1)
+			let l = u32::try_from(value.len()).unwrap();
+			attr.push(255);
+			attr.extend_from_slice(&l.to_le_bytes());
 		}
+		attr.extend_from_slice(value);
+
+		self.write_attr(kv, addr, attr).await?;
+
+		Ok(Ok(()))
 	}
 
-	pub async fn set_unix(&self, unix: ext::Unix) -> Result<bool, Error<D>> {
-		trace!("set_unix {:?}", self.key);
-		assert!(!self.fs.read_only, "read only");
-		let (dir, index) = self.get_loc();
-		if dir == u64::MAX {
-			let Some((_, offt)) = self.fs.ext.borrow_mut().get_id(Ext::Unix) else { return Ok(false) };
-			self.fs.storage.header_data()[16 + offt..16 + offt + 8]
-				.copy_from_slice(&unix.into_raw());
-			Ok(true)
-		} else {
-			Dir::new(self.fs, DirKey::inval(dir))
-				.item_set_unix(index, unix)
-				.await
+	pub async fn del_attr(&self, key: &Key) -> Result<bool, Error<D>> {
+		let mut attr_map = self.fs.attr_map().await?;
+		let Some(id) = attr_map.get_attr(key).await? else { return Ok(false) };
+
+		let (kv, addr, mut attr) = self.read_attr().await?;
+		let mut a = &*attr;
+		let mut start = 0;
+		while let Some((i, _)) = attr_next(&mut a) {
+			let end = attr.len() - a.len();
+			if i == id {
+				attr.drain(start..end);
+				self.write_attr(kv, addr, attr).await?;
+				attr_map.unref_attr(id).await?;
+				return Ok(true);
+			}
+			start = end;
 		}
+		Ok(false)
 	}
 
-	pub async fn set_mtime(&self, mtime: ext::MTime) -> Result<bool, Error<D>> {
-		trace!("set_unix {:?}", self.key);
-		assert!(!self.fs.read_only, "read only");
-		let (dir, index) = self.get_loc();
-		if dir == u64::MAX {
-			let Some((_, offt)) = self.fs.ext.borrow_mut().get_id(Ext::MTime) else { return Ok(false) };
-			self.fs.storage.header_data()[16 + offt..16 + offt + 8]
-				.copy_from_slice(&mtime.into_raw());
-			Ok(true)
+	pub async fn len(&self) -> Result<u64, Error<D>> {
+		trace!("Item::len");
+		let buf = &mut [0; 16];
+		if self.key.dir == u64::MAX {
+			buf.copy_from_slice(&self.fs.storage.header_data()[..16]);
 		} else {
-			Dir::new(self.fs, DirKey::inval(dir))
-				.item_set_mtime(index, mtime)
-				.await
+			let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv().await?;
+			kv.read_user_data(self.key.tag, 0, buf).await?;
 		}
+		let len = u64::from_le_bytes(buf[8..].try_into().unwrap());
+		Ok(match ItemTy::from_raw(buf[0] & 7).unwrap() {
+			ItemTy::Dir | ItemTy::EmbedFile | ItemTy::EmbedSym => len & 0xffff_ffff,
+			ItemTy::File | ItemTy::Sym => len,
+		})
 	}
 
 	pub fn key(&self) -> ItemKey {
 		self.key
 	}
+}
 
-	pub fn into_key(self) -> ItemKey {
-		self.key
-	}
+#[derive(Clone, Debug)]
+pub enum SetAttrError {
+	Full,
+	IsRoot,
+}
 
-	fn get_loc(&self) -> (u64, u32) {
-		match self.key {
-			ItemKey::Dir(d) => (d.dir, d.index),
-			ItemKey::File(f) | ItemKey::Sym(f) => (f.dir(), f.index),
+impl fmt::Display for SetAttrError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Full => "full",
+			Self::IsRoot => "is root",
 		}
+		.fmt(f)
 	}
 }
 
-impl<D: Dev> Nrfs<D> {
-	pub fn item(&self, key: ItemKey) -> Item<'_, D> {
-		Item { fs: self, key }
+impl core::error::Error for SetAttrError {}
+
+fn attr_next<'a>(attr: &mut &'a [u8]) -> Option<(nrkv::Tag, &'a [u8])> {
+	if attr.is_empty() {
+		return None;
 	}
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ItemKey {
-	Dir(DirKey),
-	File(FileKey),
-	Sym(FileKey),
-}
-
-macro_rules! item_as {
-	($as_f:ident $into_f:ident $as_v:ident $as_ty:ident) => {
-		pub fn $as_f(&self) -> Option<&$as_ty> {
-			let Self::$as_v(v) = self else { return None };
-			Some(v)
+	let mut id = 0;
+	for i in 0.. {
+		let b;
+		(b, *attr) = attr.split_array_ref::<2>();
+		let b = u16::from_le_bytes(*b);
+		id |= u64::from(b & 0x7fff) << i * 15;
+		if b & 0x8000 == 0 {
+			break;
 		}
-
-		pub fn $into_f(self) -> Option<$as_ty> {
-			let Self::$as_v(v) = self else { return None };
-			Some(v)
-		}
+	}
+	let id = id.try_into().unwrap();
+	let len;
+	(len, *attr) = attr.split_array_ref::<1>();
+	let len = if len[0] < 255 {
+		u32::from(len[0])
+	} else {
+		let len;
+		(len, *attr) = attr.split_array_ref::<4>();
+		u32::from_le_bytes(*len)
 	};
-}
-
-impl ItemKey {
-	item_as!(as_dir into_dir Dir DirKey);
-	item_as!(as_file into_file File FileKey);
-	item_as!(as_sym into_sym Sym FileKey);
-}
-
-#[derive(Debug)]
-pub(crate) struct ItemData {
-	pub ty: u8,
-	pub id_or_offset: u64,
-	pub len: u64,
-}
-
-impl ItemData {
-	pub const TY_NONE: u8 = 0;
-	pub const TY_DIR: u8 = 1;
-	pub const TY_FILE: u8 = 2;
-	pub const TY_SYM: u8 = 3;
-	pub const TY_EMBED_FILE: u8 = 4;
-	pub const TY_EMBED_SYM: u8 = 5;
-}
-
-#[derive(Clone, Debug, Default)]
-#[cfg_attr(any(test, fuzzing), derive(arbitrary::Arbitrary))]
-pub struct ItemExt {
-	/// `unix` extension data.
-	pub unix: Option<ext::Unix>,
-	/// `mtime` extension data.
-	pub mtime: Option<ext::MTime>,
-}
-
-#[derive(Debug)]
-pub(crate) struct NewItem<'a> {
-	pub name: &'a Name,
-	pub ty: ItemTy,
-	pub ext: ItemExt,
-}
-
-#[derive(Debug)]
-pub(crate) enum ItemTy {
-	Dir { ext: EnableExt },
-	File,
-	Sym,
-}
-
-impl<'a> NewItem<'a> {
-	pub fn dir(name: impl Into<&'a Name>, enable_ext: EnableExt, ext: ItemExt) -> Self {
-		Self { name: name.into(), ty: ItemTy::Dir { ext: enable_ext }, ext }
-	}
-
-	pub fn file(name: impl Into<&'a Name>, ext: ItemExt) -> Self {
-		Self { name: name.into(), ty: ItemTy::File, ext }
-	}
-
-	pub fn sym(name: impl Into<&'a Name>, ext: ItemExt) -> Self {
-		Self { name: name.into(), ty: ItemTy::Sym, ext }
-	}
+	let val;
+	(val, *attr) = attr.split_at(len.try_into().unwrap());
+	Some((id, val))
 }

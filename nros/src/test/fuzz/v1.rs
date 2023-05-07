@@ -1,7 +1,8 @@
 use {
 	super::*,
 	arbitrary::{Arbitrary, Unstructured},
-	rangemap::RangeSet,
+	core::num::NonZeroU8,
+	rangemap::RangeMap,
 	std::collections::BTreeMap,
 };
 
@@ -14,9 +15,7 @@ pub struct Test {
 	/// Valid (created) objects.
 	ids: Vec<u64>,
 	/// Expected contents of each object.
-	///
-	/// We only write `1`s, so it's pretty simple.
-	contents: BTreeMap<u64, RangeSet<u32>>,
+	contents: BTreeMap<u64, RangeMap<u32, NonZeroU8>>,
 }
 
 #[derive(Arbitrary)]
@@ -27,7 +26,7 @@ pub enum Op {
 	///
 	/// `idx` is and index in `ids`.
 	/// `offset` is modulo size of object.
-	Write { idx: u8, offset: u32, amount: u16 },
+	Write { idx: u8, offset: u32, amount: u16, byte: u8 },
 	/// Write 0s to an object.
 	///
 	/// `idx` is an index in `ids`.
@@ -65,7 +64,7 @@ impl fmt::Debug for Op {
 		}
 		hex! {
 			[Create]
-			[Write idx offset amount]
+			[Write idx offset amount byte]
 			[WriteZeros idx offset amount]
 			[Read idx offset amount]
 			[Destroy idx]
@@ -117,12 +116,12 @@ impl Test {
 							self.contents.insert(obj.id(), Default::default());
 							self.ids.push(obj.id());
 						}
-						Op::Write { idx, offset, amount } => {
+						Op::Write { idx, offset, amount, byte } => {
 							let id = self.ids[idx as usize % self.ids.len()];
 							let obj = self.store.get(id);
 
 							let l = obj
-								.write(offset.into(), &vec![1; amount.into()])
+								.write(offset.into(), &vec![byte; amount.into()])
 								.await
 								.unwrap();
 							let l = u32::try_from(l).unwrap();
@@ -132,7 +131,12 @@ impl Test {
 							assert_eq!(l, top.saturating_sub(offset), "unexpected write length");
 
 							if offset < top {
-								self.contents.get_mut(&id).unwrap().insert(offset..top);
+								let c = self.contents.get_mut(&id).unwrap();
+								if let Some(byte) = NonZeroU8::new(byte) {
+									c.insert(offset..top, byte);
+								} else {
+									c.remove(offset..top);
+								}
 							}
 						}
 						Op::WriteZeros { idx, offset, amount } => {
@@ -177,12 +181,13 @@ impl Test {
 									l
 								};
 
-								for r in map.gaps(&(offset..top)) {
+								for (r, byte) in map.overlapping(&(offset..top)) {
+									let r = r.start.max(offset)..r.end.min(offset + amount);
 									if prev != r.start {
-										let l = test(buf, prev, r.start, 1);
+										let l = test(buf, prev, r.start, 0);
 										buf = &mut buf[l..];
 									}
-									let l = test(buf, r.start, r.end, 0);
+									let l = test(buf, r.start, r.end, byte.get());
 									buf = &mut buf[l..];
 									prev = r.end;
 								}
@@ -233,7 +238,10 @@ use Op::*;
 fn busy_evict_entry_fetch_race() {
 	Test::new(
 		255,
-		[Create, Write { idx: 0, offset: 0x79ff60ff, amount: 0x68ff }],
+		[
+			Create,
+			Write { idx: 0, offset: 0x79ff60ff, amount: 0x68ff, byte: 1 },
+		],
 	)
 	.run()
 }
@@ -244,8 +252,8 @@ fn store_write_buf_size() {
 		33,
 		[
 			Create,
-			Write { idx: 0, offset: 0x7400a50a, amount: 0xff04 },
-			Write { idx: 0, offset: 0x211ad131, amount: 0xffcd },
+			Write { idx: 0, offset: 0x7400a50a, amount: 0xff04, byte: 1 },
+			Write { idx: 0, offset: 0x211ad131, amount: 0xffcd, byte: 1 },
 			Destroy { idx: 0 },
 		],
 	)
@@ -258,7 +266,7 @@ fn write_zeros_upwards_bad_offset() {
 		12671999,
 		[
 			Create,
-			Write { idx: 0, offset: 0x41414141, amount: 1 },
+			Write { idx: 0, offset: 0x41414141, amount: 1, byte: 1 },
 			Remount { cache_size: [0xaf, 0xaf, 0x41] },
 			WriteZeros { idx: 0, offset: 0x1b414141, amount: 0x5d5d3f3f },
 			Read { idx: 0, offset: 0x41414141, amount: 1 },
@@ -274,7 +282,7 @@ fn object_list_grow_not_dirty() {
 		33,
 		[
 			Create, // 0
-			Write { idx: 0, offset: 0x65656536, amount: 0x6565 },
+			Write { idx: 0, offset: 0x65656536, amount: 0x6565, byte: 1 },
 			Create,
 			Create,
 			Create,
@@ -324,7 +332,7 @@ fn write_zeros_missing_end() {
 		3014941,
 		[
 			Create,
-			Write { idx: 0, offset: 0x400, amount: 1 },
+			Write { idx: 0, offset: 0x400, amount: 1, byte: 1 },
 			WriteZeros { idx: 0, offset: 0, amount: 0x800 },
 			Read { idx: 0, offset: 0x400, amount: 1 },
 		],
@@ -369,7 +377,7 @@ fn bitmap_grow_race_use_after_free() {
 			Create,
 			Create,
 			Create,
-			Write { idx: 0x57, offset: 0x8000ffff, amount: 0xff2c },
+			Write { idx: 0x57, offset: 0x8000ffff, amount: 0xff2c, byte: 1 },
 			Create,
 			Destroy { idx: 0xff },
 			Destroy { idx: 0x57 },

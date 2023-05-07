@@ -4,7 +4,6 @@
 #![feature(stmt_expr_attributes)]
 #![feature(no_coverage)]
 #![feature(map_many_mut)]
-#![feature(is_some_and)]
 #![feature(async_closure)]
 #![feature(never_type)]
 #![feature(get_many_mut)]
@@ -13,7 +12,6 @@
 #![feature(int_roundings)]
 #![feature(iterator_try_collect)]
 #![feature(map_try_insert)]
-#![feature(nonzero_min_max)]
 #![feature(slice_flatten, split_array)]
 #![feature(type_alias_impl_trait)]
 #![feature(error_in_core)]
@@ -274,9 +272,19 @@ impl<D: Dev, R: Resource> Nros<D, R> {
 		//self.store
 	}
 
+	/// Determine the record and offset from a byte offset.
+	pub fn offset_to_record(&self, offset: u64) -> (u64, usize) {
+		let s = 1 << self.store.max_rec_size().to_raw();
+		(offset / s, (offset % s) as _)
+	}
+
 	/// The maximum length of an object.
 	pub fn obj_max_len(&self) -> u64 {
 		self.store.obj_max_len()
+	}
+
+	pub fn resource(&self) -> &R {
+		self.store.resource()
 	}
 }
 

@@ -1,0 +1,17 @@
+[package]
+name = "nrkv"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["alloc"]
+alloc = []
+
+[dependencies]
+rand_core = "0.6.4"
+siphasher = { version = "0.3.10", default-features = false }
+bstr = "1.4"
+
+[target.'cfg(fuzzing)'.dependencies.arbitrary]
+version = "1.2"
+default-features = false

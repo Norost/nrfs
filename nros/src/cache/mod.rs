@@ -332,7 +332,7 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		self.max_rec_size().to_raw() - RECORDREF_SIZE_P2
 	}
 
-	fn resource(&self) -> &R {
+	pub fn resource(&self) -> &R {
 		self.store.resource()
 	}
 

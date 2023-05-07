@@ -8,6 +8,9 @@ trace-all = ["trace", "nros/trace"]
 trace = []
 parallel = ["nros/parallel"]
 
+[dependencies]
+nrkv = { version = "0.1.0", path = "../nrkv" }
+
 [dependencies.bstr]
 version = "1.1"
 
@@ -18,23 +21,9 @@ version = "0.1"
 [dependencies.nros]
 path = "../nros"
 
-[dependencies.rangemap]
-version = "1.0"
-
-[dependencies.siphasher]
-version = "0.3"
-
 [dev-dependencies.futures-util]
 version = "0.3"
 
 [dev-dependencies.arbitrary]
-version = "1.2"
-features = ["derive"]
-
-# https://github.com/rust-fuzz/cargo-fuzz/issues/256
-[target.'cfg(fuzzing)'.dependencies.futures-util]
-version = "0.3"
-
-[target.'cfg(fuzzing)'.dependencies.arbitrary]
 version = "1.2"
 features = ["derive"]

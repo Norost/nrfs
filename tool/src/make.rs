@@ -3,7 +3,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use {
 	crate::{Compression, Encryption},
-	nrfs::{EnableExt, ItemExt},
+	nrfs::Item,
 	std::{
 		error::Error,
 		fs::{self, Metadata, OpenOptions},
@@ -145,7 +145,7 @@ fn parse_mirrors(s: &str) -> Result<Vec<Box<str>>, &'static str> {
 	Ok(s.split(',').map(From::from).collect())
 }
 
-pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn make(args: Make) -> Result<(), Box<dyn Error>> {
 	let block_size = nrfs::BlockSize::from_raw(args.block_size_p2.try_into().unwrap()).unwrap();
 	let max_record_size =
 		nrfs::MaxRecordSize::from_raw(args.record_size_p2.try_into().unwrap()).unwrap();
@@ -168,9 +168,6 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 		})
 		.try_collect()?;
 
-	let mut ext = nrfs::EnableExt::default();
-	ext.add_unix();
-	ext.add_mtime();
 	// FIXME randomize key
 
 	let keybuf;
@@ -207,7 +204,6 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 		mirrors,
 		block_size,
 		max_record_size,
-		dir: ext,
 		compression: args.compression.into(),
 		cache_size: args.cache_size,
 	};
@@ -217,28 +213,11 @@ pub async fn make(args: Make) -> Result<(), Box<dyn std::error::Error>> {
 
 	nrfs.run(async {
 		if let Some(d) = &args.directory {
-			let curdir = std::env::current_dir()?;
-			let meta = std::fs::metadata(curdir)?;
-			let root = nrfs.item(nrfs::ItemKey::Dir(nrfs.root_dir().into_key()));
-			let e = mkext(ext, &meta);
-			if let Some(unix) = e.unix {
-				root.set_unix(unix).await?;
-			}
-			if let Some(mtime) = e.mtime {
-				root.set_mtime(mtime).await?;
-			}
+			// TODO attrs on root dir
 			eprintln!("Adding files from {:?}", d);
-			add_files(nrfs.root_dir(), d, args.follow, ext).await?;
+			add_files(nrfs.root_dir(), d, args.follow).await?;
 		} else {
-			// TODO should be an option, perhaps?
-			// Or maybe a separate tool to edit the filesystem.
-			if ext.unix() {
-				let uid = unsafe { libc::geteuid() };
-				let gid = unsafe { libc::getegid() };
-				let unix = nrfs::Unix::new(0o700, uid, gid);
-				let root = nrfs.item(nrfs::ItemKey::Dir(nrfs.root_dir().into_key()));
-				root.set_unix(unix).await?;
-			}
+			// TODO attrs on root dir
 		}
 
 		nrfs.finish_transaction().await?;
@@ -268,7 +247,6 @@ async fn add_files(
 	root: nrfs::Dir<'_, nrfs::dev::FileDev>,
 	from: &Path,
 	follow_symlinks: bool,
-	extensions: nrfs::EnableExt,
 ) -> Result<(), Box<dyn Error>> {
 	for f in fs::read_dir(from).expect("failed to read dir") {
 		let f = f?;
@@ -276,21 +254,22 @@ async fn add_files(
 		let n = f.file_name();
 		let n = n.to_str().unwrap().try_into().unwrap();
 
-		let ext = mkext(extensions, &m);
-
 		if m.is_file() || (m.is_symlink() && follow_symlinks) {
 			let c = fs::read(f.path())?;
-			let f = root.create_file(n, ext).await?.unwrap();
+			let f = root.create_file(n).await?.unwrap();
+			setattr(&f, &m).await?;
 			f.write_grow(0, &c).await??;
 		} else if m.is_dir() {
-			let d = root.create_dir(n, extensions, ext).await?.unwrap();
+			let d = root.create_dir(n).await?.unwrap();
+			setattr(&d, &m).await?;
 			let path = f.path();
 			let fut: Pin<Box<dyn Future<Output = _>>> =
-				Box::pin(add_files(d, &path, follow_symlinks, extensions));
+				Box::pin(add_files(d, &path, follow_symlinks));
 			fut.await?;
 		} else if m.is_symlink() {
 			let c = fs::read_link(f.path())?;
-			let f = root.create_sym(n, ext).await?.unwrap();
+			let f = root.create_sym(n).await?.unwrap();
+			setattr(&f, &m).await?;
 			f.write_grow(0, c.to_str().unwrap().as_bytes()).await??;
 		} else {
 			todo!()
@@ -299,26 +278,50 @@ async fn add_files(
 	Ok(())
 }
 
-fn mkext(enabled: EnableExt, meta: &Metadata) -> ItemExt {
-	let mut ext = ItemExt::default();
-	ext.unix = enabled.unix().then(|| {
-		let mut u = nrfs::Unix::new(0o700, 0, 0);
-		let p = meta.permissions();
-		#[cfg(target_family = "unix")]
-		{
-			u.permissions = (p.mode() & 0o777) as _;
-			u.set_uid(meta.uid());
-			u.set_gid(meta.gid());
+async fn setattr(
+	item: &Item<'_, nrfs::dev::FileDev>,
+	meta: &Metadata,
+) -> Result<(), Box<dyn Error>> {
+	let mtime = || {
+		let Ok(t) = meta.modified() else { return 0 };
+		match t.duration_since(std::time::UNIX_EPOCH) {
+			Ok(t) => t.as_micros() as i128,
+			Err(e) => -(e.duration().as_micros() as i128),
 		}
-		u
-	});
-	ext.mtime = enabled.mtime().then(|| nrfs::MTime {
-		mtime: meta
-			.modified()
-			.ok()
-			.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-			.map(|t| t.as_micros().try_into().unwrap_or(i64::MAX))
-			.unwrap_or(0),
-	});
-	ext
+	};
+	item.set_attr(b"nrfs.mtime".into(), encode_s(&mtime().to_le_bytes()))
+		.await??;
+	if cfg!(target_family = "unix") {
+		item.set_attr(b"nrfs.uid".into(), encode_u(&meta.uid().to_le_bytes()))
+			.await??;
+		item.set_attr(b"nrfs.gid".into(), encode_u(&meta.gid().to_le_bytes()))
+			.await??;
+		let mode = meta.permissions().mode();
+		let mode = (mode & 0o777) as u16;
+		item.set_attr(b"nrfs.unixmode".into(), &mode.to_le_bytes())
+			.await??;
+	}
+	Ok(())
+}
+
+fn encode_u(mut b: &[u8]) -> &[u8] {
+	while let Some((&0, c)) = b.split_last() {
+		b = c;
+	}
+	b
+}
+
+fn encode_s(mut b: &[u8]) -> &[u8] {
+	while let Some(&[x, y]) = b.get(b.len() - 2..) {
+		match y {
+			0 if x & 0x80 == 0 => b = &b[..b.len() - 1],
+			0xff if x & 0x80 != 0 => b = &b[..b.len() - 1],
+			_ => break,
+		}
+	}
+	if matches!(b, &[0]) {
+		&[]
+	} else {
+		b
+	}
 }

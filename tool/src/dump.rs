@@ -1,11 +1,12 @@
-use std::{
-	error::Error,
-	fs::{self, File},
-	future::Future,
-	pin::Pin,
+use {
+	nrfs::{ItemTy, Nrfs},
+	std::{
+		error::Error,
+		fs::{self, File},
+		future::Future,
+		pin::Pin,
+	},
 };
-
-use nrfs::{ItemKey, Nrfs};
 
 /// Dump the contents of a filesystem.
 #[derive(clap::Args)]
@@ -35,8 +36,6 @@ struct Statistics {
 	embedded_symlinks: u64,
 	/// Total amount of unknown entry types.
 	unknown: u64,
-	/// Total amount of dangling entries.
-	dangling: u64,
 }
 
 pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
@@ -95,7 +94,6 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 	e("embedded files", &stat.embedded_files);
 	e("embedded symlinks", &stat.embedded_symlinks);
 	e("unknown", &stat.unknown);
-	e("dangling", &stat.dangling);
 	println!();
 
 	let stat = nrfs.statistics();
@@ -122,54 +120,62 @@ async fn list_files(
 ) -> Result<(), Box<dyn Error>> {
 	let mut i = 0;
 	while let Some((data, next_i)) = root.next_from(i).await? {
-		if let Some(u) = data.ext.unix {
-			let mut s = [0; 9];
-			for (i, (c, l)) in s.iter_mut().zip(b"rwxrwxrwx").rev().enumerate() {
-				*c = [b'-', *l][usize::from(u.permissions & 1 << i != 0)];
+		let item = fs.item(data.key);
+		let mut first = true;
+		for k in item.attr_keys().await? {
+			(!first).then(|| print!("|"));
+			first = false;
+			print!("{}:", k);
+			let v = item.attr(&k).await?.unwrap();
+			match &**k {
+				b"nrfs.uid" | b"nrfs.gid" => print!("{}", decode_u(&v)),
+				b"nrfs.unixmode" => {
+					let u = decode_u(&v);
+					let mut s = [0; 9];
+					for (i, (c, l)) in s.iter_mut().zip(b"rwxrwxrwx").rev().enumerate() {
+						*c = [b'-', *l][usize::from(u & 1 << i != 0)];
+					}
+					print!("{}", std::str::from_utf8(&s).unwrap());
+				}
+				b"nrfs.mtime" => {
+					let t = decode_s(&v);
+					let secs = (t / 1_000_000) as i64;
+					let micros = t.rem_euclid(1_000_000) as u32;
+					let t =
+						chrono::NaiveDateTime::from_timestamp_opt(secs, micros * 1_000).unwrap();
+					print!("{:<26}", format!("{}", t));
+				}
+				_ => print!("{:?}", bstr::BStr::new(&v)),
 			}
-			print!(
-				"{} {:>4} {:>4}  ",
-				std::str::from_utf8(&s)?,
-				u.uid(),
-				u.gid(),
-			);
 		}
 
-		if let Some(t) = data.ext.mtime {
-			let secs = (t.mtime / 1_000_000) as i64;
-			let micros = t.mtime.rem_euclid(1_000_000) as u32;
-			let t = chrono::NaiveDateTime::from_timestamp_opt(secs, micros * 1_000).unwrap();
-			// Use format!() since NaiveDateTime doesn't respect flags
-			print!("{:<26} ", format!("{}", t));
-		}
+		let name = bstr::BStr::new(&**data.name);
 
-		let name = match &data.name {
-			Some(name) => String::from_utf8_lossy(name.as_ref()),
-			None => {
-				stats.dangling += 1;
-				"".into()
-			}
-		};
-
-		match data.key() {
-			ItemKey::Dir(d) => {
-				let d = nrfs::Dir::new(fs, d);
+		match data.ty {
+			ItemTy::Dir => {
+				let d = fs.dir(data.key).await?;
 				stats.directories += 1;
-				println!("{:>indent$}  d {}", "", name, indent = 10 + indent + 4 + 8);
+				println!(
+					"{:>12}  {:>indent$}  d {}",
+					d.len().await?,
+					"",
+					name,
+					indent = indent + 4 + 8
+				);
 				let fut: Pin<Box<dyn Future<Output = _>>> =
 					Box::pin(list_files(fs, d, stats, indent + 2));
 				fut.await?;
 			}
-			ItemKey::File(f) => {
-				let f = nrfs::File::new(fs, f);
-				let is_embed = f.is_embed().await?;
+			ItemTy::File | ItemTy::EmbedFile => {
+				let f = fs.file(data.key);
+				let is_embed = matches!(data.ty, ItemTy::EmbedFile);
 				if is_embed {
 					stats.embedded_files += 1;
 				} else {
 					stats.files += 1;
 				}
 				println!(
-					"{:>8}  {:>indent$} {}f {}",
+					"{:>12}  {:>indent$} {}f {}",
 					f.len().await?,
 					"",
 					[' ', 'e'][usize::from(is_embed)],
@@ -177,9 +183,9 @@ async fn list_files(
 					indent = indent + 4 + 8
 				);
 			}
-			ItemKey::Sym(f) => {
-				let f = nrfs::File::new(fs, f);
-				let is_embed = f.is_embed().await?;
+			ItemTy::Sym | ItemTy::EmbedSym => {
+				let f = fs.file(data.key);
+				let is_embed = matches!(data.ty, ItemTy::EmbedSym);
 				if is_embed {
 					stats.embedded_symlinks += 1;
 				} else {
@@ -192,21 +198,33 @@ async fn list_files(
 				let mut link = String::from_utf8_lossy(&buf);
 				trim_len.then(|| link += "...");
 				println!(
-					"{:>indent$} {}s {} -> {}",
+					"{:>12}  {:>indent$} {}s {} -> {}",
+					"",
 					"",
 					[' ', 'e'][usize::from(is_embed)],
 					name,
 					link,
-					indent = 10 + indent + 4 + 8
+					indent = indent + 4 + 8
 				);
-			}
-			_ => {
-				stats.unknown += 1;
-				println!("     ???  {:>indent$} ? {}", "", name, indent = indent);
 			}
 		}
 		i = next_i
 	}
 
 	Ok(())
+}
+
+fn decode_u(b: &[u8]) -> u128 {
+	let mut c = [0; 16];
+	c[..b.len()].copy_from_slice(b);
+	u128::from_le_bytes(c)
+}
+
+fn decode_s(b: &[u8]) -> i128 {
+	let mut c = [0; 16];
+	if b.last().is_some_and(|&x| x & 0x80 != 0) {
+		c.fill(0xff);
+	}
+	c[..b.len()].copy_from_slice(b);
+	i128::from_le_bytes(c)
 }
