@@ -148,8 +148,9 @@ impl<'a, D: Dev> Dir<'a, D> {
 				self.fs.get(a >> 5).dealloc().await?;
 			}
 			4 | 5 => {
-				let (len, offt) = (b & 0xffff, b >> 16);
-				kv.dealloc(offt, len.into()).await?;
+				let offt = a >> 16;
+				let cap = (b >> 32) & 0xffff;
+				kv.dealloc(offt, cap.into()).await?;
 			}
 			ty => panic!("invalid ty {}", ty),
 		}
