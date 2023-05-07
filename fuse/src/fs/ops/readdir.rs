@@ -1,4 +1,4 @@
-use {super::*, std::ffi::OsStr};
+use {super::*, nrfs::ItemTy, std::ffi::OsStr};
 
 impl Fs {
 	pub async fn readdir(&self, mut job: crate::job::ReadDir) {
@@ -16,30 +16,30 @@ impl Fs {
 			job.offset += 1;
 		}
 
-		let d = self.ino().get_dir(job.ino);
-		let d = self.fs.dir(d);
+		let dir = match self.ino().get(job.ino).unwrap() {
+			Get::Key(Key::Dir(d)) => self.fs.dir(d).await.unwrap(),
+			Get::Key(_) => return job.reply.error(libc::ENOTDIR),
+			Get::Stale => return job.reply.error(libc::ESTALE),
+		};
 
-		let mut index = u32::try_from(job.offset - 2).unwrap_or(u32::MAX);
-		while let Some((item, i)) = d.next_from(index).await.unwrap() {
-			let Some(name) = &item.name else {
-				self.clean_dangling(item.key()).await;
-				index = i;
-				continue;
+		let mut index = job.offset as u64 - 2;
+		while let Some((item, i)) = dir.next_from(index).await.unwrap() {
+			let ty = match item.ty {
+				ItemTy::Dir => FileType::Directory,
+				ItemTy::File | ItemTy::EmbedFile => FileType::RegularFile,
+				ItemTy::Sym | ItemTy::EmbedSym => FileType::Symlink,
 			};
 
-			let ty = match item.key() {
-				ItemKey::Dir(_) => FileType::Directory,
-				ItemKey::File(_) => FileType::RegularFile,
-				ItemKey::Sym(_) => FileType::Symlink,
-			};
-
-			let offt = i as i64 + 2;
+			let offt = (i + 2) as i64;
 			// It's possible the ino is not known due to readdir not doing an implicit lookup
 			// and hence not increasing refcount, which in turns means there may be no entry
 			// in the inode store.
 			//
 			// For consistency's sake, always use NO_INO (-1).
-			if job.reply.add(NO_INO, offt, ty, OsStr::from_bytes(&name)) {
+			if job
+				.reply
+				.add(NO_INO, offt, ty, OsStr::from_bytes(&item.name))
+			{
 				break;
 			}
 			index = i;

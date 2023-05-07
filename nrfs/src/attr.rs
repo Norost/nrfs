@@ -47,7 +47,8 @@ impl<'a, D: Dev> AttrMap<'a, D> {
 		if c > 0 {
 			self.0.write_user_data(id, 0, &c.to_le_bytes()).await
 		} else {
-			self.0.remove(id).await
+			self.0.remove(id).await?;
+			self.0.save().await
 		}
 	}
 

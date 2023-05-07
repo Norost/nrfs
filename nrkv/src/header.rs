@@ -156,7 +156,10 @@ impl fmt::Debug for FreeRegion {
 impl fmt::Debug for Header {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Header))
-			.field("hash_key", &u128::from_le_bytes(self.hash_key))
+			.field(
+				"hash_key",
+				&format_args!("{:#032x}", u128::from_le_bytes(self.hash_key)),
+			)
 			.field("used", &u48_to_u64(self.used))
 			.field("free_head", &u48_to_u64(self.free_head))
 			.field("free_regions", &self.free_regions)

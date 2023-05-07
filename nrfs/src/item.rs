@@ -11,7 +11,7 @@ use {
 #[derive(Debug)]
 pub struct ItemInfo<'n> {
 	pub key: ItemKey,
-	pub name: Option<Cow<'n, Key>>,
+	pub name: Cow<'n, Key>,
 	pub ty: ItemTy,
 }
 
@@ -195,6 +195,26 @@ impl<'a, D: Dev> Item<'a, D> {
 			start = end;
 		}
 		Ok(false)
+	}
+
+	pub async fn len(&self) -> Result<u64, Error<D>> {
+		trace!("Item::len");
+		let buf = &mut [0; 16];
+		if self.key.dir == u64::MAX {
+			buf.copy_from_slice(&self.fs.storage.header_data()[..16]);
+		} else {
+			let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv().await?;
+			kv.read_user_data(self.key.tag, 0, buf).await?;
+		}
+		let len = u64::from_le_bytes(buf[8..].try_into().unwrap());
+		Ok(match ItemTy::from_raw(buf[0] & 7).unwrap() {
+			ItemTy::Dir | ItemTy::EmbedFile | ItemTy::EmbedSym => len & 0xffff_ffff,
+			ItemTy::File | ItemTy::Sym => len,
+		})
+	}
+
+	pub fn key(&self) -> ItemKey {
+		self.key
 	}
 }
 

@@ -169,7 +169,7 @@ fn destroy_file() {
 		// Ensure no spooky entries appear when iterating
 		let mut i = 0;
 		while let Some((e, ni)) = d.next_from(i).await.unwrap() {
-			assert!(matches!(&**e.name.unwrap(), b"world" | b"exist"));
+			assert!(matches!(&**e.name, b"world" | b"exist"));
 			i = ni;
 		}
 	});

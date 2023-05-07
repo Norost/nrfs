@@ -36,8 +36,6 @@ struct Statistics {
 	embedded_symlinks: u64,
 	/// Total amount of unknown entry types.
 	unknown: u64,
-	/// Total amount of dangling entries.
-	dangling: u64,
 }
 
 pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
@@ -96,7 +94,6 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 	e("embedded files", &stat.embedded_files);
 	e("embedded symlinks", &stat.embedded_symlinks);
 	e("unknown", &stat.unknown);
-	e("dangling", &stat.dangling);
 	println!();
 
 	let stat = nrfs.statistics();
@@ -152,7 +149,7 @@ async fn list_files(
 			}
 		}
 
-		let name = bstr::BStr::new(data.name.as_ref().map_or(&[][..], |k| &*k.as_ref()));
+		let name = bstr::BStr::new(&**data.name);
 
 		match data.ty {
 			ItemTy::Dir => {

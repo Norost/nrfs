@@ -1,6 +1,6 @@
 use {
 	crate::{Dev, Error, File, Item, ItemInfo, ItemKey, ItemTy, Nrfs, Store},
-	core::{cell::RefCell, fmt, future::Future, ops::Deref},
+	core::{cell::RefCell, fmt, ops::Deref},
 	nrkv::Key,
 	nros::Resource,
 	std::borrow::Cow,
@@ -117,7 +117,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		kv.read_user_data(tag, 0, ty).await?;
 		Ok(Some(ItemInfo {
 			key: ItemKey { dir: self.id, tag },
-			name: Some(Cow::Borrowed(name)),
+			name: Cow::Borrowed(name),
 			ty: ItemTy::from_raw(ty[0] & 7).unwrap(),
 		}))
 	}
@@ -255,9 +255,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 			let ty = &mut [0];
 			kv.borrow_mut().read_user_data(tag, 0, ty).await?;
 			val.replace(Some(ItemInfo {
-				name: Some(Cow::Owned(
-					Box::<Key>::try_from(key.into_boxed_slice()).unwrap(),
-				)),
+				name: Cow::Owned(Box::<Key>::try_from(key.into_boxed_slice()).unwrap()),
 				key: ItemKey { dir: self.id, tag },
 				ty: ItemTy::from_raw(ty[0] & 7).unwrap(),
 			}));
@@ -265,10 +263,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 		})
 		.await?;
 		Ok(val.take().map(|v| (v, state.into_u64())))
-	}
-
-	pub fn key(&self) -> ItemKey {
-		self.key
 	}
 
 	pub async fn len(&self) -> Result<u32, Error<D>> {
@@ -279,8 +273,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 		Ok(u32::from_le_bytes(*buf))
 	}
 
-	pub(crate) fn kv(&self) -> impl Future<Output = Result<Kv<'a, D>, Error<D>>> {
-		nrkv::Nrkv::load(Store(self.fs.get(self.id)), nrkv::StaticConf)
+	pub(crate) async fn kv(&self) -> Result<Kv<'a, D>, Error<D>> {
+		nrkv::Nrkv::load(Store(self.fs.get(self.id)), nrkv::StaticConf).await
 	}
 
 	async fn update_item_count(&self, incr: bool) -> Result<(), Error<D>> {

@@ -256,10 +256,6 @@ impl<'a, D: Dev> File<'a, D> {
 		Dir::new(self.fs, ItemKey::INVAL, self.key.dir)
 	}
 
-	pub fn key(&self) -> ItemKey {
-		self.key
-	}
-
 	/// Determine the embed factor.
 	fn embed_factor(&self) -> u64 {
 		let embed_lim = EMBED_FACTOR << self.fs.block_size().to_raw();
