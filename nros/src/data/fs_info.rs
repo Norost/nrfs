@@ -32,7 +32,8 @@ pub(crate) struct FsInfo {
 	pub lba_offset: u64le,
 	pub block_count: u64le,
 
-	pub key: [u8; 32],
+	pub key1: [u8; 32],
+	pub key2: [u8; 32],
 
 	pub object_list_root: RecordRef,
 	pub object_bitmap_root: RecordRef,
@@ -93,11 +94,10 @@ impl FsHeader {
 	/// # Panics
 	///
 	/// If `data` is too small to represent a full header, i.e. it is smaller than 448 bytes.
-	pub fn encrypt(&mut self, key: &[u8; 32], data: &mut [u8]) {
-		assert!(data.len() >= 448, "data too small");
-		let cipher = Cipher { ty: self.cipher().unwrap(), key: *key };
+	pub fn encrypt(&mut self, key: &[u8; 32], data: &mut [u8; 512 - 64]) {
+		let cipher = Cipher { ty: self.cipher().unwrap(), key1: *key, key2: [0; 32] };
 		self.nonce += 1;
-		self.hash = cipher.encrypt(self.nonce.into(), data);
+		self.hash = cipher.encrypt(&nonce(self.nonce, &self.uid), data);
 	}
 
 	/// Attempt to decrypt filesystem info.
@@ -108,11 +108,10 @@ impl FsHeader {
 	pub fn decrypt<'d>(
 		&self,
 		key: &[u8; 32],
-		data: &'d mut [u8],
+		data: &'d mut [u8; 512 - 64],
 	) -> Result<(FsInfo, &'d [u8]), DecryptError> {
-		assert!(data.len() >= 448, "data too small");
-		let cipher = Cipher { ty: self.cipher().unwrap(), key: *key };
-		cipher.decrypt(self.nonce.into(), &self.hash, data)?;
+		let cipher = Cipher { ty: self.cipher().unwrap(), key1: *key, key2: [0; 32] };
+		cipher.decrypt(&nonce(self.nonce, &self.uid), &self.hash, data)?;
 		Ok(FsInfo::from_raw_slice(data).expect("data too small"))
 	}
 
@@ -251,4 +250,11 @@ fn fmt_either(f: &mut fmt::DebugStruct<'_, '_>, name: &str, x: Result<impl fmt::
 		x.as_ref()
 			.map_or_else(|x| x as &dyn fmt::Debug, |x| x as &dyn fmt::Debug),
 	);
+}
+
+fn nonce(nonce: u64le, uid: &[u8; 16]) -> [u8; 24] {
+	let mut b = [0; 24];
+	b[..8].copy_from_slice(&u64::from(nonce).to_le_bytes());
+	b[8..].copy_from_slice(uid);
+	b
 }

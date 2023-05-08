@@ -14,6 +14,8 @@ pub use compression::Compression;
 #[repr(C)]
 pub(crate) struct RecordRef(u64le);
 
+pub const HEADER_LEN: u8 = 64;
+
 impl RecordRef {
 	/// A record reference that points to no data.
 	pub const NONE: Self = Self(u64le::new(0));
@@ -55,14 +57,16 @@ impl fmt::Debug for RecordRef {
 #[derive(Clone, Copy, Default, PartialEq)]
 #[repr(C)]
 struct RecordHeader {
+	nonce: [u8; 24],
 	length: u32le,
-	_reserved: [u8; 3],
+	_reserved: [u8; 4 + 8 + 7],
 	compression: u8,
-	nonce: u64le,
 	hash: [u8; 16],
 }
 
 raw!(RecordHeader);
+
+const _: () = assert!(core::mem::size_of::<RecordHeader>() == HEADER_LEN as _);
 
 impl RecordHeader {
 	pub fn compression(&self) -> Result<Compression, u8> {
@@ -74,20 +78,15 @@ impl fmt::Debug for RecordHeader {
 	#[no_coverage]
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let mut f = f.debug_struct(stringify!(RecordHeader));
-
+		let nonce_l = u128::from_le_bytes(self.nonce[..16].try_into().unwrap());
+		let nonce_h = u64::from_le_bytes(self.nonce[16..].try_into().unwrap());
+		f.field("nonce", &format_args!("{:#018x}{:032x}", nonce_h, nonce_l));
 		f.field("length", &self.length);
-
 		let c = Compression::from_raw(self.compression);
 		let c: &dyn fmt::Debug = if let Some(c) = c.as_ref() { c } else { &c };
 		f.field("compression", c);
-
-		f.field("nonce", &self.nonce);
-
-		f.field(
-			"hash",
-			&format_args!("{:#x}", u128::from_le_bytes(self.hash)),
-		);
-
+		let hash = u128::from_le_bytes(self.hash);
+		f.field("hash", &format_args!("{:#034x}", hash));
 		f.finish()
 	}
 }
@@ -135,35 +134,45 @@ pub(crate) fn pack(
 	compression: Compression,
 	block_size: BlockSize,
 	cipher: Cipher,
-	nonce: u64,
+	nonce: &[u8; 24],
 ) -> u16 {
 	debug_assert!(
 		!data.is_empty(),
 		"Record::pack should not be called with empty data"
 	);
+	debug_assert_eq!(
+		buf.len() % (1 << block_size.to_raw()),
+		0,
+		"buf not a multiple of block size"
+	);
 
-	let (header, buf) = buf.split_at_mut(32);
+	let (header, buf) = buf.split_at_mut(HEADER_LEN.into());
 
-	let (compression, len) = compression.compress(32, data, buf, block_size);
+	let (compression, len) = compression.compress(HEADER_LEN.into(), data, buf, block_size);
 
-	let hash = cipher.encrypt(nonce, &mut buf[..len.try_into().unwrap()]);
+	let blocks = block_size
+		.min_blocks((u32::from(HEADER_LEN) + len).try_into().unwrap())
+		.try_into()
+		.unwrap();
+	let buf =
+		&mut buf[..(1 << block_size.to_raw()) * usize::from(blocks) - usize::from(HEADER_LEN)];
+
+	let hash = cipher.encrypt(nonce, buf);
 
 	header.copy_from_slice(
 		RecordHeader {
+			nonce: *nonce,
 			length: len.into(),
-			_reserved: [0; 3],
+			_reserved: [0; 19],
 			compression: compression.to_raw(),
-			nonce: nonce.into(),
 			hash,
 		}
 		.as_ref(),
 	);
 
-	let len = 32 + len;
-	block_size
-		.min_blocks(len.try_into().unwrap())
-		.try_into()
-		.unwrap()
+	let (nonce, hdr) = header.split_array_mut();
+	cipher.apply_meta(nonce, hdr);
+	blocks
 }
 
 /// Unpack data from a record.
@@ -173,20 +182,23 @@ pub(crate) fn unpack<B: Buf>(
 	max_record_size: MaxRecordSize,
 	cipher: Cipher,
 ) -> Result<B, UnpackError> {
-	let (header_raw, data) = data.split_at_mut(32);
+	let (header_raw, data) = data.split_at_mut(HEADER_LEN.into());
+
+	let (nonce, hdr) = header_raw.split_array_mut();
+	cipher.apply_meta(nonce, hdr);
 
 	let mut header = RecordHeader::default();
 	header.as_mut().copy_from_slice(header_raw);
 
-	let data = data
-		.get_mut(..u32::from(header.length).try_into().unwrap())
-		.ok_or(UnpackError::BadLength)?;
-
 	buf.resize(0, 0);
 
 	cipher
-		.decrypt(header.nonce.into(), &header.hash, data)
+		.decrypt(&header.nonce, &header.hash, data)
 		.map_err(|_| UnpackError::HashMismatch)?;
+
+	let data = data
+		.get_mut(..u32::from(header.length).try_into().unwrap())
+		.ok_or(UnpackError::BadLength)?;
 
 	header
 		.compression()

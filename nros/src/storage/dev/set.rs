@@ -65,7 +65,8 @@ pub(crate) struct DevSet<D: Dev, R: Resource> {
 	cipher: CipherType,
 	nonce: Cell<u64>,
 
-	key: [u8; 32],
+	key1: [u8; 32],
+	key2: [u8; 32],
 
 	pub data: RefCell<[u8; 256]>,
 }
@@ -147,11 +148,10 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		}
 
 		// Generate key & UID.
-		let mut buf = [0; 48];
-		config.resource.crng_fill(&mut buf);
-		let (mut key, mut uid) = ([0; 32], [0; 16]);
-		key.copy_from_slice(&buf[..32]);
-		uid.copy_from_slice(&buf[32..]);
+		let (mut key1 @ mut key2, mut uid) = ([0; 32], [0; 16]);
+		config.resource.crng_fill(&mut key1);
+		config.resource.crng_fill(&mut key2);
+		config.resource.crng_fill(&mut uid);
 
 		// Get or derive key for header.
 		let (header_key, key_derivation) = match config.key_deriver {
@@ -186,7 +186,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			key_derivation: key_derivation.into(),
 			key_hash,
 
-			key,
+			key1,
+			key2,
 			nonce: Default::default(),
 
 			resource: config.resource.into(),
@@ -219,6 +220,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 				let Ok(mut buf) = buf else { return None };
 
 				let (hdr, info) = buf.get_mut()[..512].split_at_mut(64);
+				let info: &mut [u8; 512 - 64] = info.try_into().unwrap();
 				let header = FsHeader::from_raw((&*hdr).try_into().unwrap());
 
 				let key = match header_key.as_ref() {
@@ -341,7 +343,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			header_key: header_key.into(),
 			key_hash: FsHeader::hash_key(&header_key),
 
-			key: info.key,
+			key1: info.key1,
+			key2: info.key2,
 			key_derivation: header.key_derivation().unwrap().into(),
 
 			object_list_depth: hc.object_list_depth().into(),
@@ -598,6 +601,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.expect("too many mirrors");
 
 		let (header_raw, info_raw) = buf.get_mut()[..512].split_at_mut(64);
+		let info_raw: &mut [u8; 512 - 64] = info_raw.try_into().unwrap();
 
 		let mut conf = Configuration::default();
 		conf.set_mirror_count(mirc);
@@ -612,7 +616,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			lba_offset: node.block_offset.into(),
 			block_count: node.block_count.into(),
 			total_block_count: self.block_count.into(),
-			key: self.key,
+			key1: self.key1,
+			key2: self.key2,
 
 			object_list_root: self.object_list_root.get(),
 			object_bitmap_root: self.object_bitmap_root.get(),
@@ -688,12 +693,14 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 	/// Get a cipher instance.
 	pub fn cipher(&self) -> Cipher {
-		Cipher { key: self.key, ty: self.cipher }
+		Cipher { key1: self.key1, key2: self.key2, ty: self.cipher }
 	}
 
 	/// Generate a unique nonce.
-	pub fn gen_nonce(&self) -> u64 {
-		self.nonce.update(|x| x + 1)
+	pub fn gen_nonce(&self) -> [u8; 24] {
+		let mut b = [0; 24];
+		self.resource.crng_fill(&mut b);
+		b
 	}
 
 	/// Get the key used to encrypt the header.

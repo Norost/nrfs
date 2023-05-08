@@ -13,7 +13,8 @@ macro_rules! t {
 
 				fn cipher() -> Cipher {
 					Cipher {
-						key: [0xcc; 32],
+						key1: [0xcc; 32],
+						key2: [0xdd; 32],
 						ty: CipherType::$cipher,
 					}
 				}
@@ -22,7 +23,7 @@ macro_rules! t {
 				fn compress_zeros() {
 					let data = &[0; 1024];
 					let b = &mut [0; 2048];
-					let _len = record::pack(data, b, Compression::$comp, BlockSize::B512, cipher(), 0);
+					let _len = record::pack(data, b, Compression::$comp, BlockSize::B512, cipher(), &[0; 24]);
 					// FIXME
 					/*
 					assert_eq!(
@@ -37,7 +38,7 @@ macro_rules! t {
 				fn decompress_zeros() {
 					let data = &[0; 1024];
 					let b = &mut [0; 2048];
-					let blks = record::pack(data, b, Compression::$comp, BlockSize::B512, cipher(), 0);
+					let blks = record::pack(data, b, Compression::$comp, BlockSize::B512, cipher(), &[0; 24]);
 					let b = &mut b[..usize::from(blks) << BlockSize::B512.to_raw()];
 
 					let res = StdResource::new();
@@ -49,5 +50,5 @@ macro_rules! t {
 	};
 }
 
-t!(none None none_xxh3 NoneXxh3 chacha8_poly1305 ChaCha8Poly1305);
-t!(lz4 Lz4 none_xxh3 NoneXxh3 chacha8_poly1305 ChaCha8Poly1305);
+t!(none None none_xxh3 NoneXxh3 xchacha12_poly1305 XChaCha12Poly1305);
+t!(lz4 Lz4 none_xxh3 NoneXxh3 xchacha12_poly1305 XChaCha12Poly1305);

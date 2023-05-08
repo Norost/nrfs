@@ -173,7 +173,7 @@ pub async fn make(args: Make) -> Result<(), Box<dyn Error>> {
 	let keybuf;
 	let (cipher, key_deriver) = if let Some(enc) = args.encryption {
 		let enc = match enc {
-			Encryption::Chacha8Poly1305 => nrfs::CipherType::ChaCha8Poly1305,
+			Encryption::XChacha12Poly1305 => nrfs::CipherType::XChaCha12Poly1305,
 		};
 		let kdf = match args.key_derivation_function {
 			KeyDerivationFunction::None => todo!("ask for file"),
