@@ -5,11 +5,12 @@ mod ops;
 pub use channel::FsChannel;
 
 use {
-	crate::job::Job,
+	crate::{dev::Dev, job::Job},
 	async_channel::{self, Receiver},
 	fuser::*,
+	futures_util::{FutureExt, StreamExt},
 	inode::InodeStore,
-	nrfs::{dev::FileDev, Nrfs},
+	nrfs::Nrfs,
 	std::{
 		cell::{RefCell, RefMut},
 		fs,
@@ -23,7 +24,7 @@ const TTL: Duration = Duration::MAX;
 #[derive(Debug)]
 pub struct Fs {
 	/// The filesystem.
-	fs: Nrfs<FileDev>,
+	fs: Nrfs<Dev>,
 	/// Bidirectional reference and inode mapping.
 	ino: RefCell<InodeStore>,
 	/// Receiver for jobs from FUSE session handler.
@@ -51,7 +52,7 @@ impl Fs {
 			}
 		};
 
-		let devices = io.map(|f| FileDev::new(f)).collect();
+		let devices = io.map(|f| Dev::new(f)).collect();
 		let conf = nrfs::LoadConfig { retrieve_key, devices, cache_size, allow_repair: true };
 		eprintln!("Mounting filesystem");
 		let fs = Nrfs::load(conf).await.unwrap();
@@ -75,44 +76,52 @@ impl Fs {
 		)
 	}
 
-	pub async fn run(self) -> Result<(), nrfs::Error<FileDev>> {
+	pub async fn run(self) -> Result<(), nrfs::Error<Dev>> {
 		eprintln!("Running");
 		self.fs
 			.run(async {
+				let mut jobs = futures_util::stream::FuturesUnordered::new();
 				loop {
-					let job = self.channel.recv().await.unwrap();
-					macro_rules! switch {
-					{ [$job:ident] $($v:ident $f:ident)* } => {
-						match $job {
-							$(Job::$v(job) => self.$f(job).await,)*
-							Job::Destroy => {
-								self.destroy().await;
-								break;
-							}
-						}
+					let job = futures_util::select_biased! {
+						() = jobs.select_next_some() => continue,
+						job = self.channel.recv().fuse() => job.unwrap(),
 					};
-				}
-					switch! {
-						[job]
-						Lookup lookup
-						Forget forget
-						GetAttr getattr
-						SetAttr setattr
-						Read read
-						Write write
-						ReadLink readlink
-						ReadDir readdir
-						Create create
-						FAllocate fallocate
-						SymLink symlink
-						MkDir mkdir
-						Rename rename
-						Unlink unlink
-						RmDir rmdir
-						FSync fsync
-						StatFs statfs
+					macro_rules! switch {
+						{ [$job:ident] $($v:ident $f:ident)* } => {
+							match $job {
+								$(Job::$v(job) => self.$f(job).await,)*
+								_ => unreachable!(),
+							}
+						};
 					}
+					if matches!(&job, Job::Destroy) {
+						break;
+					}
+					jobs.push(async {
+						switch! {
+							[job]
+							Lookup lookup
+							Forget forget
+							GetAttr getattr
+							SetAttr setattr
+							Read read
+							Write write
+							ReadLink readlink
+							ReadDir readdir
+							Create create
+							FAllocate fallocate
+							SymLink symlink
+							MkDir mkdir
+							Rename rename
+							Unlink unlink
+							RmDir rmdir
+							FSync fsync
+							StatFs statfs
+						}
+					});
 				}
+				jobs.for_each(|()| async {}).await;
+				self.destroy().await;
 				Ok::<_, nrfs::Error<_>>(())
 			})
 			.await?;

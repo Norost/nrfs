@@ -43,7 +43,7 @@ impl MemDev {
 
 impl Dev for MemDev {
 	type Error = MemDevError;
-	type ReadTask<'a> = future::Ready<Result<MemBuf, Self::Error>>
+	type ReadTask<'a> = future::Ready<Result<Arc<Vec<u8>>, Self::Error>>
 	where
 		Self: 'a;
 	type WriteTask<'a> = future::Ready<Result<(), Self::Error>>
@@ -65,13 +65,13 @@ impl Dev for MemDev {
 	fn read<'a>(&self, lba: u64, len: usize) -> Self::ReadTask<'_> {
 		future::ready(
 			self.get_mut(lba, len)
-				.map(|b| MemBuf(Arc::new(b.iter().copied().collect()))),
+				.map(|b| Arc::new(b.iter().copied().collect())),
 		)
 	}
 
 	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf) -> Self::WriteTask<'_> {
 		let res = self
-			.get_mut(lba, buf.0.len())
+			.get_mut(lba, buf.len())
 			.map(|mut b| b.copy_from_slice(buf.get()));
 		future::ready(res)
 	}
@@ -104,31 +104,9 @@ impl Allocator for MemAllocator {
 	type AllocTask<'a> = future::Ready<Result<Self::Buf, Self::Error>>
 	where
 		Self: 'a;
-	type Buf = MemBuf;
+	type Buf = Arc<Vec<u8>>;
 
 	fn alloc(&self, size: usize) -> Self::AllocTask<'_> {
-		future::ready(Ok(MemBuf(vec![0; size].into())))
-	}
-}
-
-#[derive(Clone)]
-pub struct MemBuf(Arc<Vec<u8>>);
-
-impl Buf for MemBuf {
-	type Error = MemDevError;
-
-	fn get(&self) -> &[u8] {
-		&self.0
-	}
-
-	fn get_mut(&mut self) -> &mut [u8] {
-		Arc::get_mut(&mut self.0).expect("buffer was cloned")
-	}
-
-	fn shrink(&mut self, len: usize) {
-		assert!(len <= self.0.len(), "new len is larger than old len");
-		Arc::get_mut(&mut self.0)
-			.expect("buffer was cloned")
-			.resize(len, 0);
+		future::ready(Ok(vec![0; size].into()))
 	}
 }

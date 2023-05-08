@@ -31,10 +31,10 @@ then
 	IMG_LEN=8M
 fi
 fallocate -l "$IMG_LEN" "$img"
-"./target/$MODE/tool" make "$img"
+"./target/$MODE/tool" make $MAKE_ARGS "$img"
 
 # Mount
-"./target/$MODE/fuse" "$mnt" "$img" &
+"./target/$MODE/fuse" $FUSE_ARGS "$mnt" "$img" &
 trap 'umount "$mnt"; "./target/$MODE/tool" dump "$img"; rm -rf "$img" "$mnt"' EXIT
 
 # Wait a bit to ensure the driver is actually running
