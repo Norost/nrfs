@@ -29,15 +29,15 @@ impl RecordRef {
 	/// If either `lba` is out of range.
 	pub fn new(lba: u64, blocks: u16) -> Self {
 		assert!(lba < 0x1_0000_0000_0000, "lba out of range");
-		Self((u64::from(blocks) << 48 | lba).into())
+		Self((lba << 16 | u64::from(blocks)).into())
 	}
 
 	pub fn lba(&self) -> u64 {
-		0xffff_ffff_ffff & self.0
+		u64::from(self.0) >> 16
 	}
 
 	pub fn blocks(&self) -> u16 {
-		(u64::from(self.0) >> 48).try_into().unwrap()
+		u64::from(self.0) as u16
 	}
 }
 
