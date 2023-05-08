@@ -145,7 +145,9 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		// Calculate minimum size of buffer necessary for the compression algorithm
 		// to work.
 		let len = self.compression().max_output_size(data.len());
-		let max_blks = self.block_size().min_blocks(32 + len);
+		let max_blks = self
+			.block_size()
+			.min_blocks(usize::from(record::HEADER_LEN) + len);
 		let block_count = self.devices.block_count();
 
 		// Allocate and pack record.
@@ -174,7 +176,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 					compression,
 					block_size,
 					cipher,
-					nonce,
+					&nonce,
 				);
 				(len, buf, data)
 			})

@@ -5,7 +5,7 @@ use xxhash_rust::xxh3::xxh3_128;
 use {
 	chacha20::{
 		cipher::{KeyIvInit as _, StreamCipher as _},
-		ChaCha8,
+		XChaCha12,
 	},
 	poly1305::{universal_hash::KeyInit as _, Poly1305},
 };
@@ -13,12 +13,13 @@ use {
 n2e! {
 	[CipherType]
 	0 NoneXxh3
-	1 ChaCha8Poly1305
+	1 XChaCha12Poly1305
 }
 
 /// Generic cipher.
 pub(crate) struct Cipher {
-	pub key: [u8; 32],
+	pub key1: [u8; 32],
+	pub key2: [u8; 32],
 	pub ty: CipherType,
 }
 
@@ -27,29 +28,40 @@ impl Cipher {
 	fn hash(&self, data: &[u8]) -> [u8; 16] {
 		match self.ty {
 			CipherType::NoneXxh3 => xxh3_128(data).to_le_bytes(),
-			CipherType::ChaCha8Poly1305 => Poly1305::new_from_slice(&self.key)
+			CipherType::XChaCha12Poly1305 => Poly1305::new_from_slice(&self.key1)
 				.unwrap()
 				.compute_unpadded(data)
 				.into(),
 		}
 	}
 
-	/// Apply keystream.
-	fn apply(&self, nonce: u64, data: &mut [u8]) {
+	/// Apply keystream with the given key.
+	fn apply_inner(&self, key: &[u8; 32], nonce: &[u8; 24], data: &mut [u8]) {
 		match self.ty {
 			CipherType::NoneXxh3 => {}
-			CipherType::ChaCha8Poly1305 => {
-				let mut nonce12 = [0; 12];
-				nonce12[..8].copy_from_slice(&nonce.to_le_bytes());
-				ChaCha8::new_from_slices(&self.key, &nonce12)
-					.unwrap()
-					.apply_keystream(data)
-			}
+			CipherType::XChaCha12Poly1305 => XChaCha12::new_from_slices(key, nonce)
+				.unwrap()
+				.apply_keystream(data),
 		}
 	}
 
+	/// Apply keystream.
+	fn apply(&self, nonce: &[u8; 24], data: &mut [u8]) {
+		self.apply_inner(&self.key1, nonce, data)
+	}
+
+	/// Apply keystream for metadata, such as record headers.
+	pub fn apply_meta(&self, nonce: &[u8; 24], data: &mut [u8]) {
+		self.apply_inner(&self.key2, nonce, data)
+	}
+
 	/// Decrypt data in-place.
-	pub fn decrypt(self, nonce: u64, hash: &[u8; 16], data: &mut [u8]) -> Result<(), DecryptError> {
+	pub fn decrypt(
+		&self,
+		nonce: &[u8; 24],
+		hash: &[u8; 16],
+		data: &mut [u8],
+	) -> Result<(), DecryptError> {
 		if !ct_eq(*hash, self.hash(data)) {
 			return Err(DecryptError);
 		}
@@ -60,7 +72,7 @@ impl Cipher {
 	/// Encrypt data in-place.
 	///
 	/// Returns the hash.
-	pub fn encrypt(self, nonce: u64, data: &mut [u8]) -> [u8; 16] {
+	pub fn encrypt(&self, nonce: &[u8; 24], data: &mut [u8]) -> [u8; 16] {
 		self.apply(nonce, data);
 		self.hash(data)
 	}

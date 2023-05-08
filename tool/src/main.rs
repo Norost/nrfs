@@ -36,17 +36,17 @@ impl From<Compression> for nrfs::Compression {
 
 #[derive(Clone, Debug)]
 enum Encryption {
-	Chacha8Poly1305,
+	XChacha12Poly1305,
 }
 
 impl clap::ValueEnum for Encryption {
 	fn value_variants<'a>() -> &'a [Self] {
-		&[Self::Chacha8Poly1305]
+		&[Self::XChacha12Poly1305]
 	}
 
 	fn to_possible_value(&self) -> Option<PossibleValue> {
 		Some(match self {
-			Self::Chacha8Poly1305 => PossibleValue::new("chacha8poly1305"),
+			Self::XChacha12Poly1305 => PossibleValue::new("xchacha12poly1305"),
 		})
 	}
 }

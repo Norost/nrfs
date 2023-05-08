@@ -139,7 +139,7 @@ A block with a filesystem header & info is placed at the start and end of a volu
   +====+==========+============+
   |  0 | XXH3-128 | None       |
   +----+----------+------------+
-  |  1 | Poly1305 | ChaCha8    |
+  |  1 | Poly1305 | XChaCha12  |
   +----+----------+------------+
 
 * KDF: The key derivation function to use to get the key necessary
@@ -189,9 +189,9 @@ A block with a filesystem header & info is placed at the start and end of a volu
   * The key is the derived key.
   * The hash is the 64 lower bits of the output.
 
-* UID: Unique filesystem identifier.
-
 * Nonce: Random integer used for encrypting the header [#]_.
+
+  It is combined with the UID to form a 192-bit nonce.
 
 .. [#] It is *critical* the nonce is never reused to prevent breaking stream
    ciphers, which are supposed to generate *one-time* pads.
@@ -206,6 +206,8 @@ A block with a filesystem header & info is placed at the start and end of a volu
    A 64-bit nonce should be sufficient to ensure it is never reused.
    Even if the nonce is increased by 1 every nanosecond it would take
    584 years for it to repeat a previously used nonce.
+
+* UID: Unique filesystem identifier.
 
 * Hash: Hash of the header.
   The hash is calculated from encrypted data from byte 64 to the end of the
@@ -227,18 +229,26 @@ A block with a filesystem header & info is placed at the start and end of a volu
   |   96 |                                                       |
   +------+                                                       |
   |  104 |                                                       |
-  +------+                          Key                          |
+  +------+                        Key 1                          |
   |  112 |                                                       |
   +------+                                                       |
   |  120 |                                                       |
   +------+-------------------------------------------------------+
-  |  128 |                   Object list root                    |
+  |  128 |                                                       |
+  +------+                                                       |
+  |  136 |                                                       |
+  +------+                        Key 2                          |
+  |  144 |                                                       |
+  +------+                                                       |
+  |  152 |                                                       |
   +------+-------------------------------------------------------+
-  |  136 |                  Object bitmap root                   |
+  |  160 |                   Object list root                    |
   +------+-------------------------------------------------------+
-  |  144 |                  Allocation log head                  |
+  |  168 |                  Object bitmap root                   |
   +------+-------------------------------------------------------+
-  |  156 |                                                       |
+  |  176 |                  Allocation log head                  |
+  +------+-------------------------------------------------------+
+  |  184 |                                                       |
   +------+                       Reserved                        |
   |  ... |                                                       |
   +------+-------------------------------------------------------+
@@ -345,6 +355,8 @@ Record
 A record is a single unit of data.
 It consists of a header which is immediately followed by data.
 
+The header fields other than the nonce are encrypted with Key 2.
+
 .. table:: Record header
   :align: center
   :widths: grid
@@ -352,23 +364,28 @@ It consists of a header which is immediately followed by data.
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 | CAlg |                    |           Length          |
-  +------+------+--------------------+---------------------------+
+  |    0 |                                                       |
+  +------+                                                       |
   |    8 |                         Nonce                         |
-  +------+-------------------------------------------------------+
+  +------+                                                       |
   |   16 |                                                       |
+  +------+---------------------------+---------------------------+
+  |   24 |                           |          Length           |
+  +------+---------------------------+---------------------------+
+  |   32 |                                                       |
+  +------+------+------------------------------------------------+
+  |   40 | CAlg |                                                |
+  +------+------+------------------------------------------------+
+  |   48 |                                                       |
   +------+                         Hash                          |
-  |   24 |                                                       |
+  |   56 |                                                       |
   +------+-------------------------------------------------------+
+
+* Nonce: Random integer used for encryption [#]_.
 
 * Length: Length of the data in bytes.
 
 * CAlg: The compression algorithm used on the data.
-
-* Nonce: Random integer used for encryption [#]_.
-
-.. [#] A nonce can be derived by incrementing the nonce value in the header and
-   using that value.
 
 * Hash: The hash to verify the integrity of the *encrypted* data.
 
@@ -377,12 +394,15 @@ order:
 
 1. Compression
 
-2. Encryption
+2. Encryption with Key 1
 
-   If an encryption algorithm is used, any slack space *must* be filled with
-   random data to reduce or eliminate compression oracles.
+   All blocks are encrypted as a whole, even if the tail is unused.
 
 3. Hashing
+
+   All blocks are hashed as a whole.
+
+4. Header encryption with Key 2
 
 The header itself is *excluded* from packing.
 
@@ -397,8 +417,8 @@ A record reference is a 64-bit value with a LBA and a block count.
   +------+------+------+------+------+------+------+------+------+
   | Byte |    7 |    6 |    5 |    4 |    3 |    2 |    1 |    0 |
   +======+======+======+======+======+======+======+======+======+
-  |    0 |   Blocks    |                   LBA                   |
-  +------+-------------+-----------------------------------------+
+  |    0 |                   LBA                   |    Blocks   |
+  +------+-----------------------------------------+-------------+
 
 * Blocks: the length of the record in blocks, including the header.
 

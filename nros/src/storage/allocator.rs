@@ -327,7 +327,9 @@ impl Allocator {
 				buf.len() > 0,
 				"buffer should have at least one log entry with non-zero size"
 			);
-			let len = store.block_size().round_up(32 + buf.len());
+			let len = store
+				.block_size()
+				.round_up(usize::from(record::HEADER_LEN) + buf.len());
 
 			// FIXME we should poll writes while waiting for an alloc,
 			// as it is possible all memory is used up by the current writes.
@@ -339,7 +341,7 @@ impl Allocator {
 				store.compression(),
 				store.block_size(),
 				store.devices.cipher(),
-				store.devices.gen_nonce(),
+				&store.devices.gen_nonce(),
 			);
 			b.shrink(usize::from(blocks) << store.block_size().to_raw());
 
