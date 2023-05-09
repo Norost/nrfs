@@ -17,8 +17,4 @@ done
 set -x
 wait $pids
 
-exit 1
-
-find "$mnt"
-
 . ./test/_finish.sh

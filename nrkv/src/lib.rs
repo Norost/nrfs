@@ -32,16 +32,24 @@ const HEADER_SIZE: u64 = 64;
 const HAMT_ENTRY_SIZE: u64 = 6;
 const HAMT_ROOT_LEN: u64 = 4096;
 const HAMT_CHILD_LEN: u64 = 16;
+const HASH_KEY_OFFSET: u64 = 0;
 
 pub type Tag = core::num::NonZeroU64;
 
 pub struct Nrkv<S, C> {
-	hdr: Header,
 	store: S,
 	conf: C,
 }
 
 impl<S, C> Nrkv<S, C> {
+	pub fn inner(&self) -> (&S, &C) {
+		(&self.store, &self.conf)
+	}
+
+	pub fn inner_mut(&mut self) -> (&mut S, &mut C) {
+		(&mut self.store, &mut self.conf)
+	}
+
 	pub fn into_inner(self) -> (S, C) {
 		(self.store, self.conf)
 	}
@@ -61,26 +69,29 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 	#[must_use]
 	pub async fn init_with_key(store: S, conf: C, hash_key: [u8; 16]) -> Result<Self, S::Error> {
 		let hdr = Header::new(hash_key, conf.header_offset());
-		let mut slf = Self { hdr, store, conf };
-		slf.save().await?;
+		let mut slf = Self { store, conf };
+		slf.set_header(&hdr).await?;
 		Ok(slf)
 	}
 
 	#[must_use]
-	pub async fn load(mut store: S, conf: C) -> Result<Self, S::Error> {
-		let mut hdr = [0; _];
-		store.read(conf.header_offset(), &mut hdr).await?;
-		let hdr = Header::from_raw(&hdr);
-		Ok(Self { hdr, store, conf })
+	pub fn wrap(store: S, conf: C) -> Self {
+		Self { store, conf }
 	}
 
-	pub async fn save(&mut self) -> Result<(), S::Error> {
-		self.write(self.conf.header_offset(), &self.hdr.to_raw())
+	async fn header(&mut self) -> Result<Header, S::Error> {
+		let hdr = &mut [0; HEADER_SIZE as _];
+		self.read(self.conf.header_offset(), hdr).await?;
+		Ok(Header::from_raw(hdr))
+	}
+
+	async fn set_header(&mut self, header: &Header) -> Result<(), S::Error> {
+		self.write(self.conf.header_offset(), &header.to_raw())
 			.await
 	}
 
 	pub async fn insert(&mut self, key: &Key, data: &[u8]) -> Result<Result<Tag, Tag>, S::Error> {
-		let h = self.hash(key);
+		let h = self.hash(key).await?;
 		let next = |h, d| (h / u128::from(d), h % u128::from(d));
 		let (mut h, mut i) = next(h, HAMT_ROOT_LEN);
 		let (mut slot_offt, slot) = self.hamt_root_get(i as _).await?;
@@ -113,7 +124,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 	}
 
 	pub async fn find(&mut self, key: &Key) -> Result<Option<Tag>, S::Error> {
-		let h = self.hash(key);
+		let h = self.hash(key).await?;
 		let next = |h, d| (h / u128::from(d), h % u128::from(d));
 		let (mut h, mut i) = next(h, HAMT_ROOT_LEN);
 		let (_, mut slot) = self.hamt_root_get(i as _).await?;
@@ -166,6 +177,14 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 
 		Item::new(self, offt).write_key(key).await?;
 
+		if let Some(prev_slot) = prev_slot {
+			let b = &mut [0; 8];
+			self.read(prev_slot.get() - 8, b).await?;
+			let b = u64::from_le_bytes(*b);
+			assert!(b & 1 == 1, "not allocated");
+			self.dealloc(prev_slot.get(), (b >> 16) - 16).await?;
+		}
+
 		Ok(offt)
 	}
 
@@ -175,14 +194,18 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 			+ (1 + u64::from(key_len))
 	}
 
-	pub fn hash(&self, data: &[u8]) -> u128 {
-		let mut h = SipHasher13::new_with_key(&self.hdr.hash_key);
+	async fn hash(&mut self, data: &[u8]) -> Result<u128, S::Error> {
+		let h = self.hash_key().await?;
+		let mut h = SipHasher13::new_with_key(&h);
 		h.write(data);
-		h.finish128().as_u128()
+		Ok(h.finish128().as_u128())
 	}
 
-	pub fn hash_key(&self) -> [u8; 16] {
-		self.hdr.hash_key
+	async fn hash_key(&mut self) -> Result<[u8; 16], S::Error> {
+		let b = &mut [0; 16];
+		self.read(self.conf.header_offset() + HASH_KEY_OFFSET, b)
+			.await?;
+		Ok(*b)
 	}
 
 	pub async fn read_key(&mut self, tag: Tag, buf: &mut [u8]) -> Result<u8, S::Error> {
@@ -216,7 +239,10 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		let len = (len + 15) & !15;
 		let len = 8 + len + 8;
 		assert!(len < 1 << 48);
-		let (offt, prev_region_len) = self.hdr.alloc(len).unwrap();
+
+		let hdr = &mut self.header().await?;
+		let (offt, prev_region_len) = hdr.alloc(len).unwrap();
+		self.set_header(hdr).await?;
 
 		let marker = &(len << 16 | 1).to_le_bytes();
 		self.write(offt.get(), marker).await?;
@@ -227,7 +253,6 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 			self.write(offt.get() + len, marker).await?;
 			self.write(offt.get() + prev_region_len - 8, marker).await?;
 		}
-
 		Ok(offt.checked_add(8).unwrap())
 	}
 
@@ -239,7 +264,10 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		let len = 8 + len + 8;
 		let mut start @ mut zero_start = offset - 8;
 		let mut end @ mut zero_end = start + len;
-		self.hdr.dealloc(end - start).unwrap();
+
+		let hdr = &mut self.header().await?;
+		hdr.dealloc(end - start).unwrap();
+		self.set_header(hdr).await?;
 
 		let f = |b: [u8; 8]| {
 			let b = u64::from_le_bytes(b);
@@ -264,7 +292,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		self.write_zeros(zero_start, zero_end - zero_start).await?;
 
 		let l = end - start;
-		if self.hdr.insert_free_region(start, l) {
+		if hdr.insert_free_region(start, l) {
 			self.write_zeros(start, 8).await?;
 		} else {
 			let marker = &(l << 16 | 0).to_le_bytes();
@@ -290,7 +318,6 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 impl<S, C: fmt::Debug> fmt::Debug for Nrkv<S, C> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct(stringify!(Nrkv))
-			.field("hdr", &self.hdr)
 			.field("conf", &self.conf)
 			.finish_non_exhaustive()
 	}

@@ -66,7 +66,7 @@ impl<'a, D: Dev> Item<'a, D> {
 	}
 
 	async fn read_attr(&self) -> Result<(Kv<'a, D>, (u64, u16), Vec<u8>), Error<D>> {
-		let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv().await?;
+		let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv();
 
 		let a = &mut [0; 8];
 		kv.read_user_data(self.key.tag, 16, a).await?;
@@ -92,7 +92,6 @@ impl<'a, D: Dev> Item<'a, D> {
 		let a = offt.get() << 16 | u64::from(attr_len);
 		kv.write_user_data(self.key.tag, 16, &a.to_le_bytes())
 			.await?;
-		kv.save().await?;
 		Ok(())
 	}
 
@@ -100,6 +99,7 @@ impl<'a, D: Dev> Item<'a, D> {
 		if self.key.dir == u64::MAX {
 			return Ok(vec![]);
 		}
+		let _lock = self.fs.lock_item(self.key).await;
 		let mut attr_map = self.fs.attr_map().await?;
 		let (_, _, attr) = self.read_attr().await?;
 		let mut attr = &*attr;
@@ -114,6 +114,7 @@ impl<'a, D: Dev> Item<'a, D> {
 		if self.key.dir == u64::MAX {
 			return Ok(None);
 		}
+		let _lock = self.fs.lock_item(self.key).await;
 		let mut attr_map = self.fs.attr_map().await?;
 		let Some(id) = attr_map.get_attr(key).await? else { return Ok(None) };
 		let (_, _, attr) = self.read_attr().await?;
@@ -135,6 +136,7 @@ impl<'a, D: Dev> Item<'a, D> {
 			return Ok(Err(SetAttrError::IsRoot));
 		}
 
+		let _lock = self.fs.lock_item_mut(self.key).await;
 		let (kv, addr, mut attr) = self.read_attr().await?;
 		if attr.len() + (8 + 1 + value.len().min(8)) > usize::from(u16::MAX) {
 			return Ok(Err(SetAttrError::Full));
@@ -181,6 +183,7 @@ impl<'a, D: Dev> Item<'a, D> {
 		let mut attr_map = self.fs.attr_map().await?;
 		let Some(id) = attr_map.get_attr(key).await? else { return Ok(false) };
 
+		let _lock = self.fs.lock_item_mut(self.key).await;
 		let (kv, addr, mut attr) = self.read_attr().await?;
 		let mut a = &*attr;
 		let mut start = 0;
@@ -198,12 +201,13 @@ impl<'a, D: Dev> Item<'a, D> {
 	}
 
 	pub async fn len(&self) -> Result<u64, Error<D>> {
-		trace!("Item::len");
+		trace!("len");
 		let buf = &mut [0; 16];
 		if self.key.dir == u64::MAX {
 			buf.copy_from_slice(&self.fs.storage.header_data()[..16]);
 		} else {
-			let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv().await?;
+			let _lock = self.fs.lock_item(self.key).await;
+			let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv();
 			kv.read_user_data(self.key.tag, 0, buf).await?;
 		}
 		let len = u64::from_le_bytes(buf[8..].try_into().unwrap());

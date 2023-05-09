@@ -38,16 +38,6 @@ async fn mkkv() -> Nrkv<Vec<u8>, StaticConf<64, 32>> {
 }
 
 #[test]
-fn load() {
-	run(async {
-		let mut kv = mkkv().await;
-		kv.save().await.unwrap();
-		let (sto, conf) = kv.into_inner();
-		let _ = Nrkv::load(sto, conf).await.unwrap();
-	});
-}
-
-#[test]
 fn insert_one() {
 	run(async {
 		let mut kv = mkkv().await;
