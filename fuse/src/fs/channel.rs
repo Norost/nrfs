@@ -9,6 +9,7 @@ use {
 };
 
 /// Channel to communicate between FUSE session handler and the filesystem handler.
+#[derive(Clone)]
 pub struct FsChannel {
 	pub(super) channel: Sender<Job>,
 }
@@ -16,6 +17,10 @@ pub struct FsChannel {
 impl FsChannel {
 	fn send(&self, job: Job) {
 		self.channel.send_blocking(job).unwrap()
+	}
+
+	pub fn commit(&mut self) -> bool {
+		self.channel.send_blocking(Job::Sync).is_ok()
 	}
 }
 

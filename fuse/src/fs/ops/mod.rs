@@ -2,7 +2,6 @@ mod create;
 mod destroy;
 mod fallocate;
 mod forget;
-mod fsync;
 mod getattr;
 mod lookup;
 mod mkdir;

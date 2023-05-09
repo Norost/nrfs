@@ -27,6 +27,7 @@ pub enum Job {
 	FSync(FSync),
 	StatFs(StatFs),
 	Destroy,
+	Sync,
 }
 
 #[derive(Debug)]

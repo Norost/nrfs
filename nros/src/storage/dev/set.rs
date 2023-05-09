@@ -779,6 +779,10 @@ impl Set256 {
 		Self(u128::MAX, u128::MAX)
 	}
 
+	pub fn any(&self) -> bool {
+		self.0 != 0 || self.1 != 0
+	}
+
 	pub fn get(&self, bit: u8) -> bool {
 		if bit < 0x80 {
 			self.0 & 1 << bit > 0

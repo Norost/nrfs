@@ -90,37 +90,45 @@ impl Fs {
 						{ [$job:ident] $($v:ident $f:ident)* } => {
 							match $job {
 								$(Job::$v(job) => self.$f(job).await,)*
-								_ => unreachable!(),
+								Job::FSync(_) | Job::Sync | Job::Destroy => unreachable!(),
 							}
 						};
 					}
-					if matches!(&job, Job::Destroy) {
-						break;
-					}
-					jobs.push(async {
-						switch! {
-							[job]
-							Lookup lookup
-							Forget forget
-							GetAttr getattr
-							SetAttr setattr
-							Read read
-							Write write
-							ReadLink readlink
-							ReadDir readdir
-							Create create
-							FAllocate fallocate
-							SymLink symlink
-							MkDir mkdir
-							Rename rename
-							Unlink unlink
-							RmDir rmdir
-							FSync fsync
-							StatFs statfs
+					match job {
+						Job::FSync(fsync) => {
+							while let Some(()) = jobs.next().await {}
+							self.fs.finish_transaction().await.unwrap();
+							fsync.reply.ok();
 						}
-					});
+						Job::Sync => {
+							while let Some(()) = jobs.next().await {}
+							self.fs.finish_transaction().await.unwrap();
+						}
+						Job::Destroy => break,
+						job => jobs.push(async {
+							switch! {
+								[job]
+								Lookup lookup
+								Forget forget
+								GetAttr getattr
+								SetAttr setattr
+								Read read
+								Write write
+								ReadLink readlink
+								ReadDir readdir
+								Create create
+								FAllocate fallocate
+								SymLink symlink
+								MkDir mkdir
+								Rename rename
+								Unlink unlink
+								RmDir rmdir
+								StatFs statfs
+							}
+						}),
+					}
 				}
-				jobs.for_each(|()| async {}).await;
+				while let Some(()) = jobs.next().await {}
 				self.destroy().await;
 				Ok::<_, nrfs::Error<_>>(())
 			})

@@ -46,6 +46,10 @@ pub(crate) struct Store<D: Dev, R: Resource> {
 
 	/// Whether to repair broken records or not.
 	allow_repair: bool,
+	/// Whether any data has been modified.
+	///
+	/// Used to avoid redundant transactions.
+	dirty: Cell<bool>,
 }
 
 impl<D: Dev, R: Resource> Store<D, R> {
@@ -61,6 +65,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 			device_read_failures: Default::default(),
 			record_unpack_failures: Default::default(),
 			allow_repair,
+			dirty: allow_repair.into(),
 		};
 		slf.allocator = Allocator::load(&slf).await?.into();
 		Ok(slf)
@@ -125,6 +130,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		if self.allow_repair {
 			// Write to all devices where failure was encountered.
 			self.devices.write(lba, data, blacklist).await?;
+			self.dirty.update(|x| x | blacklist.any());
 		}
 
 		self.packed_bytes_read
@@ -203,6 +209,8 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		self.unpacked_bytes_written
 			.update(|x| x + u64::try_from(data_len).unwrap());
 
+		self.dirty.set(true);
+
 		// Presto!
 		Ok((rec, data))
 	}
@@ -213,6 +221,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		self.allocator.borrow_mut().free(record_ref.lba(), blocks);
 		self.packed_bytes_destroyed
 			.update(|x| x + (blocks << self.block_size().to_raw()));
+		self.dirty.set(true);
 	}
 
 	/// Finish the current transaction.
@@ -220,8 +229,11 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	/// This saves the allocation log, ensures all writes are committed and makes blocks
 	/// freed in this transaction available for the next transaction.
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
-		self.allocator.borrow_mut().save(self).await?;
-		self.devices.save_headers().await
+		if self.dirty.take() {
+			self.allocator.borrow_mut().save(self).await?;
+			self.devices.save_headers().await?;
+		}
+		Ok(())
 	}
 
 	/// Unmount the object store.

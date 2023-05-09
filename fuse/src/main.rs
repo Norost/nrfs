@@ -25,6 +25,8 @@ struct Args {
 	/// Soft limit on the cache size.
 	#[arg(long, default_value_t = 1 << 27)]
 	cache_size: usize,
+	#[arg(long, default_value_t = 15)]
+	sync_interval: u32,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -57,6 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 	let (f, channel) =
 		futures_executor::block_on(fs::Fs::new(0o755, f.into_iter(), key, args.cache_size));
+	let mut sync_channel = channel.clone();
 
 	let mut opts = vec![
 		MountOption::FSName("nrfs".into()),
@@ -69,6 +72,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 	}
 
 	let session = fuser::spawn_mount2(channel, args.mount, &opts)?;
+
+	let sync_interval = args.sync_interval;
+	std::thread::spawn(move || {
+		while {
+			std::thread::sleep(std::time::Duration::from_secs(sync_interval.into()));
+			sync_channel.commit()
+		} {}
+	});
 
 	futures_executor::block_on(f.run()).unwrap();
 
