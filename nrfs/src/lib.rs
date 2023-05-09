@@ -61,6 +61,7 @@ mod config;
 pub mod dir;
 mod file;
 mod item;
+mod lock;
 #[cfg(test)]
 mod test;
 
@@ -79,6 +80,8 @@ pub use {
 
 use core::{fmt, future::Future, pin::Pin};
 
+use util::task::{lock::Lock, lock_set::LockSet};
+
 /// NRFS filesystem manager.
 #[derive(Debug)]
 pub struct Nrfs<D: Dev> {
@@ -86,6 +89,12 @@ pub struct Nrfs<D: Dev> {
 	storage: nros::Nros<D, nros::StdResource>,
 	/// Whether this filesystem is mounted as read-only.
 	read_only: bool,
+	/// Per-directory locks.
+	dir_locks: LockSet<u64>,
+	/// Per-item locks.
+	item_locks: LockSet<ItemKey>,
+	/// Attribute map lock.
+	attr_map_lock: Lock,
 }
 
 impl<D: Dev> Nrfs<D> {
@@ -114,11 +123,17 @@ impl<D: Dev> Nrfs<D> {
 		};
 		let storage = nros::Nros::new(conf).await?;
 
-		let s = Self { storage, read_only: false };
+		let s = Self {
+			storage,
+			read_only: false,
+			dir_locks: Default::default(),
+			item_locks: Default::default(),
+			attr_map_lock: Default::default(),
+		};
 		let id = Dir::init(&s).await?;
 		s.storage.header_data()[..8].copy_from_slice(&(id << 5 | 1).to_le_bytes());
 
-		let id = attr::AttrMap::init(&s.storage).await?;
+		let id = attr::AttrMap::init(&s).await?;
 		s.storage.header_data()[24..32].copy_from_slice(&id.to_le_bytes());
 
 		Ok(s)
@@ -136,7 +151,13 @@ impl<D: Dev> Nrfs<D> {
 			magic: Self::MAGIC,
 		};
 		let storage = nros::Nros::load(conf).await?;
-		Ok(Self { storage, read_only: !allow_repair })
+		Ok(Self {
+			storage,
+			read_only: !allow_repair,
+			dir_locks: Default::default(),
+			item_locks: Default::default(),
+			attr_map_lock: Default::default(),
+		})
 	}
 
 	/// Get a reference to the root directory.
@@ -196,7 +217,7 @@ impl<D: Dev> Nrfs<D> {
 		trace!("dir {:?}", key);
 		let mut a = [0; 8];
 		if key.dir != u64::MAX {
-			let mut kv = Dir::new(self, ItemKey::INVAL, key.dir).kv().await?;
+			let mut kv = Dir::new(self, ItemKey::INVAL, key.dir).kv();
 			kv.read_user_data(key.tag, 0, &mut a).await?;
 		} else {
 			a.copy_from_slice(&self.storage.header_data()[..8]);
@@ -277,7 +298,10 @@ pub struct Statistics {
 	pub object_store: nros::Statistics,
 }
 
-pub(crate) struct Store<'a, D: Dev>(nros::Object<'a, D, nros::StdResource>);
+pub(crate) struct Store<'a, D: Dev> {
+	fs: &'a Nrfs<D>,
+	id: u64,
+}
 
 impl<'a, D: Dev> nrkv::Store for Store<'a, D> {
 	type Error = Error<D>;
@@ -288,7 +312,7 @@ impl<'a, D: Dev> nrkv::Store for Store<'a, D> {
 		buf: &'s mut [u8],
 	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 's>> {
 		Box::pin(async move {
-			self.0.read(offset, buf).await?;
+			self.fs.get(self.id).read(offset, buf).await?;
 			Ok(())
 		})
 	}
@@ -299,7 +323,7 @@ impl<'a, D: Dev> nrkv::Store for Store<'a, D> {
 		data: &'s [u8],
 	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 's>> {
 		Box::pin(async move {
-			self.0.write(offset, data).await?;
+			self.fs.get(self.id).write(offset, data).await?;
 			Ok(())
 		})
 	}
@@ -310,12 +334,12 @@ impl<'a, D: Dev> nrkv::Store for Store<'a, D> {
 		len: u64,
 	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 's>> {
 		Box::pin(async move {
-			self.0.write_zeros(offset, len).await?;
+			self.fs.get(self.id).write_zeros(offset, len).await?;
 			Ok(())
 		})
 	}
 
 	fn len(&self) -> u64 {
-		todo!()
+		self.fs.storage.obj_max_len()
 	}
 }

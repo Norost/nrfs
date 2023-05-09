@@ -20,7 +20,7 @@ mod write;
 use {
 	super::{
 		inode::{Get, Key},
-		mtime_now, mtime_sys, Fs, TTL,
+		mtime_now, mtime_sys, Dev, Fs, TTL,
 	},
 	fuser::{FileType, TimeOrNow},
 	nrfs::{CreateError, Item, ItemTy},
@@ -44,7 +44,7 @@ pub(super) struct Attrs {
 
 macro_rules! attr {
 	(set $n:literal $f:ident $v:ident $e:ident $t:ty) => {
-		async fn $f(item: &Item<'_, nrfs::dev::FileDev>, $v: $t) {
+		async fn $f(item: &Item<'_, Dev>, $v: $t) {
 			item.set_attr($n.into(), $e(&$v.to_le_bytes()))
 				.await
 				.unwrap()
@@ -59,7 +59,7 @@ attr!(set b"nrfs.gid" set_gid gid encode_u libc::gid_t);
 attr!(set b"nrfs.unixmode" set_mode mode encode_u u16);
 
 async fn init_attrs(
-	item: &Item<'_, nrfs::dev::FileDev>,
+	item: &Item<'_, Dev>,
 	uid: libc::uid_t,
 	gid: libc::gid_t,
 	mode: Option<u16>,
@@ -74,15 +74,15 @@ async fn init_attrs(
 	Attrs { mtime: Some(mtime), uid: Some(uid), gid: Some(gid), mode }
 }
 
-async fn get_u(item: &Item<'_, nrfs::dev::FileDev>, key: &nrfs::Key) -> Option<u128> {
+async fn get_u(item: &Item<'_, Dev>, key: &nrfs::Key) -> Option<u128> {
 	item.attr(key).await.unwrap().map(|b| decode_u(&b))
 }
 
-async fn get_s(item: &Item<'_, nrfs::dev::FileDev>, key: &nrfs::Key) -> Option<i128> {
+async fn get_s(item: &Item<'_, Dev>, key: &nrfs::Key) -> Option<i128> {
 	item.attr(key).await.unwrap().map(|b| decode_s(&b))
 }
 
-async fn get_attrs(item: &Item<'_, nrfs::dev::FileDev>) -> Attrs {
+async fn get_attrs(item: &Item<'_, Dev>) -> Attrs {
 	let f = |n: u128| n.try_into().unwrap_or(0);
 	let g = |n: u128| n.try_into().unwrap_or(0);
 	Attrs {

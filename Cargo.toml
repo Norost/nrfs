@@ -5,6 +5,7 @@ members = [
 	"nros",
 	"nrfs",
 	"nrkv",
+	"util",
 ]
 
 [profile.release]

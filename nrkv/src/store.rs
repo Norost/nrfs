@@ -27,6 +27,7 @@ pub trait Store {
 		offset: u64,
 		len: u64,
 	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>>;
+
 	fn len(&self) -> u64;
 }
 
@@ -83,7 +84,7 @@ impl Store for [u8] {
 macro_rules! store_slice {
 	($ty:ty) => {
 		impl Store for $ty {
-			type Error = !;
+			type Error = <[u8] as Store>::Error;
 
 			fn read<'a>(
 				&'a mut self,
@@ -106,6 +107,7 @@ macro_rules! store_slice {
 			) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + 'a>> {
 				<[u8] as Store>::write_zeros(self, offset, len)
 			}
+
 			fn len(&self) -> u64 {
 				<[u8] as Store>::len(self)
 			}

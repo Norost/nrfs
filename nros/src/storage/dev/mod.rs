@@ -127,3 +127,22 @@ pub trait Buf: Clone + Send {
 		self.get().len()
 	}
 }
+
+impl Buf for Arc<Vec<u8>> {
+	type Error = FileDevError;
+
+	fn get(&self) -> &[u8] {
+		&self
+	}
+
+	fn get_mut(&mut self) -> &mut [u8] {
+		Arc::get_mut(self).expect("buffer was cloned")
+	}
+
+	fn shrink(&mut self, len: usize) {
+		assert!(len <= self.len(), "new len is larger than old len");
+		Arc::get_mut(self)
+			.expect("buffer was cloned")
+			.resize(len, 0);
+	}
+}

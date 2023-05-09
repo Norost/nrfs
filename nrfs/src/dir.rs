@@ -30,7 +30,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		trace!("--> {:#x}", id);
 		let mut key = [0; 16];
 		fs.resource().crng_fill(&mut key);
-		nrkv::Nrkv::init_with_key(Store(dir), Conf::CONF, key).await?;
+		nrkv::Nrkv::init_with_key(Store { fs, id }, Conf::CONF, key).await?;
 		Ok(id)
 	}
 
@@ -48,11 +48,12 @@ impl<'a, D: Dev> Dir<'a, D> {
 		trace!("create {:#x} {:?}", self.id, key);
 		assert!(!self.fs.read_only, "read only");
 
-		let mut kv = self.kv().await?;
+		let lock = self.fs.lock_dir_mut(self.id).await;
+		let mut kv = self.kv();
 		let Ok(tag) = kv.insert(key, &[]).await? else {
 			return Ok(Err(CreateError::Duplicate))
 		};
-		kv.save().await?;
+		drop(lock);
 
 		self.update_item_count(true).await?;
 		Ok(Ok((ItemKey { dir: self.id, tag }, kv)))
@@ -111,7 +112,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 	/// Search for an item by name.
 	pub async fn search<'n>(&self, name: &'n Key) -> Result<Option<ItemInfo<'n>>, Error<D>> {
 		trace!("search {:#x} {:?}", self.id, name);
-		let mut kv = self.kv().await?;
+		let _lock = self.fs.lock_dir(self.id).await;
+		let mut kv = self.kv();
 		let Some(tag) = kv.find(name).await? else { return Ok(None) };
 		let ty = &mut [0];
 		kv.read_user_data(tag, 0, ty).await?;
@@ -135,7 +137,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 		trace!("remove {:?}", key);
 		assert_eq!(key.dir, self.id, "dir mismatch");
 
-		let mut kv = self.kv().await?;
+		let lock = self.fs.lock_dir_mut(self.id).await;
+		let mut kv = self.kv();
 		let buf = &mut [0; 24];
 		kv.read_user_data(key.tag, 0, buf).await?;
 		let a = u64::from_le_bytes(buf[..8].try_into().unwrap());
@@ -157,7 +160,8 @@ impl<'a, D: Dev> Dir<'a, D> {
 		let (offt, len) = meta(buf[16..].try_into().unwrap());
 		kv.dealloc(offt, len.into()).await?;
 		kv.remove(key.tag).await?;
-		kv.save().await?;
+		drop(lock);
+
 		self.update_item_count(false).await?;
 		Ok(Ok(()))
 	}
@@ -179,14 +183,23 @@ impl<'a, D: Dev> Dir<'a, D> {
 	) -> Result<Result<ItemKey, TransferError>, Error<D>> {
 		trace!("transfer {:?} -> {:#x} {:?}", key, to_dir.id, to_name);
 
-		let to_kv = &mut to_dir.kv().await?;
+		let id_l = self.id.min(to_dir.id);
+		let id_h = self.id.max(to_dir.id);
+		let lock_l = self.fs.lock_dir_mut(id_l).await;
+		let lock_h = if id_l != id_h {
+			Some(self.fs.lock_dir_mut(id_h).await)
+		} else {
+			None
+		};
+
+		let to_kv = &mut to_dir.kv();
 
 		if to_kv.find(to_name).await?.is_some() {
 			return Ok(Err(TransferError::Duplicate));
 		}
 
 		let mut from_kv = if self.id != to_dir.id {
-			Some(self.kv().await?)
+			Some(self.kv())
 		} else {
 			None
 		};
@@ -223,9 +236,10 @@ impl<'a, D: Dev> Dir<'a, D> {
 
 		let tag = to_kv.insert(to_name, item).await?.unwrap();
 
-		to_kv.save().await?;
-		if let Some(mut from_kv) = from_kv {
-			from_kv.save().await?;
+		drop(lock_l);
+		drop(lock_h);
+
+		if from_kv.is_some() {
 			self.update_item_count(false).await?;
 			to_dir.update_item_count(true).await?;
 		}
@@ -241,8 +255,10 @@ impl<'a, D: Dev> Dir<'a, D> {
 		state: u64,
 	) -> Result<Option<(ItemInfo<'static>, u64)>, Error<D>> {
 		trace!("next_from {:#x}", state);
+		let _lock = self.fs.lock_dir(self.id).await;
+
 		let val = &RefCell::new(None);
-		let kv = &mut self.kv().await?;
+		let kv = &mut self.kv();
 		let kv = &nrkv::ShareNrkv::new(kv);
 		let mut state = nrkv::IterState::from_u64(state);
 		kv.next_batch(&mut state, move |tag| async move {
@@ -265,23 +281,16 @@ impl<'a, D: Dev> Dir<'a, D> {
 		Ok(val.take().map(|v| (v, state.into_u64())))
 	}
 
-	pub async fn len(&self) -> Result<u32, Error<D>> {
-		trace!("Dir::len");
-		let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv().await?;
-		let buf = &mut [0; 4];
-		kv.read_user_data(self.key.tag, 8, buf).await?;
-		Ok(u32::from_le_bytes(*buf))
-	}
-
-	pub(crate) async fn kv(&self) -> Result<Kv<'a, D>, Error<D>> {
-		nrkv::Nrkv::load(Store(self.fs.get(self.id)), nrkv::StaticConf).await
+	pub(crate) fn kv(&self) -> Kv<'a, D> {
+		nrkv::Nrkv::wrap(Store { fs: self.fs, id: self.id }, nrkv::StaticConf)
 	}
 
 	async fn update_item_count(&self, incr: bool) -> Result<(), Error<D>> {
 		if self.key.dir == u64::MAX {
 			return Ok(());
 		}
-		let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv().await?;
+		let _lock = self.fs.lock_item_mut(self.key).await;
+		let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv();
 		let buf = &mut [0; 4];
 		kv.read_user_data(self.key.tag, 8, buf).await?;
 		let mut num = u32::from_le_bytes(*buf);

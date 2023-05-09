@@ -1,8 +1,8 @@
 #![forbid(unused_must_use)]
 #![forbid(rust_2018_idioms)]
-#![feature(btree_drain_filter)]
 #![feature(iterator_try_collect)]
 
+mod dev;
 mod fs;
 mod job;
 

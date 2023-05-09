@@ -49,6 +49,7 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 
+		let _lock = self.fs.lock_item(self.key).await;
 		let (mut kv, dat) = self.data().await?;
 		let end = calc_end(offset, buf.len()).unwrap_or(u64::MAX);
 
@@ -79,6 +80,7 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 
+		let _lock = self.fs.lock_item_mut(self.key).await;
 		let end = calc_end(offset, data.len()).unwrap_or(u64::MAX);
 		let (mut kv, dat) = self.data().await?;
 		if offset >= dat.len() {
@@ -116,6 +118,7 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(Err(LengthTooLong));
 		}
 
+		let _lock = self.fs.lock_item_mut(self.key).await;
 		let (mut kv, mut dat) = self.data().await?;
 
 		if end <= dat.len() {
@@ -140,6 +143,7 @@ impl<'a, D: Dev> File<'a, D> {
 				Data::Embed { offset: offt, length, capacity, .. }
 					if self.embed_factor() >= end =>
 				{
+					let _dir_lock = self.fs.lock_dir_mut(self.key.dir).await;
 					let keep_len = u64::from(*length).min(end).try_into().unwrap();
 					let new_cap = (end * 3 / 2).min(u16::MAX.into());
 					let mut buf = vec![0; keep_len];
@@ -148,17 +152,16 @@ impl<'a, D: Dev> File<'a, D> {
 					let o = kv.alloc(new_cap).await?;
 					kv.write(o.get(), &buf).await?;
 					kv.write(o.get() + offset, data).await?;
-					kv.save().await?;
 					*offt = o.get();
 					*length = end.try_into().unwrap();
 					*capacity = new_cap.try_into().unwrap();
 				}
 				&mut Data::Embed { offset: offt, length, capacity, is_sym } => {
+					let _dir_lock = self.fs.lock_dir_mut(self.key.dir).await;
 					let keep_len = u64::from(length).min(end).try_into().unwrap();
 					let mut buf = vec![0; keep_len];
 					kv.read(offt, &mut buf).await?;
 					kv.dealloc(offt, capacity.into()).await?;
-					kv.save().await?;
 					let obj = self.fs.storage.create().await?;
 					obj.write(0, &buf).await?;
 					obj.write(offset, data).await?;
@@ -179,6 +182,7 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(Err(LengthTooLong));
 		}
 
+		let _lock = self.fs.lock_item_mut(self.key).await;
 		let (mut kv, mut dat) = self.data().await?;
 		if dat.len() == new_len {
 			return Ok(Ok(()));
@@ -206,21 +210,21 @@ impl<'a, D: Dev> File<'a, D> {
 					*length = new_len.try_into().unwrap()
 				}
 				Data::Embed { length, capacity, offset, .. } if self.embed_factor() >= new_len => {
+					let _dir_lock = self.fs.lock_dir_mut(self.key.dir).await;
 					let mut buf = vec![0; (*length).into()];
 					kv.read(*offset, &mut buf).await?;
 					kv.dealloc(*offset, (*capacity).into()).await?;
 					let offt = kv.alloc(new_len).await?;
 					kv.write(offt.get(), &buf).await?;
-					kv.save().await?;
 					*offset = offt.get();
 					*length = new_len.try_into().unwrap();
 					*capacity = new_len.try_into().unwrap();
 				}
 				&mut Data::Embed { length, capacity, offset, is_sym } => {
+					let _dir_lock = self.fs.lock_dir_mut(self.key.dir).await;
 					let mut buf = vec![0; length.into()];
 					kv.read(offset, &mut buf).await?;
 					kv.dealloc(offset, capacity.into()).await?;
-					kv.save().await?;
 					let obj = self.fs.storage.create().await?;
 					obj.write(0, &buf).await?;
 					dat = Data::Object { is_sym, id: obj.id(), length: new_len };
@@ -231,20 +235,12 @@ impl<'a, D: Dev> File<'a, D> {
 		Ok(Ok(()))
 	}
 
-	pub async fn len(&self) -> Result<u64, Error<D>> {
-		trace!("File::len");
-		Ok(self.data().await?.1.len())
-	}
-
 	pub async fn is_embed(&self) -> Result<bool, Error<D>> {
 		trace!("is_embed");
+		let _lock = self.fs.lock_item(self.key).await;
 		let ty = &mut [0];
-		self.dir()
-			.kv()
-			.await?
-			.read_user_data(self.key.tag, 0, ty)
-			.await?;
-		Ok(matches!(ty[0], 4 | 5))
+		self.dir().kv().read_user_data(self.key.tag, 0, ty).await?;
+		Ok(matches!(ty[0] & 7, 4 | 5))
 	}
 
 	/// Create stub dir helper.
@@ -263,7 +259,7 @@ impl<'a, D: Dev> File<'a, D> {
 	}
 
 	async fn data(&self) -> Result<(Kv<'a, D>, Data), Error<D>> {
-		let mut kv = self.dir().kv().await?;
+		let mut kv = self.dir().kv();
 		let buf = &mut [0; 16];
 		kv.read_user_data(self.key.tag, 0, buf).await?;
 		Ok((kv, Data::from_raw(*buf)))

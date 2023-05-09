@@ -27,7 +27,9 @@ impl Filesystem for FsChannel {
 			| FUSE_WRITEBACK_CACHE
 			| FUSE_NO_OPEN_SUPPORT
 			| FUSE_AUTO_INVAL_DATA
-			| FUSE_CACHE_SYMLINKS;
+			| FUSE_CACHE_SYMLINKS
+			| FUSE_PARALLEL_DIROPS
+			| FUSE_NO_OPENDIR_SUPPORT;
 		config.add_capabilities(CAP).unwrap();
 		if let Err(m) = config.set_max_write(1 << 24) {
 			config.set_max_write(m).unwrap();
