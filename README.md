@@ -2,26 +2,25 @@
 
 ## Features
 
-&check; = implemented, &cross; = planned
-
-* &check; Maximum volume size of `2^64 - 1` blocks
+* Maximum volume size of `2^64 - 1` blocks
   * With a maximum block size of `2^24`, maximum volume size is `2^88 - 2^24`
     bytes
-* &check; Maximum object size of `2^64 - 1` bytes
-* &check; Maximum object count of `2^58`
-* &check; Error detection
-* &check; Error correction (with mirrors only!)
-* &check; Compression
-* &check; Encryption
-* &check; Transactional updates
-* &check; Mirroring
-* &cross; Defragmentation
-* &check; Sparse objects
-* &cross; Out of band deduplication (+ copy-on-write).
-* &check; Up to 2^32 entries per directory, indexed using a hashmap with DoS resistance.
-* &check; File names up to 255 bytes long.
-* &check; Extensions per directory (UNIX permissions/UID/GID, modification time ...).
-* &check; Embedding small files inside directories.
+* Maximum object size of `2^64 - 1` bytes
+* Maximum object count of `2^59`
+* Error detection
+* Error correction (with mirrors only!)
+* Compression
+* Encryption
+* Transactional updates
+* Mirroring
+* Sparse objects
+* Up to 2^32 entries per directory, indexed using a hashmap with DoS resistance.
+* File names up to 255 bytes long.
+* Arbitrary key-value pairs.
+  * Keys up to 255 bytes long.
+  * Arbitrary-length values.
+  * At most 64KiB of attribute data per item.
+* Embedding small files inside directories.
 
 ## How to use
 
