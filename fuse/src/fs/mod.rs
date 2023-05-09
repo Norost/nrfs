@@ -90,7 +90,7 @@ impl Fs {
 						{ [$job:ident] $($v:ident $f:ident)* } => {
 							match $job {
 								$(Job::$v(job) => self.$f(job).await,)*
-								Job::FSync(_) | Job::Sync | Job::Destroy => unreachable!(),
+								Job::FSync(_) | Job::Sync(_) | Job::Destroy => unreachable!(),
 							}
 						};
 					}
@@ -100,9 +100,14 @@ impl Fs {
 							self.fs.finish_transaction().await.unwrap();
 							fsync.reply.ok();
 						}
-						Job::Sync => {
-							while let Some(()) = jobs.next().await {}
-							self.fs.finish_transaction().await.unwrap();
+						Job::Sync(when) => {
+							let now = std::time::Instant::now();
+							if when >= now {
+								while let Some(()) = jobs.next().await {}
+								self.fs.finish_transaction().await.unwrap();
+							} else {
+								eprintln!("Skipping Job::Sync (when: {:?}, now: {:?})", when, now);
+							}
 						}
 						Job::Destroy => break,
 						job => jobs.push(async {

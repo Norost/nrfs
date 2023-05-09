@@ -3,7 +3,7 @@ use {
 		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs,
 		ReplyWrite, TimeOrNow,
 	},
-	std::{ffi::OsStr, path::Path},
+	std::{ffi::OsStr, path::Path, time::Instant},
 };
 
 /// A job to be completed by the filesystem handler.
@@ -27,7 +27,7 @@ pub enum Job {
 	FSync(FSync),
 	StatFs(StatFs),
 	Destroy,
-	Sync,
+	Sync(Instant),
 }
 
 #[derive(Debug)]

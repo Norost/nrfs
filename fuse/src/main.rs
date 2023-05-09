@@ -74,11 +74,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 	let session = fuser::spawn_mount2(channel, args.mount, &opts)?;
 
 	let sync_interval = args.sync_interval;
-	std::thread::spawn(move || {
-		while {
-			std::thread::sleep(std::time::Duration::from_secs(sync_interval.into()));
-			sync_channel.commit()
-		} {}
+	std::thread::spawn(move || loop {
+		std::thread::sleep(std::time::Duration::from_secs(sync_interval.into()));
+		sync_channel.commit();
 	});
 
 	futures_executor::block_on(f.run()).unwrap();

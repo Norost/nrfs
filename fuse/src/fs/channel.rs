@@ -5,7 +5,11 @@ use {
 		Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
 		ReplyEntry, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
 	},
-	std::{ffi::OsStr, path::Path, time::SystemTime},
+	std::{
+		ffi::OsStr,
+		path::Path,
+		time::{Duration, Instant, SystemTime},
+	},
 };
 
 /// Channel to communicate between FUSE session handler and the filesystem handler.
@@ -20,7 +24,8 @@ impl FsChannel {
 	}
 
 	pub fn commit(&mut self) -> bool {
-		self.channel.send_blocking(Job::Sync).is_ok()
+		let when = Instant::now().checked_add(Duration::from_secs(1)).unwrap();
+		self.channel.send_blocking(Job::Sync(when)).is_ok()
 	}
 }
 
