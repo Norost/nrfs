@@ -48,20 +48,13 @@ File types
 Filesystem header
 -----------------
 
-The filesystem header contains:
-
-* Root directory item information
-
-* Enabled extensions.
-  See the Extensions_ section for more information.
-
 .. table:: Filesystem header
 
   ====== ====== =====
   Offset Length Field
   ====== ====== =====
-       0     24 Root directory item data
-      24      8 Attribute keys directory
+       0     40 Root directory item data
+      40      8 Attribute keys directory
   ====== ====== =====
 
 
@@ -103,8 +96,10 @@ An item describes a single object.
    Offset Length Field
    ====== ====== =====
         0     16 Data
-       16      6 Attribute list offset
-       22      2 Attribute list length
+       16      8 Modification time
+       24      8 Generation
+       32      6 Attribute list offset
+       38      2 Attribute list length
    ====== ====== =====
 
 .. table:: Embedded file / symlink data
@@ -137,6 +132,19 @@ An item describes a single object.
                5            59 Object ID
               64            32 Item count
    ============= ============= =====
+
+* Modification time
+
+  The modification time attribute adds a signed time stamp microseconds.
+  The timestamp is relative to the UNIX epoch.
+
+* Generation
+
+  The generation attribute tracks when a file was last updated.
+  It is propagated up to the root.
+
+    The generation attribute can be used by backup tool to skip directories
+    with no modified descendants.
 
 
 Item attributes
@@ -174,16 +182,6 @@ The high bit indicates whether the next halfword is part of the integer.
 
 Standard attributes
 -------------------
-
-Modification time
-~~~~~~~~~~~~~~~~~
-
-name: "nrfs.mtime"
-
-The modification time attribute adds a signed time stamp.
-The length is variable.
-
-The timestamp is relative to the UNIX epoch.
 
 
 UID

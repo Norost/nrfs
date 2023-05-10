@@ -285,12 +285,11 @@ async fn setattr(
 	let mtime = || {
 		let Ok(t) = meta.modified() else { return 0 };
 		match t.duration_since(std::time::UNIX_EPOCH) {
-			Ok(t) => t.as_micros() as i128,
-			Err(e) => -(e.duration().as_micros() as i128),
+			Ok(t) => t.as_micros().try_into().unwrap_or(i64::MAX),
+			Err(e) => -(e.duration().as_micros().try_into().unwrap_or(i64::MAX)),
 		}
 	};
-	item.set_attr(b"nrfs.mtime".into(), encode_s(&mtime().to_le_bytes()))
-		.await??;
+	item.set_modified_time(mtime()).await?;
 	if cfg!(target_family = "unix") {
 		item.set_attr(b"nrfs.uid".into(), encode_u(&meta.uid().to_le_bytes()))
 			.await??;
@@ -309,19 +308,4 @@ fn encode_u(mut b: &[u8]) -> &[u8] {
 		b = c;
 	}
 	b
-}
-
-fn encode_s(mut b: &[u8]) -> &[u8] {
-	while let Some(&[x, y]) = b.get(b.len() - 2..) {
-		match y {
-			0 if x & 0x80 == 0 => b = &b[..b.len() - 1],
-			0xff if x & 0x80 != 0 => b = &b[..b.len() - 1],
-			_ => break,
-		}
-	}
-	if matches!(b, &[0]) {
-		&[]
-	} else {
-		b
-	}
 }

@@ -192,13 +192,13 @@ impl Fs {
 	}
 }
 
-fn mtime_now() -> i128 {
+fn mtime_now() -> i64 {
 	mtime_sys(SystemTime::now())
 }
 
-fn mtime_sys(t: SystemTime) -> i128 {
+fn mtime_sys(t: SystemTime) -> i64 {
 	t.duration_since(UNIX_EPOCH).map_or_else(
-		|t| -t.duration().as_micros().try_into().unwrap_or(i128::MAX),
-		|t| t.as_micros().try_into().unwrap_or(i128::MAX),
+		|t| -t.duration().as_micros().try_into().unwrap_or(i64::MAX),
+		|t| t.as_micros().try_into().unwrap_or(i64::MAX),
 	)
 }

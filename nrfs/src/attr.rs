@@ -1,3 +1,5 @@
+use crate::HDR_ATTR_OFFT;
+
 use {
 	crate::{Error, Nrfs, Store},
 	nrkv::{Key, Nrkv, StaticConf},
@@ -62,7 +64,11 @@ impl<'a, D: Dev> AttrMap<'a, D> {
 
 impl<D: Dev> Nrfs<D> {
 	pub(crate) async fn attr_map(&self) -> Result<AttrMap<'_, D>, Error<D>> {
-		let id = u64::from_le_bytes(self.storage.header_data()[24..32].try_into().unwrap());
+		let id = u64::from_le_bytes(
+			self.storage.header_data()[HDR_ATTR_OFFT..][..8]
+				.try_into()
+				.unwrap(),
+		);
 		let kv = Nrkv::wrap(Store { fs: self, id }, nrkv::StaticConf);
 		Ok(AttrMap(kv))
 	}

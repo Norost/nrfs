@@ -121,6 +121,13 @@ async fn list_files(
 	let mut i = 0;
 	while let Some((data, next_i)) = root.next_from(i).await? {
 		let item = fs.item(data.key);
+
+		let m = item.modified().await?;
+		let secs = m.time / 1_000_000;
+		let micros = m.time.rem_euclid(1_000_000) as u32;
+		let t = chrono::NaiveDateTime::from_timestamp_opt(secs, micros * 1_000).unwrap();
+		print!("[{:<26},{:>8}] ", format!("{}", t), m.gen);
+
 		let mut first = true;
 		for k in item.attr_keys().await? {
 			(!first).then(|| print!("|"));
@@ -136,14 +143,6 @@ async fn list_files(
 						*c = [b'-', *l][usize::from(u & 1 << i != 0)];
 					}
 					print!("{}", std::str::from_utf8(&s).unwrap());
-				}
-				b"nrfs.mtime" => {
-					let t = decode_s(&v);
-					let secs = (t / 1_000_000) as i64;
-					let micros = t.rem_euclid(1_000_000) as u32;
-					let t =
-						chrono::NaiveDateTime::from_timestamp_opt(secs, micros * 1_000).unwrap();
-					print!("{:<26}", format!("{}", t));
 				}
 				_ => print!("{:?}", bstr::BStr::new(&v)),
 			}
@@ -218,13 +217,4 @@ fn decode_u(b: &[u8]) -> u128 {
 	let mut c = [0; 16];
 	c[..b.len()].copy_from_slice(b);
 	u128::from_le_bytes(c)
-}
-
-fn decode_s(b: &[u8]) -> i128 {
-	let mut c = [0; 16];
-	if b.last().is_some_and(|&x| x & 0x80 != 0) {
-		c.fill(0xff);
-	}
-	c[..b.len()].copy_from_slice(b);
-	i128::from_le_bytes(c)
 }

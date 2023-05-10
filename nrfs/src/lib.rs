@@ -82,6 +82,9 @@ use core::{fmt, future::Future, pin::Pin};
 
 use util::task::{lock::Lock, lock_set::LockSet};
 
+const HDR_ROOT_OFFT: usize = 0;
+const HDR_ATTR_OFFT: usize = 40;
+
 /// NRFS filesystem manager.
 #[derive(Debug)]
 pub struct Nrfs<D: Dev> {
@@ -131,10 +134,10 @@ impl<D: Dev> Nrfs<D> {
 			attr_map_lock: Default::default(),
 		};
 		let id = Dir::init(&s).await?;
-		s.storage.header_data()[..8].copy_from_slice(&(id << 5 | 1).to_le_bytes());
+		s.storage.header_data()[HDR_ROOT_OFFT..][..8].copy_from_slice(&(id << 5 | 1).to_le_bytes());
 
 		let id = attr::AttrMap::init(&s).await?;
-		s.storage.header_data()[24..32].copy_from_slice(&id.to_le_bytes());
+		s.storage.header_data()[HDR_ATTR_OFFT..][..8].copy_from_slice(&id.to_le_bytes());
 
 		Ok(s)
 	}

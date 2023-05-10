@@ -35,7 +35,7 @@ use {
 const NO_INO: u64 = u64::MAX;
 
 pub(super) struct Attrs {
-	pub mtime: Option<i128>,
+	pub mtime: Option<i64>,
 	pub uid: Option<libc::uid_t>,
 	pub gid: Option<libc::gid_t>,
 	pub mode: Option<u16>,
@@ -52,10 +52,13 @@ macro_rules! attr {
 	};
 }
 
-attr!(set b"nrfs.mtime" set_mtime t encode_s i128);
 attr!(set b"nrfs.uid" set_uid uid encode_u libc::uid_t);
 attr!(set b"nrfs.gid" set_gid gid encode_u libc::gid_t);
 attr!(set b"nrfs.unixmode" set_mode mode encode_u u16);
+
+async fn set_mtime(item: &Item<'_, Dev>, mtime: i64) {
+	item.set_modified_time(mtime).await.unwrap();
+}
 
 async fn init_attrs(
 	item: &Item<'_, Dev>,
@@ -77,15 +80,12 @@ async fn get_u(item: &Item<'_, Dev>, key: &nrfs::Key) -> Option<u128> {
 	item.attr(key).await.unwrap().map(|b| decode_u(&b))
 }
 
-async fn get_s(item: &Item<'_, Dev>, key: &nrfs::Key) -> Option<i128> {
-	item.attr(key).await.unwrap().map(|b| decode_s(&b))
-}
-
 async fn get_attrs(item: &Item<'_, Dev>) -> Attrs {
 	let f = |n: u128| n.try_into().unwrap_or(0);
 	let g = |n: u128| n.try_into().unwrap_or(0);
+	let m = item.modified().await.unwrap();
 	Attrs {
-		mtime: get_s(item, b"nrfs.mtime".into()).await,
+		mtime: Some(m.time),
 		uid: get_u(item, b"nrfs.uid".into()).await.map(f),
 		gid: get_u(item, b"nrfs.gid".into()).await.map(f),
 		mode: get_u(item, b"nrfs.unixmode".into()).await.map(g),
@@ -98,33 +98,9 @@ fn decode_u(b: &[u8]) -> u128 {
 	u128::from_le_bytes(c)
 }
 
-fn decode_s(b: &[u8]) -> i128 {
-	let mut c = [0; 16];
-	if b.last().is_some_and(|&x| x & 0x80 != 0) {
-		c.fill(0xff);
-	}
-	c[..b.len()].copy_from_slice(b);
-	i128::from_le_bytes(c)
-}
-
 fn encode_u(mut b: &[u8]) -> &[u8] {
 	while let Some((&0, c)) = b.split_last() {
 		b = c;
 	}
 	b
-}
-
-fn encode_s(mut b: &[u8]) -> &[u8] {
-	while let Some(&[x, y]) = b.get(b.len() - 2..) {
-		match y {
-			0 if x & 0x80 == 0 => b = &b[..b.len() - 1],
-			0xff if x & 0x80 != 0 => b = &b[..b.len() - 1],
-			_ => break,
-		}
-	}
-	if matches!(b, &[0]) {
-		&[]
-	} else {
-		b
-	}
 }

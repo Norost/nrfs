@@ -1,5 +1,7 @@
+use crate::HDR_ROOT_OFFT;
+
 use {
-	crate::{Dev, Error, File, Item, ItemInfo, ItemKey, ItemTy, Nrfs, Store},
+	crate::{item::ITEM_LEN, Dev, Error, File, Item, ItemInfo, ItemKey, ItemTy, Nrfs, Store},
 	core::{cell::RefCell, fmt, ops::Deref},
 	nrkv::Key,
 	nros::Resource,
@@ -13,8 +15,7 @@ pub struct Dir<'a, D: Dev> {
 	pub(crate) id: u64,
 }
 
-type Conf = nrkv::StaticConf<0, 24>;
-pub(crate) type Kv<'a, D> = nrkv::Nrkv<Store<'a, D>, Conf>;
+pub(crate) type Kv<'a, D> = nrkv::Nrkv<Store<'a, D>, nrkv::StaticConf<0, ITEM_LEN>>;
 
 impl<'a, D: Dev> Dir<'a, D> {
 	/// Create a [`Dir`] helper structure.
@@ -30,7 +31,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 		trace!("--> {:#x}", id);
 		let mut key = [0; 16];
 		fs.resource().crng_fill(&mut key);
-		nrkv::Nrkv::init_with_key(Store { fs, id }, Conf::CONF, key).await?;
+		Kv::init_with_key(Store { fs, id }, nrkv::StaticConf, key).await?;
 		Ok(id)
 	}
 
@@ -138,28 +139,10 @@ impl<'a, D: Dev> Dir<'a, D> {
 		assert_eq!(key.dir, self.id, "dir mismatch");
 
 		let lock = self.fs.lock_dir_mut(self.id).await;
-		let mut kv = self.kv();
-		let buf = &mut [0; 24];
-		kv.read_user_data(key.tag, 0, buf).await?;
-		let a = u64::from_le_bytes(buf[..8].try_into().unwrap());
-		let b = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-		match a & 7 {
-			ty @ 1 | ty @ 2 | ty @ 3 => {
-				if ty == 1 && b != 0 {
-					return Ok(Err(RemoveError::NotEmpty));
-				}
-				self.fs.get(a >> 5).dealloc().await?;
-			}
-			4 | 5 => {
-				let offt = a >> 16;
-				let cap = (b >> 32) & 0xffff;
-				kv.dealloc(offt, cap.into()).await?;
-			}
-			ty => panic!("invalid ty {}", ty),
+		if !Item::new(self.fs, key).destroy().await? {
+			return Ok(Err(RemoveError::NotEmpty));
 		}
-		let (offt, len) = meta(buf[16..].try_into().unwrap());
-		kv.dealloc(offt, len.into()).await?;
-		kv.remove(key.tag).await?;
+		self.kv().remove(key.tag).await?;
 		drop(lock);
 
 		self.update_item_count(false).await?;
@@ -286,21 +269,27 @@ impl<'a, D: Dev> Dir<'a, D> {
 	}
 
 	async fn update_item_count(&self, incr: bool) -> Result<(), Error<D>> {
-		if self.key.dir == u64::MAX {
-			return Ok(());
-		}
-		let _lock = self.fs.lock_item_mut(self.key).await;
-		let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv();
-		let buf = &mut [0; 4];
-		kv.read_user_data(self.key.tag, 8, buf).await?;
-		let mut num = u32::from_le_bytes(*buf);
-		if incr {
-			num += 1
-		} else {
-			num -= 1
+		let f = |buf| {
+			let mut num = u32::from_le_bytes(buf);
+			if incr {
+				num += 1
+			} else {
+				num -= 1
+			};
+			num.to_le_bytes()
 		};
-		kv.write_user_data(self.key.tag, 8, &num.to_le_bytes())
-			.await
+		if self.key.dir == u64::MAX {
+			let b = &mut self.fs.storage.header_data()[HDR_ROOT_OFFT..][8..12];
+			let b = <&mut [u8; 4]>::try_from(b).unwrap();
+			*b = f(*b);
+			Ok(())
+		} else {
+			let _lock = self.fs.lock_item_mut(self.key).await;
+			let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv();
+			let buf = &mut [0; 4];
+			kv.read_user_data(self.key.tag, 8, buf).await?;
+			kv.write_user_data(self.key.tag, 8, &f(*buf)).await
+		}
 	}
 }
 
