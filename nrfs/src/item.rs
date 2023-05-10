@@ -146,18 +146,21 @@ impl<'a, D: Dev> Item<'a, D> {
 		}
 
 		let mut attr_map = self.fs.attr_map().await?;
-		let id = attr_map.ref_attr(key).await?;
-
-		let mut a = &*attr;
-		let mut start = 0;
-		while let Some((i, _)) = attr_next(&mut a) {
-			let end = attr.len() - a.len();
-			if i == id {
-				attr.drain(start..end);
-				break;
+		let id = 'new: {
+			if let Some(id) = attr_map.get_attr(key).await? {
+				let mut a = &*attr;
+				let mut start = 0;
+				while let Some((i, _)) = attr_next(&mut a) {
+					let end = attr.len() - a.len();
+					if i == id {
+						attr.drain(start..end);
+						break 'new id;
+					}
+					start = end;
+				}
 			}
-			start = end;
-		}
+			attr_map.ref_attr(key).await?
+		};
 
 		let mut id = id.get();
 		while id > 0x7fff {
