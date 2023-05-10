@@ -165,64 +165,30 @@ impl<'a, D: Dev> Dir<'a, D> {
 		to_name: &Key,
 	) -> Result<Result<ItemKey, TransferError>, Error<D>> {
 		trace!("transfer {:?} -> {:#x} {:?}", key, to_dir.id, to_name);
+		assert_ne!(key, to_dir.key, "transfer causes cycle");
 
 		let id_l = self.id.min(to_dir.id);
 		let id_h = self.id.max(to_dir.id);
-		let lock_l = self.fs.lock_dir_mut(id_l).await;
-		let lock_h = if id_l != id_h {
+		let _lock_l = self.fs.lock_dir_mut(id_l).await;
+		let _lock_h = if id_l != id_h {
 			Some(self.fs.lock_dir_mut(id_h).await)
 		} else {
 			None
 		};
 
-		let to_kv = &mut to_dir.kv();
-
-		if to_kv.find(to_name).await?.is_some() {
+		if to_dir.kv().find(to_name).await?.is_some() {
 			return Ok(Err(TransferError::Duplicate));
 		}
 
-		let mut from_kv = if self.id != to_dir.id {
-			Some(self.kv())
-		} else {
-			None
-		};
+		let item = &mut [0; ITEM_LEN as _];
+		self.kv().read_user_data(key.tag, 0, item).await?;
+		self.kv().remove(key.tag).await?;
 
-		let item = &mut [0; 24];
-		let kv = from_kv.as_mut().unwrap_or(to_kv);
-		kv.read_user_data(key.tag, 0, item).await?;
-		kv.remove(key.tag).await?;
+		self.fs.item(key).realloc(to_dir, item).await?;
 
-		assert_ne!(key, to_dir.key, "transfer causes cycle");
+		let tag = to_dir.kv().insert(to_name, item).await?.unwrap();
 
-		if let Some(from_kv) = from_kv.as_mut() {
-			let mut buf = vec![];
-			if matches!(item[0] & 7, 4 | 5) {
-				let offt = u64::from_le_bytes(item[..8].try_into().unwrap()) >> 16;
-				let len = u16::from_le_bytes(item[8..10].try_into().unwrap());
-				buf.resize(len.into(), 0);
-				from_kv.read(offt, &mut buf).await?;
-				from_kv.dealloc(offt, len.into()).await?;
-				let offt = to_kv.alloc(len.into()).await?;
-				to_kv.write(offt.get(), &buf).await?;
-				item[2..8].copy_from_slice(&offt.get().to_le_bytes()[..6]);
-				item[12..14].copy_from_slice(&len.to_le_bytes());
-			}
-			let (offt, len) = meta(item[16..].try_into().unwrap());
-			buf.resize(len.into(), 0);
-			from_kv.read(offt, &mut buf).await?;
-			from_kv.dealloc(offt, len.into()).await?;
-			let offt = to_kv.alloc(len.into()).await?;
-			to_kv.write(offt.get(), &buf).await?;
-			item[16..18].copy_from_slice(&len.to_le_bytes());
-			item[18..].copy_from_slice(&offt.get().to_le_bytes()[..6]);
-		}
-
-		let tag = to_kv.insert(to_name, item).await?.unwrap();
-
-		drop(lock_l);
-		drop(lock_h);
-
-		if from_kv.is_some() {
+		if self.id != to_dir.id {
 			self.update_item_count(false).await?;
 			to_dir.update_item_count(true).await?;
 		}
@@ -356,8 +322,3 @@ impl fmt::Display for TransferError {
 impl core::error::Error for CreateError {}
 impl core::error::Error for RemoveError {}
 impl core::error::Error for TransferError {}
-
-fn meta(data: &[u8; 8]) -> (u64, u16) {
-	let a = u64::from_le_bytes(*data);
-	(a >> 16, a as _)
-}

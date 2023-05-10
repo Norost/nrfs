@@ -275,6 +275,42 @@ impl<'a, D: Dev> Item<'a, D> {
 		Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv()
 	}
 
+	pub(crate) async fn realloc(
+		&self,
+		to_dir: &Dir<'a, D>,
+		item: &mut [u8; ITEM_LEN as _],
+	) -> Result<(), Error<D>> {
+		trace!("realloc {:?} -> {:#x}", self.key, to_dir.id);
+		if self.key.dir == to_dir.id {
+			return Ok(());
+		}
+
+		if matches!(item[0] & 7, 4 | 5) {
+			let mut buf = vec![];
+			let offt = u64::from_le_bytes(item[..8].try_into().unwrap()) >> 16;
+			let len = u16::from_le_bytes(item[8..10].try_into().unwrap());
+
+			buf.resize(len.into(), 0);
+			self.parent_kv().read(offt, &mut buf).await?;
+			self.parent_kv().dealloc(offt, len.into()).await?;
+
+			let offt = to_dir.kv().alloc(len.into()).await?;
+			to_dir.kv().write(offt.get(), &buf).await?;
+			item[2..8].copy_from_slice(&offt.get().to_le_bytes()[..6]);
+			item[12..14].copy_from_slice(&len.to_le_bytes());
+		}
+
+		let (_, (offt, len), buf) = self.read_attr().await?;
+		self.parent_kv().dealloc(offt, len.into()).await?;
+
+		let offt = to_dir.kv().alloc(len.into()).await?;
+		to_dir.kv().write(offt.get(), &buf).await?;
+		item[ATTR_OFFT.into()..][0..2].copy_from_slice(&len.to_le_bytes());
+		item[ATTR_OFFT.into()..][2..8].copy_from_slice(&offt.get().to_le_bytes()[..6]);
+
+		Ok(())
+	}
+
 	pub(crate) async fn destroy(self) -> Result<bool, Error<D>> {
 		trace!("destroy {:?}", self.key);
 
