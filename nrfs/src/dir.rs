@@ -245,7 +245,7 @@ impl<'a, D: Dev> Dir<'a, D> {
 			num.to_le_bytes()
 		};
 		if self.key.dir == u64::MAX {
-			let b = &mut self.fs.storage.header_data()[HDR_ROOT_OFFT..][8..12];
+			let b = &mut self.fs.storage.header_data_mut()[HDR_ROOT_OFFT..][8..12];
 			let b = <&mut [u8; 4]>::try_from(b).unwrap();
 			*b = f(*b);
 			Ok(())

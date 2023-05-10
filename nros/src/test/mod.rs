@@ -238,7 +238,7 @@ fn read_before_tx_1024() {
 #[test]
 fn header_data() {
 	let s = new(MaxRecordSize::K1);
-	s.header_data()[..11].copy_from_slice(b"hello world");
+	s.header_data_mut()[..11].copy_from_slice(b"hello world");
 	let devices = block_on(s.unmount()).unwrap();
 	let s = block_on(Nros::load(LoadConfig {
 		resource: StdResource::new(),

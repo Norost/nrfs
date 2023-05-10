@@ -245,7 +245,7 @@ impl<'a, D: Dev> Item<'a, D> {
 		buf[..8].copy_from_slice(&modified.time.to_le_bytes());
 		buf[8..].copy_from_slice(&modified.gen.to_le_bytes());
 		if self.key.dir == u64::MAX {
-			self.fs.storage.header_data()[HDR_ROOT_OFFT..][MODIFIED_OFFT.into()..][..16]
+			self.fs.storage.header_data_mut()[HDR_ROOT_OFFT..][MODIFIED_OFFT.into()..][..16]
 				.copy_from_slice(buf);
 			Ok(())
 		} else {
@@ -257,7 +257,7 @@ impl<'a, D: Dev> Item<'a, D> {
 
 	pub async fn set_modified_time(&self, time: i64) -> Result<(), Error<D>> {
 		if self.key.dir == u64::MAX {
-			self.fs.storage.header_data()[HDR_ROOT_OFFT..][MODIFIED_OFFT.into()..][..8]
+			self.fs.storage.header_data_mut()[HDR_ROOT_OFFT..][MODIFIED_OFFT.into()..][..8]
 				.copy_from_slice(&time.to_le_bytes());
 			Ok(())
 		} else {

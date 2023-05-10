@@ -134,10 +134,11 @@ impl<D: Dev> Nrfs<D> {
 			attr_map_lock: Default::default(),
 		};
 		let id = Dir::init(&s).await?;
-		s.storage.header_data()[HDR_ROOT_OFFT..][..8].copy_from_slice(&(id << 5 | 1).to_le_bytes());
+		s.storage.header_data_mut()[HDR_ROOT_OFFT..][..8]
+			.copy_from_slice(&(id << 5 | 1).to_le_bytes());
 
 		let id = attr::AttrMap::init(&s).await?;
-		s.storage.header_data()[HDR_ATTR_OFFT..][..8].copy_from_slice(&id.to_le_bytes());
+		s.storage.header_data_mut()[HDR_ATTR_OFFT..][..8].copy_from_slice(&id.to_le_bytes());
 
 		Ok(s)
 	}

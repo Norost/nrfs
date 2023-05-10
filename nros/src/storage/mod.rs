@@ -8,7 +8,7 @@ use {
 		BlockSize, Compression, Error, KeyDeriver, MaxRecordSize, Resource,
 	},
 	allocator::Allocator,
-	core::cell::{Cell, RefCell, RefMut},
+	core::cell::{Cell, Ref, RefCell, RefMut},
 	dev::Set256,
 };
 
@@ -317,8 +317,16 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		self.devices.header_key()
 	}
 
-	/// Get reference to filesystem data in the header
-	pub fn header_data(&self) -> RefMut<'_, [u8; 256]> {
+	/// Get a reference to filesystem data in the header
+	pub fn header_data(&self) -> Ref<'_, [u8; 256]> {
+		self.devices.data.borrow()
+	}
+
+	/// Get a mutable reference to filesystem data in the header
+	///
+	/// This marks the filesystem as dirty.
+	pub fn header_data_mut(&self) -> RefMut<'_, [u8; 256]> {
+		self.dirty.set(true);
 		self.devices.data.borrow_mut()
 	}
 

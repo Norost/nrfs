@@ -15,7 +15,7 @@ use {
 	},
 	alloc::collections::{BTreeMap, BTreeSet},
 	core::{
-		cell::{Cell, RefCell, RefMut},
+		cell::{Cell, Ref, RefCell, RefMut},
 		fmt,
 		future::Future,
 		pin::pin,
@@ -310,9 +310,16 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		self.store.header_key()
 	}
 
-	/// Get reference to filesystem data in the header
-	pub fn header_data(&self) -> RefMut<'_, [u8; 256]> {
+	/// Get a reference to filesystem data in the header
+	pub fn header_data(&self) -> Ref<'_, [u8; 256]> {
 		self.store.header_data()
+	}
+
+	/// Get a mutable reference to filesystem data in the header
+	///
+	/// This marks the filesystem as dirty.
+	pub fn header_data_mut(&self) -> RefMut<'_, [u8; 256]> {
+		self.store.header_data_mut()
 	}
 
 	/// Set a new key derivation function.
