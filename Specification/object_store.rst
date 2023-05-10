@@ -370,7 +370,7 @@ The header fields other than the nonce are encrypted with Key 2.
   +------+                                                       |
   |   16 |                                                       |
   +------+---------------------------+---------------------------+
-  |   24 |                           |          Length           |
+  |   24 |      Unpacked length      |       Packed length       |
   +------+---------------------------+---------------------------+
   |   32 |                                                       |
   +------+------+------------------------------------------------+
@@ -383,7 +383,9 @@ The header fields other than the nonce are encrypted with Key 2.
 
 * Nonce: Random integer used for encryption [#]_.
 
-* Length: Length of the data in bytes.
+* Packed length: Length of the on-disk data in bytes.
+
+* Unpacked length: Length of the data in bytes when unpacked.
 
 * CAlg: The compression algorithm used on the data.
 

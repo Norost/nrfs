@@ -51,10 +51,10 @@ impl Compression {
 		}
 	}
 
-	pub(crate) fn decompress<B: Buf>(self, data: &[u8], buf: &mut B, max_size: usize) -> bool {
+	pub(crate) fn decompress<B: Buf>(self, data: &[u8], buf: &mut B, len: usize) -> bool {
 		match self {
-			Compression::None => none::decompress::<B>(data, buf, max_size),
-			Compression::Lz4 => lz4::decompress::<B>(data, buf, max_size),
+			Compression::None => none::decompress::<B>(data, buf, len),
+			Compression::Lz4 => lz4::decompress::<B>(data, buf, len),
 		}
 	}
 }

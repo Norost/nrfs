@@ -58,8 +58,9 @@ impl fmt::Debug for RecordRef {
 #[repr(C)]
 struct RecordHeader {
 	nonce: [u8; 24],
-	length: u32le,
-	_reserved: [u8; 4 + 8 + 7],
+	packed_len: u32le,
+	unpacked_len: u32le,
+	_reserved: [u8; 8 + 7],
 	compression: u8,
 	hash: [u8; 16],
 }
@@ -81,7 +82,8 @@ impl fmt::Debug for RecordHeader {
 		let nonce_l = u128::from_le_bytes(self.nonce[..16].try_into().unwrap());
 		let nonce_h = u64::from_le_bytes(self.nonce[16..].try_into().unwrap());
 		f.field("nonce", &format_args!("{:#018x}{:032x}", nonce_h, nonce_l));
-		f.field("length", &self.length);
+		f.field("packed_len", &self.packed_len);
+		f.field("unpacked_len", &self.unpacked_len);
 		let c = Compression::from_raw(self.compression);
 		let c: &dyn fmt::Debug = if let Some(c) = c.as_ref() { c } else { &c };
 		f.field("compression", c);
@@ -146,12 +148,14 @@ pub(crate) fn pack(
 		"buf not a multiple of block size"
 	);
 
+	let unpacked_len = u32::try_from(data.len()).unwrap();
+
 	let (header, buf) = buf.split_at_mut(HEADER_LEN.into());
 
-	let (compression, len) = compression.compress(HEADER_LEN.into(), data, buf, block_size);
+	let (compression, packed_len) = compression.compress(HEADER_LEN.into(), data, buf, block_size);
 
 	let blocks = block_size
-		.min_blocks((u32::from(HEADER_LEN) + len).try_into().unwrap())
+		.min_blocks((u32::from(HEADER_LEN) + packed_len).try_into().unwrap())
 		.try_into()
 		.unwrap();
 	let buf =
@@ -162,8 +166,9 @@ pub(crate) fn pack(
 	header.copy_from_slice(
 		RecordHeader {
 			nonce: *nonce,
-			length: len.into(),
-			_reserved: [0; 19],
+			packed_len: packed_len.into(),
+			unpacked_len: unpacked_len.into(),
+			_reserved: [0; 15],
 			compression: compression.to_raw(),
 			hash,
 		}
@@ -196,14 +201,23 @@ pub(crate) fn unpack<B: Buf>(
 		.decrypt(&header.nonce, &header.hash, data)
 		.map_err(|_| UnpackError::HashMismatch)?;
 
+	// Do *not* check this condition before checking the hash,
+	// as otherwise information can be leaked.
+	if header.unpacked_len > 1 << max_record_size.to_raw() {
+		return Err(UnpackError::BadLength);
+	}
 	let data = data
-		.get_mut(..u32::from(header.length).try_into().unwrap())
+		.get_mut(..u32::from(header.packed_len).try_into().unwrap())
 		.ok_or(UnpackError::BadLength)?;
 
 	header
 		.compression()
 		.map_err(|_| UnpackError::UnknownCompressionAlgorithm)?
-		.decompress::<B>(data, &mut buf, 1 << max_record_size.to_raw())
+		.decompress::<B>(
+			data,
+			&mut buf,
+			u32::from(header.unpacked_len).try_into().unwrap(),
+		)
 		.then_some(())
 		.ok_or(UnpackError::ExceedsRecordSize)?;
 

@@ -9,7 +9,10 @@ pub fn compress(data: &[u8], buf: &mut [u8]) -> u32 {
 	data.len() as _
 }
 
-pub fn decompress<B: Buf>(data: &[u8], buf: &mut B, _max_size: usize) -> bool {
+pub fn decompress<B: Buf>(data: &[u8], buf: &mut B, len: usize) -> bool {
+	if len != data.len() {
+		return false;
+	}
 	buf.extend_from_slice(data);
 	true
 }
