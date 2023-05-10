@@ -127,13 +127,10 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 	/// Initialize a cache layer.
 	pub async fn new(store: Store<D, R>, cache_size: usize) -> Result<Self, Error<D>> {
 		trace!("new {}", cache_size);
-		assert!(
-			cache_size >= 1 << store.max_rec_size().to_raw(),
-			"cache can't fit full sized record"
-		);
 
 		// TODO don't hardcode, make user-configurable.
 		let soft_limit = cache_size >> store.max_rec_size().to_raw();
+		let soft_limit = soft_limit.max(1);
 		let hard_limit = soft_limit * 2 + 1 + 1; // 1 to ensure operation + 1 for grow_object_list
 		trace!(info "soft/hard limit: {}/{}", soft_limit, hard_limit);
 
