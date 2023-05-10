@@ -124,7 +124,7 @@ fn list_attr_empty() {
 
 #[test]
 fn many_attrs() {
-	let fs = new_cap(1 << 20, BlockSize::B512, MaxRecordSize::B512, 1 << 20);
+	let fs = new_cap(8, BlockSize::B512, MaxRecordSize::B512, 1 << 20);
 	run(&fs, async {
 		for i in 0..512u16 {
 			let f = mkfile(&fs.root_dir(), &i.to_le_bytes()).await;

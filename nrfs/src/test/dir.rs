@@ -168,3 +168,21 @@ fn destroy_empty() {
 		root.remove(dir.key()).await.unwrap().unwrap();
 	})
 }
+
+#[test]
+fn create_remove_many_minicache() {
+	let fs = new_cap(128, BlockSize::B512, MaxRecordSize::B512, 1 << 12);
+	run(&fs, async {
+		for _ in 0..64 {
+			for i in 0..32u16 {
+				mkfile(&fs.root_dir(), &i.to_le_bytes()).await;
+			}
+			for i in 0..32u16 {
+				let k = &i.to_le_bytes();
+				let item = fs.root_dir().search(k.into()).await.unwrap().unwrap();
+				fs.root_dir().remove(item.key).await.unwrap().unwrap();
+			}
+			dbg!(&fs);
+		}
+	});
+}
