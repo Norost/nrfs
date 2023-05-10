@@ -182,7 +182,6 @@ fn create_remove_many_minicache() {
 				let item = fs.root_dir().search(k.into()).await.unwrap().unwrap();
 				fs.root_dir().remove(item.key).await.unwrap().unwrap();
 			}
-			dbg!(&fs);
 		}
 	});
 }

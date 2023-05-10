@@ -70,7 +70,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 	pub async fn init_with_key(store: S, conf: C, hash_key: [u8; 16]) -> Result<Self, S::Error> {
 		let hdr = Header::new(hash_key, conf.header_offset());
 		let mut slf = Self { store, conf };
-		slf.set_header(&hdr).await?;
+		slf.set_header(hdr).await?;
 		Ok(slf)
 	}
 
@@ -85,7 +85,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		Ok(Header::from_raw(hdr))
 	}
 
-	async fn set_header(&mut self, header: &Header) -> Result<(), S::Error> {
+	async fn set_header(&mut self, header: Header) -> Result<(), S::Error> {
 		self.write(self.conf.header_offset(), &header.to_raw())
 			.await
 	}
@@ -240,7 +240,7 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		let len = 8 + len + 8;
 		assert!(len < 1 << 48);
 
-		let hdr = &mut self.header().await?;
+		let mut hdr = self.header().await?;
 		let (offt, prev_region_len) = hdr.alloc(len).unwrap();
 		self.set_header(hdr).await?;
 
@@ -265,9 +265,8 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 		let mut start @ mut zero_start = offset - 8;
 		let mut end @ mut zero_end = start + len;
 
-		let hdr = &mut self.header().await?;
+		let mut hdr = self.header().await?;
 		hdr.dealloc(end - start).unwrap();
-		self.set_header(hdr).await?;
 
 		let f = |b: [u8; 8]| {
 			let b = u64::from_le_bytes(b);
@@ -299,6 +298,8 @@ impl<S: Store, C: Conf> Nrkv<S, C> {
 			self.write(start, marker).await?;
 			self.write(end - 8, marker).await?;
 		}
+		self.set_header(hdr).await?;
+
 		Ok(())
 	}
 

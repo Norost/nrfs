@@ -10,10 +10,13 @@ use {
 	},
 };
 
+const MAX: u8 = 8;
+
 #[derive(Debug)]
 enum Op {
 	Alloc { len: u8 },
 	Dealloc { i: u8 },
+	InsertItem,
 }
 
 #[derive(arbitrary::Arbitrary)]
@@ -46,11 +49,12 @@ impl Iterator for OpsIter<'_> {
 	fn next(&mut self) -> Option<Self::Item> {
 		let b;
 		(b, self.0) = self.0.split_first()?;
-		if *b & 0x80 == 0 {
-			Some(Op::Alloc { len: *b % 32 })
-		} else {
-			Some(Op::Dealloc { i: *b % 32 })
-		}
+		Some(match *b >> 6 {
+			0 => Op::Alloc { len: *b % MAX },
+			1 => Op::InsertItem,
+			2 | 3 => Op::Dealloc { i: *b % MAX },
+			_ => unreachable!(),
+		})
 	}
 }
 
@@ -73,27 +77,44 @@ fn run(f: impl Future<Output = ()>) {
 
 fuzz_target!(|ops: Ops<'_>| {
 	run(async move {
-		let buf = &mut [0; (64 + 6 * 4096) + (32 * 128)][..];
+		let buf = &mut vec![0; (64 + 6 * 4096) + (16 * 64)][..];
 		let kv = &mut nrkv::Nrkv::init_with_key(buf, nrkv::StaticConf::<0, 0>, [0; 16])
 			.await
 			.unwrap();
+		enum E {
+			A(nrkv::Tag, u8),
+			I(nrkv::Tag),
+		}
 		let mut alloc = vec![];
 		let buf = &mut [0; 255];
 		for op in &ops {
 			match op {
 				Op::Alloc { len } => {
-					if alloc.len() < 32 {
+					if alloc.len() < usize::from(MAX) {
 						let offt = kv.alloc(len.into()).await.unwrap();
 						kv.read(offt.get(), &mut buf[..len.into()]).await.unwrap();
 						assert!(buf.iter().all(|&b| b == 0), "{:?}", &buf[..len.into()]);
 						kv.write(offt.get(), &[]).await.unwrap();
-						alloc.push((offt, len));
+						alloc.push(E::A(offt, len));
+					}
+				}
+				Op::InsertItem => {
+					if alloc.len() < usize::from(MAX) {
+						if let Ok(tag) = kv.insert(b"\0".into(), &[]).await.unwrap() {
+							alloc.push(E::I(tag));
+						}
 					}
 				}
 				Op::Dealloc { i } => {
 					if !alloc.is_empty() {
-						let (offt, len) = alloc.swap_remove(usize::from(i) % alloc.len());
-						kv.dealloc(offt.get(), len.into()).await.unwrap();
+						match alloc.swap_remove(usize::from(i) % alloc.len()) {
+							E::A(offt, len) => {
+								kv.dealloc(offt.get(), len.into()).await.unwrap();
+							}
+							E::I(tag) => {
+								kv.remove(tag).await.unwrap();
+							}
+						}
 					}
 				}
 			}
