@@ -67,6 +67,7 @@ impl Dev for SlowDev {
 	type ReadTask<'a> = SlowTask<<MemDev as Dev>::ReadTask<'a>>;
 	type WriteTask<'a> = SlowTask<<MemDev as Dev>::WriteTask<'a>>;
 	type FenceTask<'a> = SlowTask<<MemDev as Dev>::FenceTask<'a>>;
+	type DiscardTask<'a> = SlowTask<<MemDev as Dev>::DiscardTask<'a>>;
 
 	fn block_count(&self) -> u64 {
 		self.dev.block_count()
@@ -86,6 +87,10 @@ impl Dev for SlowDev {
 		buf: <<MemDev as Dev>::Allocator as Allocator>::Buf,
 	) -> Self::WriteTask<'_> {
 		SlowTask::new(self.dev.write(lba, buf), self.alloc.delay)
+	}
+
+	fn discard(&self, lba: u64, blocks: u64) -> Self::DiscardTask<'_> {
+		SlowTask::new(self.dev.discard(lba, blocks), self.alloc.delay)
 	}
 
 	fn fence(&self) -> Self::FenceTask<'_> {

@@ -43,15 +43,10 @@ impl MemDev {
 
 impl Dev for MemDev {
 	type Error = MemDevError;
-	type ReadTask<'a> = future::Ready<Result<Arc<Vec<u8>>, Self::Error>>
-	where
-		Self: 'a;
-	type WriteTask<'a> = future::Ready<Result<(), Self::Error>>
-	where
-		Self: 'a;
-	type FenceTask<'a> = future::Ready<Result<(), Self::Error>>
-	where
-		Self: 'a;
+	type ReadTask<'a> = future::Ready<Result<Arc<Vec<u8>>, Self::Error>>;
+	type WriteTask<'a> = future::Ready<Result<(), Self::Error>>;
+	type FenceTask<'a> = future::Ready<Result<(), Self::Error>>;
+	type DiscardTask<'a> = future::Ready<Result<(), Self::Error>>;
 	type Allocator = MemAllocator;
 
 	fn block_count(&self) -> u64 {
@@ -73,6 +68,16 @@ impl Dev for MemDev {
 		let res = self
 			.get_mut(lba, buf.len())
 			.map(|mut b| b.copy_from_slice(buf.get()));
+		future::ready(res)
+	}
+
+	fn discard(&self, lba: u64, blocks: u64) -> Self::DiscardTask<'_> {
+		let res = if cfg!(debug_assertions) {
+			let len = (blocks << self.block_size.to_raw()).try_into().unwrap();
+			self.get_mut(lba, len).map(|mut b| b.fill(0xcc))
+		} else {
+			Ok(())
+		};
 		future::ready(res)
 	}
 

@@ -230,8 +230,11 @@ impl<D: Dev, R: Resource> Store<D, R> {
 	/// freed in this transaction available for the next transaction.
 	pub async fn finish_transaction(&self) -> Result<(), Error<D>> {
 		if self.dirty.take() {
-			self.allocator.borrow_mut().save(self).await?;
+			let discard_blocks = self.allocator.borrow_mut().save(self).await?;
 			self.devices.save_headers().await?;
+			for r in discard_blocks {
+				self.devices.discard(r.start, r.end - r.start).await?;
+			}
 		}
 		Ok(())
 	}

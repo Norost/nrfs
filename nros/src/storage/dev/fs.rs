@@ -48,15 +48,10 @@ impl FileDev {
 
 impl Dev for FileDev {
 	type Error = FileDevError;
-	type ReadTask<'a> = future::Ready<Result<Arc<Vec<u8>>, Self::Error>>
-	where
-		Self: 'a;
-	type WriteTask<'a> = future::Ready<Result<(), Self::Error>>
-	where
-		Self: 'a;
-	type FenceTask<'a> = future::Ready<Result<(), Self::Error>>
-	where
-		Self: 'a;
+	type ReadTask<'a> = future::Ready<Result<Arc<Vec<u8>>, Self::Error>>;
+	type WriteTask<'a> = future::Ready<Result<(), Self::Error>>;
+	type FenceTask<'a> = future::Ready<Result<(), Self::Error>>;
+	type DiscardTask<'a> = future::Ready<Result<(), Self::Error>>;
 	type Allocator = FileAllocator;
 
 	fn block_count(&self) -> u64 {
@@ -85,6 +80,10 @@ impl Dev for FileDev {
 				.write_all(&buf)
 				.map_err(FileDevError::Io)
 		}))
+	}
+
+	fn discard(&self, _lba: u64, _blocks: u64) -> Self::DiscardTask<'_> {
+		future::ready(Ok(()))
 	}
 
 	fn fence(&self) -> Self::FenceTask<'_> {

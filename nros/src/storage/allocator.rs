@@ -265,7 +265,9 @@ impl Allocator {
 	}
 
 	/// Save the allocator state.
-	pub async fn save<D, R>(&mut self, store: &Store<D, R>) -> Result<(), Error<D>>
+	///
+	/// Returns all freed blocks, which can be discarded.
+	pub async fn save<D, R>(&mut self, store: &Store<D, R>) -> Result<RangeSet<u64>, Error<D>>
 	where
 		D: Dev,
 		R: Resource,
@@ -368,11 +370,11 @@ impl Allocator {
 
 		// Clear free & dirty ranges.
 		self.alloc_map = alloc_map;
-		self.free_map = Default::default();
+		let free_map = mem::take(&mut self.free_map);
 		self.dirty_map = Default::default();
 
 		trace!(final "{:?}", &self.alloc_map);
 
-		Ok(())
+		Ok(free_map)
 	}
 }

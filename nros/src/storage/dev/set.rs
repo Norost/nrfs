@@ -581,6 +581,49 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.map_err(Error::Dev)
 	}
 
+	/// Discard a region of data (TRIM).
+	pub async fn discard(&self, lba: u64, blocks: u64) -> Result<(), Error<D>> {
+		let lba_end = lba.saturating_add(blocks);
+		assert!(lba_end <= self.block_count, "write is out of bounds");
+
+		// Discard on all mirrors
+		self.devices
+			.iter()
+			.map(|chain| {
+				// Do a binary search for the start device.
+				let node_i = chain
+					.binary_search_by_key(&lba, |node| node.block_offset)
+					// if offset == lba, then we need that dev
+					// if offset < lba, then we want the previous dev.
+					.map_or_else(|i| i - 1, |i| i);
+				let node = &chain[node_i];
+
+				// Check if the discard range falls entirely within the device's range.
+				// If not, split the range in two and perform two operations.
+				async move {
+					let node_lba_end = node.block_offset + node.block_count;
+					let node_lba = lba - node.block_offset + 1;
+					if lba_end <= node_lba_end {
+						// No splitting necessary - yay
+						self.discard_dev(&node.dev, node_lba, blocks).await
+					} else {
+						// We need to split - aw
+						// Figure out midpoint to split.
+						let mid = blocks - (lba_end - node_lba_end);
+						futures_util::try_join!(
+							self.discard_dev(&node.dev, node_lba, mid),
+							self.discard_dev(&chain[node_i + 1].dev, 1, blocks - mid),
+						)
+						.map(|((), ())| ())
+					}
+				}
+			})
+			.collect::<FuturesUnordered<_>>()
+			.try_for_each(|_| async { Ok(()) })
+			.await
+			.map_err(Error::Dev)
+	}
+
 	/// Create a header for writing to a device.
 	async fn create_header(
 		&self,
@@ -743,6 +786,12 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 	) -> Result<(), D::Error> {
 		let shift = self.block_size.to_raw() - dev.block_size().to_raw();
 		dev.write(lba << shift, buf).await
+	}
+
+	/// Discard on a device, accounting for block size mismatch.
+	async fn discard_dev(&self, dev: &D, lba: u64, blocks: u64) -> Result<(), D::Error> {
+		let shift = self.block_size.to_raw() - dev.block_size().to_raw();
+		dev.discard(lba << shift, blocks << shift).await
 	}
 }
 

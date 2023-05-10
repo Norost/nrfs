@@ -364,6 +364,7 @@ dependencies = [
  "nora_endian 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "nrkv",
  "nros",
+ "util",
 ]
 
 [[package]]
@@ -616,6 +617,10 @@ dependencies = [
  "crypto-common",
  "subtle",
 ]
+
+[[package]]
+name = "util"
+version = "0.1.0"
 
 [[package]]
 name = "version_check"

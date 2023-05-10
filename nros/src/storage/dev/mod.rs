@@ -48,6 +48,10 @@ pub trait Dev: 'static {
 	type FenceTask<'a>: Future<Output = Result<(), Self::Error>>
 	where
 		Self: 'a;
+	/// Task that represents a pending discard operation.
+	type DiscardTask<'a>: Future<Output = Result<(), Self::Error>>
+	where
+		Self: 'a;
 
 	/// The amount of useable blocks.
 	fn block_count(&self) -> u64;
@@ -69,6 +73,9 @@ pub trait Dev: 'static {
 	///
 	/// If a fence is in progress.
 	fn write(&self, lba: u64, buf: <Self::Allocator as Allocator>::Buf) -> Self::WriteTask<'_>;
+
+	/// Discard a region of data (TRIM).
+	fn discard(&self, lba: u64, blocks: u64) -> Self::DiscardTask<'_>;
 
 	/// Execute a fence.
 	///
