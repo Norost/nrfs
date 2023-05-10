@@ -121,3 +121,27 @@ fn list_attr_empty() {
 		assert!(keys.is_empty());
 	});
 }
+
+#[test]
+fn many_attrs() {
+	let fs = new_cap(1 << 20, BlockSize::B512, MaxRecordSize::B512, 1 << 20);
+	run(&fs, async {
+		for i in 0..512u16 {
+			let f = mkfile(&fs.root_dir(), &i.to_le_bytes()).await;
+			f.set_attr((&i.to_le_bytes()).into(), b"test")
+				.await
+				.unwrap()
+				.unwrap();
+		}
+		for i in 0..512u16 {
+			let k = &i.to_le_bytes();
+			let item = fs.root_dir().search(k.into()).await.unwrap();
+			let item = fs.item(item.unwrap().key);
+			let keys = item.attr_keys().await.unwrap();
+			assert_eq!(keys.len(), 1);
+			assert_eq!(&**keys[0], k);
+			let val = item.attr(k.into()).await.unwrap();
+			assert_eq!(&*val.unwrap(), b"test");
+		}
+	});
+}

@@ -29,10 +29,15 @@ where
 }
 
 fn new() -> Nrfs<MemDev> {
-	new_cap(1 << 10, BlockSize::K1, MaxRecordSize::K1)
+	new_cap(1 << 10, BlockSize::K1, MaxRecordSize::K1, 4096)
 }
 
-fn new_cap(size: usize, block_size: BlockSize, max_record_size: MaxRecordSize) -> Nrfs<MemDev> {
+fn new_cap(
+	size: usize,
+	block_size: BlockSize,
+	max_record_size: MaxRecordSize,
+	cache_size: usize,
+) -> Nrfs<MemDev> {
 	block_on(Nrfs::new(NewConfig {
 		key_deriver: KeyDeriver::None { key: &[0; 32] },
 		cipher: CipherType::NoneXxh3,
@@ -40,7 +45,7 @@ fn new_cap(size: usize, block_size: BlockSize, max_record_size: MaxRecordSize) -
 		block_size,
 		max_record_size,
 		compression: Compression::None,
-		cache_size: 4096,
+		cache_size,
 	}))
 	.unwrap()
 }
