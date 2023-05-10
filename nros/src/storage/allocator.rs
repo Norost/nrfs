@@ -214,7 +214,7 @@ impl Allocator {
 		if blocks == 0 {
 			return;
 		}
-		trace!("free {}, len {}", start, blocks);
+		trace!("free {}+{}", start, blocks);
 
 		#[cfg(feature = "debug-trace-alloc")]
 		{

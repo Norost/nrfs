@@ -114,11 +114,34 @@ def filter_task(args):
                 print('...')
                 prev_was_id = False
 
+def replay_alloc(args):
+    f, = args
+    allocs = {}
+    next_alloc = None
+    with open(f) as f:
+        for i, (id, depth, l) in enumerate(parse_trace(f.readlines())):
+            if next_alloc is not None:
+                assert l[0] == '-->'
+                print(f'alloc {l[1]}+{next_alloc}')
+                if l[1] == 'N/A':
+                    break
+                allocs[int(l[1])] = next_alloc
+                next_alloc = None
+            if 'alloc' == l[0]:
+                next_alloc = int(l[1])
+            elif 'free' == l[0]:
+                lba, blocks = l[1].split('+')
+                print(f'free  {lba}+{blocks}')
+                assert allocs[int(lba)] == int(blocks)
+                del allocs[int(lba)]
+    print(allocs)
+
 COMMANDS = {
     'replay_total_mem': replay_total_mem,
     'unfinished_tasks': unfinished_tasks,
     'methods_coverage': methods_coverage,
-    'filter_task': filter_task
+    'filter_task': filter_task,
+    'replay_alloc': replay_alloc,
 }
 
 if len(sys.argv) < 2 or '--help' in sys.argv or '-h' in sys.argv:

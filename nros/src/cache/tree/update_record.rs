@@ -31,10 +31,16 @@ impl<'a, D: Dev, R: Resource> Tree<'a, D, R> {
 					(self.object_key_index(), Tree::object_list(self.cache))
 				}
 				RootLocation::ObjectList => {
+					self.cache
+						.store
+						.destroy(self.cache.store.object_list_root());
 					self.cache.store.set_object_list_root(record_ref);
 					return Ok(());
 				}
 				RootLocation::ObjectBitmap => {
+					self.cache
+						.store
+						.destroy(self.cache.store.object_bitmap_root());
 					self.cache.store.set_object_bitmap_root(record_ref);
 					return Ok(());
 				}

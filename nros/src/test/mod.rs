@@ -278,3 +278,21 @@ fn smaller_blocksize() {
 	}))
 	.unwrap();
 }
+
+#[test]
+fn write_many() {
+	let s = new_cap(MaxRecordSize::K1, 16, 0);
+	run(&s, async {
+		let a = s.create().await.unwrap();
+		let b = s.create().await.unwrap();
+		let c = s.create().await.unwrap();
+		let d = s.create().await.unwrap();
+		for _ in 0..1024 {
+			a.write(0, &[1]).await.unwrap();
+			b.write(0, &[1]).await.unwrap();
+			c.write(0, &[1]).await.unwrap();
+			d.write(0, &[1]).await.unwrap();
+		}
+		Ok(())
+	});
+}

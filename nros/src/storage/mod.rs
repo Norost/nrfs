@@ -217,6 +217,7 @@ impl<D: Dev, R: Resource> Store<D, R> {
 
 	/// Destroy a record.
 	pub fn destroy(&self, record_ref: RecordRef) {
+		trace!("destroy {:?}", record_ref);
 		let blocks = u64::from(record_ref.blocks());
 		self.allocator.borrow_mut().free(record_ref.lba(), blocks);
 		self.packed_bytes_destroyed
