@@ -98,8 +98,6 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		// * zero the original root.
 		// Repeat for bitmap, if necessary.
 
-		// FIXME add lock to avoid concurrent grow.
-
 		let cur_list_depth = self.store.object_list_depth();
 		let new_list_depth = cur_list_depth.next();
 
