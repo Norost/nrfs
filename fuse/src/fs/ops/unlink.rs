@@ -2,7 +2,7 @@ use {super::*, nrfs::ItemTy};
 
 impl Fs {
 	pub async fn unlink(&self, job: crate::job::Unlink) {
-		let Ok(name) = job.name.as_bytes().try_into()
+		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let dir = match self.ino().get(job.parent).unwrap() {

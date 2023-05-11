@@ -3,7 +3,7 @@ use {
 		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs,
 		ReplyWrite, ReplyXattr, TimeOrNow,
 	},
-	std::{ffi::OsStr, path::Path, time::Instant},
+	std::time::Instant,
 };
 
 /// A job to be completed by the filesystem handler.
@@ -37,7 +37,7 @@ pub enum Job {
 #[derive(Debug)]
 pub struct Lookup {
 	pub parent: u64,
-	pub name: Box<OsStr>,
+	pub name: Box<[u8]>,
 	pub reply: ReplyEntry,
 }
 
@@ -67,7 +67,7 @@ pub struct SetAttr {
 #[derive(Debug)]
 pub struct GetXAttr {
 	pub ino: u64,
-	pub name: Box<OsStr>,
+	pub name: Box<[u8]>,
 	pub size: u32,
 	pub reply: ReplyXattr,
 }
@@ -75,7 +75,7 @@ pub struct GetXAttr {
 #[derive(Debug)]
 pub struct SetXAttr {
 	pub ino: u64,
-	pub name: Box<OsStr>,
+	pub name: Box<[u8]>,
 	pub value: Box<[u8]>,
 	pub flags: i32,
 	pub position: u32,
@@ -92,7 +92,7 @@ pub struct ListXAttr {
 #[derive(Debug)]
 pub struct RemoveXAttr {
 	pub ino: u64,
-	pub name: Box<OsStr>,
+	pub name: Box<[u8]>,
 	pub reply: ReplyEmpty,
 }
 
@@ -130,7 +130,7 @@ pub struct Create {
 	pub uid: u32,
 	pub gid: u32,
 	pub parent: u64,
-	pub name: Box<OsStr>,
+	pub name: Box<[u8]>,
 	pub mode: u32,
 	pub reply: ReplyCreate,
 }
@@ -147,8 +147,8 @@ pub struct SymLink {
 	pub uid: u32,
 	pub gid: u32,
 	pub parent: u64,
-	pub name: Box<OsStr>,
-	pub link: Box<Path>,
+	pub name: Box<[u8]>,
+	pub link: Box<[u8]>,
 	pub reply: ReplyEntry,
 }
 
@@ -157,7 +157,7 @@ pub struct MkDir {
 	pub uid: u32,
 	pub gid: u32,
 	pub parent: u64,
-	pub name: Box<OsStr>,
+	pub name: Box<[u8]>,
 	pub mode: u32,
 	pub reply: ReplyEntry,
 }
@@ -165,23 +165,23 @@ pub struct MkDir {
 #[derive(Debug)]
 pub struct Rename {
 	pub parent: u64,
-	pub name: Box<OsStr>,
+	pub name: Box<[u8]>,
 	pub newparent: u64,
-	pub newname: Box<OsStr>,
+	pub newname: Box<[u8]>,
 	pub reply: ReplyEmpty,
 }
 
 #[derive(Debug)]
 pub struct Unlink {
 	pub parent: u64,
-	pub name: Box<OsStr>,
+	pub name: Box<[u8]>,
 	pub reply: ReplyEmpty,
 }
 
 #[derive(Debug)]
 pub struct RmDir {
 	pub parent: u64,
-	pub name: Box<OsStr>,
+	pub name: Box<[u8]>,
 	pub reply: ReplyEmpty,
 }
 

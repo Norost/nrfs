@@ -2,7 +2,7 @@ use super::*;
 
 impl Fs {
 	pub async fn rmdir(&self, job: crate::job::RmDir) {
-		let Ok(name) = job.name.as_bytes().try_into()
+		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let dir = match self.ino().get(job.parent).unwrap() {

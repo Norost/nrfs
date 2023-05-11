@@ -2,7 +2,7 @@ use super::*;
 
 impl Fs {
 	pub async fn mkdir(&self, job: crate::job::MkDir) {
-		let Ok(name) = job.name.as_bytes().try_into() else { return job.reply.error(libc::ENAMETOOLONG) };
+		let Ok(name) = (&*job.name).try_into() else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let dir = match self.ino().get(job.parent).unwrap() {
 			Get::Key(Key::Dir(d)) => self.fs.dir(d).await.unwrap(),

@@ -2,10 +2,10 @@ use super::*;
 
 impl Fs {
 	pub async fn setxattr(&self, job: crate::job::SetXAttr) {
-		if filter_xattr(job.name.as_bytes()) {
+		if filter_xattr(&job.name) {
 			return job.reply.error(libc::EPERM);
 		}
-		let Ok(name) = job.name.as_bytes().try_into()
+		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 		let key = match self.ino().get(job.ino).unwrap() {
 			Get::Key(k) => *k.key(),

@@ -2,7 +2,7 @@ use super::*;
 
 impl Fs {
 	pub async fn rename(&self, job: crate::job::Rename) {
-		let (Ok(from_name), Ok(to_name)) = (job.name.as_bytes().try_into(), job.newname.as_bytes().try_into())
+		let (Ok(from_name), Ok(to_name)) = ((&*job.name).try_into(), (&*job.newname).try_into())
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let from_d = match self.ino().get(job.parent).unwrap() {

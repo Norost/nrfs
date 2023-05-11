@@ -2,7 +2,7 @@ use super::*;
 
 impl Fs {
 	pub async fn lookup(&self, job: crate::job::Lookup) {
-		let Ok(name) = job.name.as_bytes().try_into()
+		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let dir = match self.ino().get(job.parent).unwrap() {

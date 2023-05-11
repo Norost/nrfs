@@ -7,6 +7,7 @@ use {
 	},
 	std::{
 		ffi::OsStr,
+		os::unix::ffi::OsStrExt,
 		path::Path,
 		time::{Duration, Instant, SystemTime},
 	},
@@ -51,7 +52,11 @@ impl Filesystem for FsChannel {
 	}
 
 	fn lookup(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-		self.send(Job::Lookup(Lookup { parent, name: name.into(), reply }));
+		self.send(Job::Lookup(Lookup {
+			parent,
+			name: name.as_bytes().into(),
+			reply,
+		}));
 	}
 
 	fn forget(&mut self, _: &Request<'_>, ino: u64, nlookup: u64) {
@@ -94,7 +99,7 @@ impl Filesystem for FsChannel {
 	fn getxattr(&mut self, _: &Request<'_>, ino: u64, name: &OsStr, size: u32, reply: ReplyXattr) {
 		self.send(Job::GetXAttr(GetXAttr {
 			ino,
-			name: name.into(),
+			name: name.as_bytes().into(),
 			size,
 			reply,
 		}));
@@ -112,7 +117,7 @@ impl Filesystem for FsChannel {
 	) {
 		self.send(Job::SetXAttr(SetXAttr {
 			ino,
-			name: name.into(),
+			name: name.as_bytes().into(),
 			value: value.into(),
 			flags,
 			position,
@@ -127,7 +132,7 @@ impl Filesystem for FsChannel {
 	fn removexattr(&mut self, _: &Request<'_>, ino: u64, name: &OsStr, reply: ReplyEmpty) {
 		self.send(Job::RemoveXAttr(RemoveXAttr {
 			ino,
-			name: name.into(),
+			name: name.as_bytes().into(),
 			reply,
 		}));
 	}
@@ -190,7 +195,7 @@ impl Filesystem for FsChannel {
 			uid: req.uid(),
 			gid: req.gid(),
 			parent,
-			name: name.into(),
+			name: name.as_bytes().into(),
 			mode,
 			reply,
 		}));
@@ -221,8 +226,8 @@ impl Filesystem for FsChannel {
 			uid: req.uid(),
 			gid: req.gid(),
 			parent,
-			name: name.into(),
-			link: link.into(),
+			name: name.as_bytes().into(),
+			link: link.as_os_str().as_bytes().into(),
 			reply,
 		}));
 	}
@@ -240,7 +245,7 @@ impl Filesystem for FsChannel {
 			uid: req.uid(),
 			gid: req.gid(),
 			parent,
-			name: name.into(),
+			name: name.as_bytes().into(),
 			mode,
 			reply,
 		}));
@@ -258,20 +263,28 @@ impl Filesystem for FsChannel {
 	) {
 		self.send(Job::Rename(Rename {
 			parent,
-			name: name.into(),
+			name: name.as_bytes().into(),
 			newparent,
-			newname: newname.into(),
+			newname: newname.as_bytes().into(),
 			reply,
 		}));
 	}
 
 	/// Unlink a file or symbolic link,
 	fn unlink(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-		self.send(Job::Unlink(Unlink { parent, name: name.into(), reply }));
+		self.send(Job::Unlink(Unlink {
+			parent,
+			name: name.as_bytes().into(),
+			reply,
+		}));
 	}
 
 	fn rmdir(&mut self, _: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-		self.send(Job::RmDir(RmDir { parent, name: name.into(), reply }));
+		self.send(Job::RmDir(RmDir {
+			parent,
+			name: name.as_bytes().into(),
+			reply,
+		}));
 	}
 
 	fn fsync(&mut self, _: &Request<'_>, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
