@@ -35,7 +35,7 @@ fallocate -l "$IMG_LEN" "$img"
 
 # Mount
 "./target/$MODE/fuse" $FUSE_ARGS "$mnt" "$img" &
-trap 'umount "$mnt"; "./target/$MODE/tool" dump "$img"; rm -rf "$img" "$mnt"' EXIT
+trap 'fusermount -u "$mnt"; sleep 0.2; "./target/$MODE/tool" dump "$img"; rm -rf "$img" "$mnt"' EXIT
 
 # Wait a bit to ensure the driver is actually running
 sleep 0.2

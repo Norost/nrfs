@@ -3,7 +3,7 @@ use {
 	async_channel::Sender,
 	fuser::{
 		Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-		ReplyEntry, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
+		ReplyEntry, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow,
 	},
 	std::{
 		ffi::OsStr,
@@ -87,6 +87,47 @@ impl Filesystem for FsChannel {
 			gid,
 			size,
 			mtime,
+			reply,
+		}));
+	}
+
+	fn getxattr(&mut self, _: &Request<'_>, ino: u64, name: &OsStr, size: u32, reply: ReplyXattr) {
+		self.send(Job::GetXAttr(GetXAttr {
+			ino,
+			name: name.into(),
+			size,
+			reply,
+		}));
+	}
+
+	fn setxattr(
+		&mut self,
+		_: &Request<'_>,
+		ino: u64,
+		name: &OsStr,
+		value: &[u8],
+		flags: i32,
+		position: u32,
+		reply: ReplyEmpty,
+	) {
+		self.send(Job::SetXAttr(SetXAttr {
+			ino,
+			name: name.into(),
+			value: value.into(),
+			flags,
+			position,
+			reply,
+		}));
+	}
+
+	fn listxattr(&mut self, _: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
+		self.send(Job::ListXAttr(ListXAttr { ino, size, reply }));
+	}
+
+	fn removexattr(&mut self, _: &Request<'_>, ino: u64, name: &OsStr, reply: ReplyEmpty) {
+		self.send(Job::RemoveXAttr(RemoveXAttr {
+			ino,
+			name: name.into(),
 			reply,
 		}));
 	}

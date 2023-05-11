@@ -183,6 +183,8 @@ The high bit indicates whether the next halfword is part of the integer.
 Standard attributes
 -------------------
 
+All attributes in the "nrfs" namespace are reserved.
+They should not be directly accessible by the user.
 
 UID
 ~~~

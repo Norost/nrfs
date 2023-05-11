@@ -1,7 +1,7 @@
 use {
 	fuser::{
 		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs,
-		ReplyWrite, TimeOrNow,
+		ReplyWrite, ReplyXattr, TimeOrNow,
 	},
 	std::{ffi::OsStr, path::Path, time::Instant},
 };
@@ -13,6 +13,10 @@ pub enum Job {
 	Forget(Forget),
 	GetAttr(GetAttr),
 	SetAttr(SetAttr),
+	GetXAttr(GetXAttr),
+	SetXAttr(SetXAttr),
+	ListXAttr(ListXAttr),
+	RemoveXAttr(RemoveXAttr),
 	Read(Read),
 	Write(Write),
 	ReadLink(ReadLink),
@@ -58,6 +62,38 @@ pub struct SetAttr {
 	pub size: Option<u64>,
 	pub mtime: Option<TimeOrNow>,
 	pub reply: ReplyAttr,
+}
+
+#[derive(Debug)]
+pub struct GetXAttr {
+	pub ino: u64,
+	pub name: Box<OsStr>,
+	pub size: u32,
+	pub reply: ReplyXattr,
+}
+
+#[derive(Debug)]
+pub struct SetXAttr {
+	pub ino: u64,
+	pub name: Box<OsStr>,
+	pub value: Box<[u8]>,
+	pub flags: i32,
+	pub position: u32,
+	pub reply: ReplyEmpty,
+}
+
+#[derive(Debug)]
+pub struct ListXAttr {
+	pub ino: u64,
+	pub size: u32,
+	pub reply: ReplyXattr,
+}
+
+#[derive(Debug)]
+pub struct RemoveXAttr {
+	pub ino: u64,
+	pub name: Box<OsStr>,
+	pub reply: ReplyEmpty,
 }
 
 #[derive(Debug)]

@@ -3,14 +3,18 @@ mod destroy;
 mod fallocate;
 mod forget;
 mod getattr;
+mod getxattr;
+mod listxattr;
 mod lookup;
 mod mkdir;
 mod read;
 mod readdir;
 mod readlink;
+mod removexattr;
 mod rename;
 mod rmdir;
 mod setattr;
+mod setxattr;
 mod statfs;
 mod symlink;
 mod unlink;
@@ -90,6 +94,10 @@ async fn get_attrs(item: &Item<'_, Dev>) -> Attrs {
 		gid: get_u(item, b"nrfs.gid".into()).await.map(f),
 		mode: get_u(item, b"nrfs.unixmode".into()).await.map(g),
 	}
+}
+
+fn filter_xattr(key: &[u8]) -> bool {
+	key.starts_with(b"nrfs.")
 }
 
 fn decode_u(b: &[u8]) -> u128 {

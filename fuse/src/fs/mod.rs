@@ -117,6 +117,10 @@ impl Fs {
 								Forget forget
 								GetAttr getattr
 								SetAttr setattr
+								GetXAttr getxattr
+								SetXAttr setxattr
+								ListXAttr listxattr
+								RemoveXAttr removexattr
 								Read read
 								Write write
 								ReadLink readlink
