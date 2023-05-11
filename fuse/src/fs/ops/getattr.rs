@@ -3,7 +3,7 @@ use super::*;
 impl Fs {
 	pub async fn getattr(&self, job: crate::job::GetAttr) {
 		let key = match self.ino().get(job.ino).unwrap() {
-			Get::Key(k) => k,
+			Get::Key(k, ..) => k,
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 		let item = self.fs.item(*key.key());

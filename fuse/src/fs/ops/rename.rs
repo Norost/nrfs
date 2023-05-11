@@ -6,13 +6,13 @@ impl Fs {
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let from_d = match self.ino().get(job.parent).unwrap() {
-			Get::Key(Key::Dir(d)) => self.fs.dir(d).await.unwrap(),
-			Get::Key(_) => return job.reply.error(libc::ENOTDIR),
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
+			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 		let to_d = match self.ino().get(job.newparent).unwrap() {
-			Get::Key(Key::Dir(d)) => self.fs.dir(d).await.unwrap(),
-			Get::Key(_) => return job.reply.error(libc::ENOTDIR),
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
+			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 
@@ -37,8 +37,10 @@ impl Fs {
 		{
 			Ok(key) => {
 				let ino = self.ino().get_ino(from_item.key);
-				ino.map(|ino| self.ino().set(ino, key));
+				ino.map(|ino| self.ino().set(ino, key, job.newparent));
 				job.reply.ok();
+				self.update_gen(ino.unwrap()).await; //FIXME unwrap
+				self.update_gen(job.parent).await;
 			}
 			Err(nrfs::TransferError::Duplicate) => unreachable!(),
 			Err(nrfs::TransferError::Full) => todo!(),

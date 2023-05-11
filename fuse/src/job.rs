@@ -1,7 +1,7 @@
 use {
 	fuser::{
-		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyStatfs,
-		ReplyWrite, ReplyXattr, TimeOrNow,
+		ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl,
+		ReplyStatfs, ReplyWrite, ReplyXattr, TimeOrNow,
 	},
 	std::time::Instant,
 };
@@ -30,6 +30,7 @@ pub enum Job {
 	RmDir(RmDir),
 	FSync(FSync),
 	StatFs(StatFs),
+	IoCtl(IoCtl),
 	Destroy,
 	Sync(Instant),
 }
@@ -193,4 +194,14 @@ pub struct FSync {
 #[derive(Debug)]
 pub struct StatFs {
 	pub reply: ReplyStatfs,
+}
+
+#[derive(Debug)]
+pub struct IoCtl {
+	pub ino: u64,
+	pub flags: u32,
+	pub cmd: u32,
+	pub in_data: Box<[u8]>,
+	pub out_size: u32,
+	pub reply: ReplyIoctl,
 }

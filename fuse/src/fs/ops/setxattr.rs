@@ -8,7 +8,7 @@ impl Fs {
 		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 		let key = match self.ino().get(job.ino).unwrap() {
-			Get::Key(k) => *k.key(),
+			Get::Key(k, ..) => *k.key(),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 		let item = self.fs.item(key);
@@ -23,7 +23,10 @@ impl Fs {
 			}
 		}
 		match item.set_attr(name, &job.value).await.unwrap() {
-			Ok(()) => job.reply.ok(),
+			Ok(()) => {
+				job.reply.ok();
+				self.update_gen(job.ino).await;
+			}
 			Err(nrfs::SetAttrError::Full) | Err(nrfs::SetAttrError::IsRoot) => {
 				job.reply.error(libc::ENOSPC)
 			}

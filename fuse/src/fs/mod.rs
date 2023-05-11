@@ -12,7 +12,7 @@ use {
 	inode::InodeStore,
 	nrfs::Nrfs,
 	std::{
-		cell::{RefCell, RefMut},
+		cell::{Cell, RefCell, RefMut},
 		fs,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	},
@@ -32,6 +32,8 @@ pub struct Fs {
 	default_uid: libc::uid_t,
 	default_gid: libc::gid_t,
 	default_mode: u16,
+	/// The current modification generation.
+	generation: Cell<u64>,
 }
 
 impl Fs {
@@ -59,7 +61,8 @@ impl Fs {
 
 		// Add root dir now so it's always at ino 1.
 		let mut ino = InodeStore::new();
-		ino.add(inode::Key::Dir(fs.root_dir().key()));
+		let m = fs.root_dir().modified().await.unwrap();
+		ino.add(inode::Key::Dir(fs.root_dir().key()), 1, m.gen);
 
 		let (send, recv) = async_channel::bounded(1024);
 
@@ -71,6 +74,7 @@ impl Fs {
 				default_uid: unsafe { libc::getuid() },
 				default_gid: unsafe { libc::getgid() },
 				default_mode: permissions,
+				generation: m.gen.into(),
 			},
 			FsChannel { channel: send },
 		)
@@ -133,6 +137,7 @@ impl Fs {
 								Unlink unlink
 								RmDir rmdir
 								StatFs statfs
+								IoCtl ioctl
 							}
 						}),
 					}
@@ -149,7 +154,7 @@ impl Fs {
 
 	/// Convert [`ItemData`] et al. to [`FileAttr`].
 	fn attr(&self, ino: u64, ty: FileType, len: u64, attr: ops::Attrs) -> FileAttr {
-		let mtime = attr.mtime.unwrap_or(0);
+		let mtime = attr.modified.time;
 		let uid = attr.uid.unwrap_or(self.default_uid);
 		let gid = attr.gid.unwrap_or(self.default_gid);
 		let perm = attr.mode.unwrap_or(self.default_mode);
@@ -193,6 +198,37 @@ impl Fs {
 	#[track_caller]
 	fn ino(&self) -> RefMut<'_, InodeStore> {
 		self.ino.borrow_mut()
+	}
+
+	async fn update_gen(&self, mut ino: u64) {
+		loop {
+			let mut sto = self.ino();
+			let Some(inode::Get::Key(key, parent, gen)) = sto.get(ino)
+				else { unreachable!() };
+			if *gen >= self.generation.get() {
+				break;
+			}
+			*gen = self.generation.get();
+			drop(sto);
+			self.fs
+				.item(*key.key())
+				.set_modified_gen(self.generation.get())
+				.await
+				.unwrap();
+			if ino == 1 {
+				break;
+			}
+			ino = parent;
+		}
+	}
+
+	fn gen(&self) -> u64 {
+		self.generation.get()
+	}
+
+	fn next_gen(&self) -> u64 {
+		self.generation.set(self.generation.get() + 1);
+		self.generation.get()
 	}
 }
 

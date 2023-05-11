@@ -6,8 +6,8 @@ impl Fs {
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let dir = match self.ino().get(job.parent).unwrap() {
-			Get::Key(Key::Dir(d)) => self.fs.dir(d).await.unwrap(),
-			Get::Key(_) => return job.reply.error(libc::ENOTDIR),
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
+			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 
@@ -20,7 +20,8 @@ impl Fs {
 			ItemTy::File | ItemTy::EmbedFile => (FileType::RegularFile, Key::File(item.key)),
 			ItemTy::Sym | ItemTy::EmbedSym => (FileType::Symlink, Key::Sym(item.key)),
 		};
-		let ino = self.ino().add(key);
+		let m = self.fs.item(item.key).modified().await.unwrap();
+		let ino = self.ino().add(key, job.parent, m.gen);
 
 		let attrs = get_attrs(&self.fs.item(item.key)).await;
 		job.reply.entry(&TTL, &self.attr(ino, ty, len, attrs), 0)

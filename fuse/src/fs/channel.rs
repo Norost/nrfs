@@ -1,3 +1,5 @@
+use fuser::ReplyIoctl;
+
 use {
 	crate::job::*,
 	async_channel::Sender,
@@ -40,7 +42,8 @@ impl Filesystem for FsChannel {
 			| FUSE_AUTO_INVAL_DATA
 			| FUSE_CACHE_SYMLINKS
 			| FUSE_PARALLEL_DIROPS
-			| FUSE_NO_OPENDIR_SUPPORT;
+			| FUSE_NO_OPENDIR_SUPPORT
+			| FUSE_HAS_IOCTL_DIR;
 		config.add_capabilities(CAP).unwrap();
 		if let Err(m) = config.set_max_write(1 << 24) {
 			config.set_max_write(m).unwrap();
@@ -304,6 +307,27 @@ impl Filesystem for FsChannel {
 
 	fn statfs(&mut self, _: &Request<'_>, _: u64, reply: ReplyStatfs) {
 		self.send(Job::StatFs(StatFs { reply }))
+	}
+
+	fn ioctl(
+		&mut self,
+		_: &Request<'_>,
+		ino: u64,
+		_fh: u64,
+		flags: u32,
+		cmd: u32,
+		in_data: &[u8],
+		out_size: u32,
+		reply: ReplyIoctl,
+	) {
+		self.send(Job::IoCtl(IoCtl {
+			ino,
+			flags,
+			cmd,
+			in_data: in_data.into(),
+			out_size,
+			reply,
+		}))
 	}
 
 	fn destroy(&mut self) {

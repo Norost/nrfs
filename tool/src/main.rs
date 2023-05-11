@@ -10,7 +10,7 @@ use clap::{builder::PossibleValue, Parser};
 #[derive(clap::Parser)]
 #[clap(
 	author = "David Hoppenbrouwers",
-	version = "0.2",
+	version = "0.3",
 	about = "Tool for creating & working with NRFS filesystems"
 )]
 enum Command {

@@ -10,15 +10,16 @@ impl Fs {
 		}
 
 		if job.offset == 1 {
-			if job.reply.add(job.ino, 2, FileType::Directory, "..") {
+			let Get::Key(_, parent_ino, _) = self.ino().get(job.ino).unwrap() else { unreachable!() };
+			if job.reply.add(parent_ino, 2, FileType::Directory, "..") {
 				return job.reply.ok();
 			}
 			job.offset += 1;
 		}
 
 		let dir = match self.ino().get(job.ino).unwrap() {
-			Get::Key(Key::Dir(d)) => self.fs.dir(d).await.unwrap(),
-			Get::Key(_) => return job.reply.error(libc::ENOTDIR),
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
+			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 

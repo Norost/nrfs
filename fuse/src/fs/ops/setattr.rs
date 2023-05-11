@@ -3,7 +3,7 @@ use super::*;
 impl Fs {
 	pub async fn setattr(&self, job: crate::job::SetAttr) {
 		let key = match self.ino().get(job.ino).unwrap() {
-			Get::Key(k) => k,
+			Get::Key(k, ..) => k,
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 		let item = self.fs.item(*key.key());
@@ -33,5 +33,6 @@ impl Fs {
 
 		let attrs = get_attrs(&item).await;
 		job.reply.attr(&TTL, &self.attr(job.ino, ty, size, attrs));
+		self.update_gen(job.ino).await;
 	}
 }

@@ -6,8 +6,8 @@ impl Fs {
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let dir = match self.ino().get(job.parent).unwrap() {
-			Get::Key(Key::Dir(d)) => self.fs.dir(d).await.unwrap(),
-			Get::Key(_) => return job.reply.error(libc::ENOTDIR),
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
+			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 
@@ -26,5 +26,6 @@ impl Fs {
 			self.ino().mark_stale(ino);
 		}
 		job.reply.ok();
+		self.update_gen(job.parent).await;
 	}
 }

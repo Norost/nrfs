@@ -186,6 +186,26 @@ Standard attributes
 All attributes in the "nrfs" namespace are reserved.
 They should not be directly accessible by the user.
 
+
+Modification time
+~~~~~~~~~~~~~~~~~
+
+name: "nrfs.mtime"
+
+This attribute aliases the modification time field in the item data.
+It can be used for systems that do not expose a modification time attribute
+directly.
+
+
+Generation
+~~~~~~~~~~
+
+name: "nrfs.gen"
+
+This attribute aliases the generation field in the item data.
+It can be used for systems that do not expose a generation attribute directly.
+
+
 UID
 ~~~
 

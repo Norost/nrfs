@@ -3,8 +3,8 @@ use super::*;
 impl Fs {
 	pub async fn write(&self, job: crate::job::Write) {
 		let f = match self.ino().get(job.ino).unwrap() {
-			Get::Key(Key::File(f)) => self.fs.file(f),
-			Get::Key(_) => return job.reply.error(libc::EINVAL),
+			Get::Key(Key::File(f), ..) => self.fs.file(f),
+			Get::Key(..) => return job.reply.error(libc::EINVAL),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 
@@ -13,5 +13,6 @@ impl Fs {
 			.unwrap()
 			.unwrap();
 		job.reply.written(job.data.len() as _);
+		self.update_gen(job.ino).await;
 	}
 }

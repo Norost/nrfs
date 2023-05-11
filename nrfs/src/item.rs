@@ -267,6 +267,18 @@ impl<'a, D: Dev> Item<'a, D> {
 		}
 	}
 
+	pub async fn set_modified_gen(&self, gen: u64) -> Result<(), Error<D>> {
+		if self.key.dir == u64::MAX {
+			self.fs.storage.header_data_mut()[HDR_ROOT_OFFT..][(MODIFIED_OFFT + 8).into()..][..8]
+				.copy_from_slice(&gen.to_le_bytes());
+			Ok(())
+		} else {
+			self.parent_kv()
+				.write_user_data(self.key.tag, MODIFIED_OFFT + 8, &gen.to_le_bytes())
+				.await
+		}
+	}
+
 	pub fn key(&self) -> ItemKey {
 		self.key
 	}

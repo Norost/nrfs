@@ -8,11 +8,12 @@ impl Fs {
 		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 		let key = match self.ino().get(job.ino).unwrap() {
-			Get::Key(k) => *k.key(),
+			Get::Key(k, ..) => *k.key(),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
 		if self.fs.item(key).del_attr(name).await.unwrap() {
 			job.reply.ok();
+			self.update_gen(job.ino).await;
 		} else {
 			job.reply.error(libc::ENODATA);
 		}

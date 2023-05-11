@@ -1,3 +1,5 @@
+use std::collections::btree_map::Entry;
+
 use {nrfs::ItemKey, std::collections::BTreeMap};
 
 #[derive(Clone, Copy, Debug)]
@@ -34,6 +36,8 @@ pub struct InodeStore {
 struct InodeData {
 	key: Key,
 	reference_count: u64,
+	parent_ino: u64,
+	generation: u64,
 }
 
 impl InodeStore {
@@ -51,37 +55,46 @@ impl InodeStore {
 	///
 	/// If the entry was already present,
 	/// the reference count is increased.
-	pub fn add(&mut self, key: Key) -> u64 {
-		*self
-			.rev_map
-			.entry(*key.key())
-			.and_modify(|h| {
+	pub fn add(&mut self, key: Key, parent_ino: u64, generation: u64) -> u64 {
+		match self.rev_map.entry(*key.key()) {
+			Entry::Occupied(e) => {
 				self.map
-					.get_mut(h)
+					.get_mut(e.get())
 					.expect("no item with handle")
 					.reference_count += 1;
-			})
-			.or_insert_with(|| {
+				*e.get()
+			}
+			Entry::Vacant(e) => {
 				let ino = self.ino_counter;
 				self.ino_counter += 1;
-				self.map.insert(ino, InodeData { key, reference_count: 1 });
+				self.map.insert(
+					ino,
+					InodeData { key, reference_count: 1, parent_ino, generation },
+				);
+				e.insert(ino);
+				self.map
+					.get_mut(&parent_ino)
+					.expect("no parent")
+					.reference_count += 1;
 				ino
-			})
+			}
+		}
 	}
 
-	pub fn get(&self, ino: u64) -> Option<Get> {
+	pub fn get(&mut self, ino: u64) -> Option<Get<'_>> {
 		self.map
-			.get(&ino)
-			.map(|d| Get::Key(d.key))
+			.get_mut(&ino)
+			.map(|d| Get::Key(d.key, d.parent_ino, &mut d.generation))
 			.or_else(|| self.stale.contains_key(&ino).then_some(Get::Stale))
 	}
 
-	pub fn set(&mut self, ino: u64, key: ItemKey) {
+	pub fn set(&mut self, ino: u64, key: ItemKey, parent_ino: u64) {
 		let r = self.map.get_mut(&ino).expect("no item with ino");
 		self.rev_map.remove(r.key.key()).unwrap();
 		let prev = self.rev_map.insert(key, ino);
 		assert!(prev.is_none(), "key with multiple ino");
 		*r.key.key_mut() = key;
+		r.parent_ino = parent_ino;
 	}
 
 	pub fn get_ino(&self, key: ItemKey) -> Option<u64> {
@@ -90,6 +103,10 @@ impl InodeStore {
 
 	pub fn mark_stale(&mut self, ino: u64) {
 		let data = self.map.remove(&ino).expect("no item with ino");
+		self.map
+			.get_mut(&data.parent_ino)
+			.expect("no parent")
+			.reference_count -= 1;
 		self.rev_map
 			.remove(data.key.key())
 			.expect("no item with key");
@@ -100,15 +117,23 @@ impl InodeStore {
 	pub fn forget(&mut self, ino: u64, nlookup: u64) {
 		if let Some(d) = self.map.get_mut(&ino) {
 			d.reference_count -= nlookup;
-			(d.reference_count == 0).then(|| self.map.remove(&ino));
+			if d.reference_count == 0 {
+				let data = self.map.remove(&ino).expect("no data");
+				self.map
+					.get_mut(&data.parent_ino)
+					.expect("no parent")
+					.reference_count -= 1;
+			}
 		} else if let Some(refc) = self.stale.get_mut(&ino) {
 			*refc -= nlookup;
-			(*refc == 0).then(|| self.stale.remove(&ino));
+			if *refc == 0 {
+				self.stale.remove(&ino);
+			}
 		}
 	}
 }
 
-pub enum Get {
-	Key(Key),
+pub enum Get<'a> {
+	Key(Key, u64, &'a mut u64),
 	Stale,
 }

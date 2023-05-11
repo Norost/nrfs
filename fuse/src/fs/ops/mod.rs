@@ -4,6 +4,7 @@ mod fallocate;
 mod forget;
 mod getattr;
 mod getxattr;
+mod ioctl;
 mod listxattr;
 mod lookup;
 mod mkdir;
@@ -26,7 +27,7 @@ use {
 		mtime_now, mtime_sys, Dev, Fs, TTL,
 	},
 	fuser::{FileType, TimeOrNow},
-	nrfs::{CreateError, Item, ItemTy},
+	nrfs::{CreateError, Item, ItemTy, Modified},
 	std::os::unix::ffi::OsStrExt,
 };
 
@@ -39,7 +40,7 @@ use {
 const NO_INO: u64 = u64::MAX;
 
 pub(super) struct Attrs {
-	pub mtime: Option<i64>,
+	pub modified: nrfs::Modified,
 	pub uid: Option<libc::uid_t>,
 	pub gid: Option<libc::gid_t>,
 	pub mode: Option<u16>,
@@ -64,20 +65,24 @@ async fn set_mtime(item: &Item<'_, Dev>, mtime: i64) {
 	item.set_modified_time(mtime).await.unwrap();
 }
 
-async fn init_attrs(
-	item: &Item<'_, Dev>,
-	uid: libc::uid_t,
-	gid: libc::gid_t,
-	mode: Option<u16>,
-) -> Attrs {
-	let mtime = mtime_now();
-	set_mtime(item, mtime).await;
-	set_uid(item, uid).await;
-	set_gid(item, gid).await;
-	if let Some(mode) = mode {
-		set_mode(item, mode).await;
+impl Fs {
+	async fn init_attrs(
+		&self,
+		item: &Item<'_, Dev>,
+		uid: libc::uid_t,
+		gid: libc::gid_t,
+		mode: Option<u16>,
+	) -> Attrs {
+		let modified = Modified { time: mtime_now(), gen: self.gen() };
+		let mtime = mtime_now();
+		set_mtime(item, mtime).await;
+		set_uid(item, uid).await;
+		set_gid(item, gid).await;
+		if let Some(mode) = mode {
+			set_mode(item, mode).await;
+		}
+		Attrs { modified, uid: Some(uid), gid: Some(gid), mode }
 	}
-	Attrs { mtime: Some(mtime), uid: Some(uid), gid: Some(gid), mode }
 }
 
 async fn get_u(item: &Item<'_, Dev>, key: &nrfs::Key) -> Option<u128> {
@@ -87,9 +92,8 @@ async fn get_u(item: &Item<'_, Dev>, key: &nrfs::Key) -> Option<u128> {
 async fn get_attrs(item: &Item<'_, Dev>) -> Attrs {
 	let f = |n: u128| n.try_into().unwrap_or(0);
 	let g = |n: u128| n.try_into().unwrap_or(0);
-	let m = item.modified().await.unwrap();
 	Attrs {
-		mtime: Some(m.time),
+		modified: item.modified().await.unwrap(),
 		uid: get_u(item, b"nrfs.uid".into()).await.map(f),
 		gid: get_u(item, b"nrfs.gid".into()).await.map(f),
 		mode: get_u(item, b"nrfs.unixmode".into()).await.map(g),
