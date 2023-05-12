@@ -6,15 +6,17 @@ impl Fs {
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let from_d = match self.ino().get(job.parent).unwrap() {
-			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d),
 			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
+		let from_d = from_d.await.unwrap();
 		let to_d = match self.ino().get(job.newparent).unwrap() {
-			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d),
 			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
+		let to_d = to_d.await.unwrap();
 
 		let Some(from_item) = from_d.search(from_name).await.unwrap()
 			else { return job.reply.error(libc::ENOENT) };

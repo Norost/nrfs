@@ -18,10 +18,11 @@ impl Fs {
 		}
 
 		let dir = match self.ino().get(job.ino).unwrap() {
-			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d),
 			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
+		let dir = dir.await.unwrap();
 
 		let mut index = job.offset as u64 - 2;
 		while let Some((item, i)) = dir.next_from(index).await.unwrap() {

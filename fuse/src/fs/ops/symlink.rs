@@ -5,10 +5,11 @@ impl Fs {
 		let Ok(name) = (&*job.name).try_into() else { return job.reply.error(libc::ENAMETOOLONG) };
 
 		let dir = match self.ino().get(job.parent).unwrap() {
-			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d),
 			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
 			Get::Stale => return job.reply.error(libc::ESTALE),
 		};
+		let dir = dir.await.unwrap();
 
 		match dir.create_sym(name).await.unwrap() {
 			Ok(f) => {
