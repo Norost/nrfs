@@ -7,6 +7,7 @@ impl Fs {
 		}
 		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
+		let _lock = self.lock(job.ino).await;
 		let key = match self.ino().get(job.ino).unwrap() {
 			Get::Key(k, ..) => *k.key(),
 			Get::Stale => return job.reply.error(libc::ESTALE),

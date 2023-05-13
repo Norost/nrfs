@@ -49,7 +49,6 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 
-		let _lock = self.fs.lock_item(self.key).await;
 		let (mut kv, dat) = self.data().await?;
 		let end = calc_end(offset, buf.len()).unwrap_or(u64::MAX);
 
@@ -80,7 +79,6 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(0);
 		}
 
-		let _lock = self.fs.lock_item_mut(self.key).await;
 		let end = calc_end(offset, data.len()).unwrap_or(u64::MAX);
 		let (mut kv, dat) = self.data().await?;
 		if offset >= dat.len() {
@@ -118,7 +116,6 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(Err(LengthTooLong));
 		}
 
-		let _lock = self.fs.lock_item_mut(self.key).await;
 		let (mut kv, mut dat) = self.data().await?;
 
 		if end <= dat.len() {
@@ -182,7 +179,6 @@ impl<'a, D: Dev> File<'a, D> {
 			return Ok(Err(LengthTooLong));
 		}
 
-		let _lock = self.fs.lock_item_mut(self.key).await;
 		let (mut kv, mut dat) = self.data().await?;
 		if dat.len() == new_len {
 			return Ok(Ok(()));
@@ -237,7 +233,6 @@ impl<'a, D: Dev> File<'a, D> {
 
 	pub async fn is_embed(&self) -> Result<bool, Error<D>> {
 		trace!("is_embed");
-		let _lock = self.fs.lock_item(self.key).await;
 		let ty = &mut [0];
 		self.dir().kv().read_user_data(self.key.tag, 0, ty).await?;
 		Ok(matches!(ty[0] & 7, 4 | 5))

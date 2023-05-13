@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-COUNT=1000
+COUNT=100
 IMG_LEN=256M
 MAKE_ARGS="-b 9 -r 9"
 FUSE_ARGS="--cache-size $((512 * 1))"

@@ -2,6 +2,7 @@ use super::*;
 
 impl Fs {
 	pub async fn getattr(&self, job: crate::job::GetAttr) {
+		let _lock = self.lock(job.ino).await;
 		let key = match self.ino().get(job.ino).unwrap() {
 			Get::Key(k, ..) => k,
 			Get::Stale => return job.reply.error(libc::ESTALE),

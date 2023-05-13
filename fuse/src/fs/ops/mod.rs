@@ -29,6 +29,7 @@ use {
 	fuser::{FileType, TimeOrNow},
 	nrfs::{CreateError, Item, ItemTy, Modified},
 	std::os::unix::ffi::OsStrExt,
+	util::task::lock_set::{LockSetExclusiveGuard, LockSetInclusiveGuard},
 };
 
 /// [Apparently inodes by `readdir` (and `getattr`?) are ignored *by user applications*][1].
@@ -82,6 +83,32 @@ impl Fs {
 			set_mode(item, mode).await;
 		}
 		Attrs { modified, uid: Some(uid), gid: Some(gid), mode }
+	}
+
+	async fn dir(
+		&self,
+		ino: u64,
+	) -> Result<(nrfs::Dir<'_, Dev>, LockSetInclusiveGuard<'_, u64>), i32> {
+		let lock = self.lock(ino).await;
+		let dir = match self.ino().get(ino).unwrap() {
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d),
+			Get::Key(..) => return Err(libc::ENOTDIR),
+			Get::Stale => return Err(libc::ESTALE),
+		};
+		Ok((dir.await.unwrap(), lock))
+	}
+
+	async fn dir_mut(
+		&self,
+		ino: u64,
+	) -> Result<(nrfs::Dir<'_, Dev>, LockSetExclusiveGuard<'_, u64>), i32> {
+		let lock = self.lock_mut(ino).await;
+		let dir = match self.ino().get(ino).unwrap() {
+			Get::Key(Key::Dir(d), ..) => self.fs.dir(d),
+			Get::Key(..) => return Err(libc::ENOTDIR),
+			Get::Stale => return Err(libc::ESTALE),
+		};
+		Ok((dir.await.unwrap(), lock))
 	}
 }
 

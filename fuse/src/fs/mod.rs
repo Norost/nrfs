@@ -16,6 +16,7 @@ use {
 		fs,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	},
+	util::task::lock_set::{LockSet, LockSetExclusiveGuard, LockSetInclusiveGuard},
 };
 
 const TTL: Duration = Duration::MAX;
@@ -34,6 +35,7 @@ pub struct Fs {
 	default_mode: u16,
 	/// The current modification generation.
 	generation: Cell<u64>,
+	ino_locks: LockSet<u64>,
 }
 
 impl Fs {
@@ -75,6 +77,7 @@ impl Fs {
 				default_gid: unsafe { libc::getgid() },
 				default_mode: permissions,
 				generation: m.gen.into(),
+				ino_locks: Default::default(),
 			},
 			FsChannel { channel: send },
 		)
@@ -200,7 +203,7 @@ impl Fs {
 		self.ino.borrow_mut()
 	}
 
-	async fn update_gen(&self, mut ino: u64) {
+	async fn update_gen(&self, mut ino: u64, mut lock: LockSetExclusiveGuard<'_, u64>) {
 		loop {
 			let mut sto = self.ino();
 			let Some(inode::Get::Key(key, parent, gen)) = sto.get(ino)
@@ -219,6 +222,8 @@ impl Fs {
 				break;
 			}
 			ino = parent;
+			drop(lock);
+			lock = self.lock_mut(ino).await;
 		}
 	}
 
@@ -229,6 +234,20 @@ impl Fs {
 	fn next_gen(&self) -> u64 {
 		self.generation.set(self.generation.get() + 1);
 		self.generation.get()
+	}
+
+	async fn lock(&self, ino: u64) -> LockSetInclusiveGuard<'_, u64> {
+		self.ino_locks.lock_inclusive(ino).await
+	}
+
+	/*
+	async fn lock(&self, ino: u64) -> LockSetExclusiveGuard<'_, u64> {
+		self.ino_locks.lock_exclusive(ino).await
+	}
+	*/
+
+	async fn lock_mut(&self, ino: u64) -> LockSetExclusiveGuard<'_, u64> {
+		self.ino_locks.lock_exclusive(ino).await
 	}
 }
 

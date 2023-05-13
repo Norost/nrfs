@@ -2,6 +2,7 @@ use super::*;
 
 impl Fs {
 	pub async fn listxattr(&self, job: crate::job::ListXAttr) {
+		let _lock = self.lock(job.ino).await;
 		let key = match self.ino().get(job.ino).unwrap() {
 			Get::Key(k, ..) => *k.key(),
 			Get::Stale => return job.reply.error(libc::ESTALE),
