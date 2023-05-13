@@ -9,8 +9,8 @@ trace = []
 parallel = ["nros/parallel"]
 
 [dependencies]
-nrkv = { version = "0.1.0", path = "../nrkv" }
-util = { version = "0.1.0", path = "../util" }
+nrkv = { path = "../nrkv" }
+util = { path = "../util" }
 
 [dependencies.bstr]
 version = "1.1"
