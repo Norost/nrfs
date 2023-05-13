@@ -26,7 +26,6 @@ impl Fs {
 
 		let Some(from_item) = from_d.search(from_name).await.unwrap()
 			else { return job.reply.error(libc::ENOENT) };
-		// FIXME potential deadlock
 		let _lock_x = self
 			.ino()
 			.get_ino(from_item.key)
@@ -39,7 +38,7 @@ impl Fs {
 
 		if let Some(to_item) = to_d.search(to_name).await.unwrap() {
 			let ino = self.ino().get_ino(to_item.key);
-			// FIXME potential deadlock
+			// This is safe with rmdir and unlink as we hold the directory lock
 			let _lock_y = if let Some(ino) = ino {
 				Some(self.lock_mut(ino).await)
 			} else {

@@ -16,8 +16,8 @@ impl Fs {
 			return job.reply.error(libc::ENOTDIR);
 		}
 
+		// This is safe with rename as we hold the directory lock
 		let ino = self.ino().get_ino(item.key);
-		// FIXME potential deadlock with rename
 		let lock_item = if let Some(ino) = ino {
 			Some(self.lock_mut(ino).await)
 		} else {
