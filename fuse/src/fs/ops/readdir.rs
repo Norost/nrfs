@@ -17,10 +17,9 @@ impl Fs {
 			job.offset += 1;
 		}
 
-		let dir = match self.ino().get(job.ino).unwrap() {
-			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
-			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
-			Get::Stale => return job.reply.error(libc::ESTALE),
+		let (dir, _lock) = match self.dir(job.ino).await {
+			Ok(r) => r,
+			Err(e) => return job.reply.error(e),
 		};
 
 		let mut index = job.offset as u64 - 2;

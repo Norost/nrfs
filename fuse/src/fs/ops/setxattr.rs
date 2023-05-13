@@ -7,6 +7,7 @@ impl Fs {
 		}
 		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
+		let lock = self.lock_mut(job.ino).await;
 		let key = match self.ino().get(job.ino).unwrap() {
 			Get::Key(k, ..) => *k.key(),
 			Get::Stale => return job.reply.error(libc::ESTALE),
@@ -25,7 +26,7 @@ impl Fs {
 		match item.set_attr(name, &job.value).await.unwrap() {
 			Ok(()) => {
 				job.reply.ok();
-				self.update_gen(job.ino).await;
+				self.update_gen(job.ino, lock).await;
 			}
 			Err(nrfs::SetAttrError::Full) | Err(nrfs::SetAttrError::IsRoot) => {
 				job.reply.error(libc::ENOSPC)

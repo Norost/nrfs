@@ -2,6 +2,7 @@ use super::*;
 
 impl Fs {
 	pub async fn write(&self, job: crate::job::Write) {
+		let lock = self.lock_mut(job.ino).await;
 		let f = match self.ino().get(job.ino).unwrap() {
 			Get::Key(Key::File(f), ..) => self.fs.file(f),
 			Get::Key(..) => return job.reply.error(libc::EINVAL),
@@ -13,6 +14,6 @@ impl Fs {
 			.unwrap()
 			.unwrap();
 		job.reply.written(job.data.len() as _);
-		self.update_gen(job.ino).await;
+		self.update_gen(job.ino, lock).await;
 	}
 }

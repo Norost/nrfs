@@ -2,6 +2,7 @@ use super::*;
 
 impl Fs {
 	pub async fn readlink(&self, job: crate::job::ReadLink) {
+		let _lock = self.lock(job.ino).await;
 		let f = match self.ino().get(job.ino).unwrap() {
 			Get::Key(Key::Sym(f), ..) => self.fs.file(f),
 			Get::Key(..) => return job.reply.error(libc::EINVAL),

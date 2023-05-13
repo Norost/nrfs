@@ -5,14 +5,20 @@ impl Fs {
 		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
-		let dir = match self.ino().get(job.parent).unwrap() {
-			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
-			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
-			Get::Stale => return job.reply.error(libc::ESTALE),
+		// We only need the ID of the dir, so drop the lock as soon as we get it.
+		let (dir, _) = match self.dir(job.parent).await {
+			Ok(r) => r,
+			Err(e) => return job.reply.error(e),
 		};
 
 		let Some(item) = dir.search(name).await.unwrap()
 			else { return job.reply.error(libc::ENOENT) };
+		let ino = self.ino().get_ino(item.key);
+		let _lock = if let Some(ino) = ino {
+			Some(self.lock(ino).await)
+		} else {
+			None
+		};
 
 		let len = self.fs.item(item.key).len().await.unwrap();
 		let (ty, key) = match item.ty {

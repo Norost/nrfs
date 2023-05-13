@@ -250,7 +250,6 @@ impl<'a, D: Dev> Dir<'a, D> {
 			*b = f(*b);
 			Ok(())
 		} else {
-			let _lock = self.fs.lock_item_mut(self.key).await;
 			let mut kv = Dir::new(self.fs, ItemKey::INVAL, self.key.dir).kv();
 			let buf = &mut [0; 4];
 			kv.read_user_data(self.key.tag, 8, buf).await?;

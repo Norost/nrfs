@@ -5,10 +5,9 @@ impl Fs {
 		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
-		let dir = match self.ino().get(job.parent).unwrap() {
-			Get::Key(Key::Dir(d), ..) => self.fs.dir(d).await.unwrap(),
-			Get::Key(..) => return job.reply.error(libc::ENOTDIR),
-			Get::Stale => return job.reply.error(libc::ESTALE),
+		let (dir, lock) = match self.dir_mut(job.parent).await {
+			Ok(r) => r,
+			Err(e) => return job.reply.error(e),
 		};
 
 		let Some(item) = dir.search(name).await.unwrap()
@@ -16,16 +15,25 @@ impl Fs {
 		if item.ty != nrfs::ItemTy::Dir {
 			return job.reply.error(libc::ENOTDIR);
 		}
+
+		// This is safe with rename as we hold the directory lock
+		let ino = self.ino().get_ino(item.key);
+		let lock_item = if let Some(ino) = ino {
+			Some(self.lock_mut(ino).await)
+		} else {
+			None
+		};
+
 		match dir.remove(item.key).await.unwrap() {
 			Ok(()) => {}
 			Err(nrfs::RemoveError::NotEmpty) => return job.reply.error(libc::ENOTEMPTY),
 		}
+		drop(lock_item);
 
-		let ino = self.ino().get_ino(item.key);
 		if let Some(ino) = ino {
 			self.ino().mark_stale(ino);
 		}
 		job.reply.ok();
-		self.update_gen(job.parent).await;
+		self.update_gen(job.parent, lock).await;
 	}
 }

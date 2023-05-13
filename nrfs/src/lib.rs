@@ -94,8 +94,6 @@ pub struct Nrfs<D: Dev> {
 	read_only: bool,
 	/// Per-directory locks.
 	dir_locks: LockSet<u64>,
-	/// Per-item locks.
-	item_locks: LockSet<ItemKey>,
 	/// Attribute map lock.
 	attr_map_lock: Lock,
 }
@@ -130,7 +128,6 @@ impl<D: Dev> Nrfs<D> {
 			storage,
 			read_only: false,
 			dir_locks: Default::default(),
-			item_locks: Default::default(),
 			attr_map_lock: Default::default(),
 		};
 		let id = Dir::init(&s).await?;
@@ -159,7 +156,6 @@ impl<D: Dev> Nrfs<D> {
 			storage,
 			read_only: !allow_repair,
 			dir_locks: Default::default(),
-			item_locks: Default::default(),
 			attr_map_lock: Default::default(),
 		})
 	}

@@ -11,4 +11,9 @@ ls -lah "$mnt/test/b"
 find "$mnt"
 ./target/debug/tool dump "$img"
 
+python3 -c "import os; os.rename('$mnt/test/b', '$mnt/test/b')"
+
+mkdir "$mnt/test/c"
+python3 -c "import os; os.rename('$mnt/test', '$mnt/test/c')" && exit 1 || true
+
 . ./test/_finish.sh
