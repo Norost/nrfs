@@ -1,3 +1,4 @@
+use std::io::Read;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
@@ -212,10 +213,11 @@ pub async fn make(args: Make) -> Result<(), Box<dyn Error>> {
 	let nrfs = nrfs::Nrfs::new(config).await?;
 
 	nrfs.run(async {
+		let buf = &mut vec![0; 1 << max_record_size.to_raw()];
 		if let Some(d) = &args.directory {
 			// TODO attrs on root dir
 			eprintln!("Adding files from {:?}", d);
-			add_files(nrfs.root_dir(), d, args.follow).await?;
+			add_files(nrfs.root_dir(), d, args.follow, buf).await?;
 		} else {
 			// TODO attrs on root dir
 		}
@@ -247,6 +249,7 @@ async fn add_files(
 	root: nrfs::Dir<'_, nrfs::dev::FileDev>,
 	from: &Path,
 	follow_symlinks: bool,
+	buf: &mut [u8],
 ) -> Result<(), Box<dyn Error>> {
 	for f in fs::read_dir(from).expect("failed to read dir") {
 		let f = f?;
@@ -255,16 +258,24 @@ async fn add_files(
 		let n = n.to_str().unwrap().try_into().unwrap();
 
 		if m.is_file() || (m.is_symlink() && follow_symlinks) {
-			let c = fs::read(f.path())?;
+			let mut inp = fs::File::open(f.path())?;
 			let f = root.create_file(n).await?.unwrap();
 			setattr(&f, &m).await?;
-			f.write_grow(0, &c).await??;
+			let mut offt = 0;
+			loop {
+				let l = inp.read(buf)?;
+				if l == 0 {
+					break;
+				}
+				f.write_grow(offt, &buf[..l]).await??;
+				offt += u64::try_from(l).unwrap();
+			}
 		} else if m.is_dir() {
 			let d = root.create_dir(n).await?.unwrap();
 			setattr(&d, &m).await?;
 			let path = f.path();
 			let fut: Pin<Box<dyn Future<Output = _>>> =
-				Box::pin(add_files(d, &path, follow_symlinks));
+				Box::pin(add_files(d, &path, follow_symlinks, buf));
 			fut.await?;
 		} else if m.is_symlink() {
 			let c = fs::read_link(f.path())?;
