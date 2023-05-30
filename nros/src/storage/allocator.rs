@@ -102,20 +102,22 @@ impl Allocator {
 		let mut alloc_map = RangeSet::new();
 		let mut stack = Vec::new();
 
-		// Iterate stack from top to bottom
+		// Collect stack first to speed up building up rangemap
 		let mut record = store.devices.allocation_log_head.get();
 		while record.blocks() > 0 {
-			// Append to stack for later ops
 			stack.push(record);
-
-			// Get record data
 			let data = store.read(record).await?;
-			let lba = record.lba();
+			util::read(0, record.as_mut(), data.get());
+		}
+
+		// Iterate log from start
+		for &rec in stack.iter().rev() {
+			let data = store.read(rec).await?;
 
 			// Add record itself
-			alloc_map.insert(lba..lba + u64::from(record.blocks()));
+			alloc_map.insert(rec.lba()..rec.lba() + u64::from(rec.blocks()));
 
-			let (next_rec, data) = data.get().split_at(8);
+			let (_, data) = data.get().split_at(8);
 
 			// Add entries
 			for entry_raw in data.chunks(16) {
@@ -123,34 +125,15 @@ impl Allocator {
 				let mut entry = Entry::default();
 				util::read(0, entry.as_mut(), entry_raw);
 
-				let (mut start, end) = (u64::from(entry.lba), u64::from(entry.lba + entry.size));
+				let (start, end) = (u64::from(entry.lba), u64::from(entry.lba + entry.size));
 
-				// Xor with overlapping ranges.
-				while start < end {
-					// Get end of first next range.
-					let range = alloc_map.gaps(&(start..end)).next().unwrap_or(end..end);
-					// Determine mid point.
-					let mid = range.end.min(end);
-					// The first range we got indicates free memory, so current state is:
-					//
-					//   |AAAAAAAAAA|DDDDDDDDD|
-					//   ^          ^         ^
-					// start       mid       end
-					//
-					// Mark the first half as deallocated and the second half as allocated.
-					if start < mid {
-						alloc_map.insert(start..mid);
-					}
-					if mid < end {
-						alloc_map.remove(mid..end);
-					}
-					// Begin next range.
-					start = end;
+				// Xor with overlapping range.
+				if alloc_map.contains(&start) {
+					alloc_map.remove(start..end);
+				} else {
+					alloc_map.insert(start..end);
 				}
 			}
-
-			// Next record
-			util::read(0, record.as_mut(), next_rec);
 		}
 
 		trace!("==>  {:?}", &alloc_map);
