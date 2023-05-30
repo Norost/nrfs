@@ -119,16 +119,16 @@ impl InodeStore {
 			d.reference_count -= nlookup;
 			if d.reference_count == 0 {
 				let data = self.map.remove(&ino).expect("no data");
-				self.map
-					.get_mut(&data.parent_ino)
-					.expect("no parent")
-					.reference_count -= 1;
+				self.rev_map.remove(data.key.key());
+				self.forget(data.parent_ino, 1);
 			}
 		} else if let Some(refc) = self.stale.get_mut(&ino) {
 			*refc -= nlookup;
 			if *refc == 0 {
 				self.stale.remove(&ino);
 			}
+		} else {
+			panic!("invalid ino {}", ino);
 		}
 	}
 }
