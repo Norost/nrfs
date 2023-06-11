@@ -5,7 +5,8 @@ impl Fs {
 		let Ok(name) = (&*job.name).try_into()
 			else { return job.reply.error(libc::ENAMETOOLONG) };
 
-		// We only need the ID of the dir, so drop the lock as soon as we get it.
+		// FIXME we do need to acquire a lock here
+		// However, we risk a deadlock, so don't for now.
 		let (dir, _) = match self.dir(job.parent).await {
 			Ok(r) => r,
 			Err(e) => return job.reply.error(e),

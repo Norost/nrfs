@@ -87,6 +87,7 @@ impl Fs {
 		eprintln!("Running");
 		self.fs
 			.run(async {
+				use log::trace;
 				let mut jobs = futures_util::stream::FuturesUnordered::new();
 				loop {
 					let job = futures_util::select_biased! {
@@ -94,20 +95,29 @@ impl Fs {
 						job = self.channel.recv().fuse() => job.unwrap(),
 					};
 					macro_rules! switch {
-						{ [$job:ident] $($v:ident $f:ident)* } => {
+						{ [$job:ident] $($v:ident $f:ident)* } => {{
+							let name = match &$job {
+								$(Job::$v(_) => stringify!($v),)*
+								Job::FSync(_) | Job::Sync(_) | Job::Destroy => unreachable!(),
+							};
+							trace!("{} start", name);
 							match $job {
 								$(Job::$v(job) => self.$f(job).await,)*
 								Job::FSync(_) | Job::Sync(_) | Job::Destroy => unreachable!(),
 							}
-						};
+							trace!("{} end", name);
+						}};
 					}
 					match job {
 						Job::FSync(fsync) => {
+							trace!("fsync");
 							while let Some(()) = jobs.next().await {}
 							self.fs.finish_transaction().await.unwrap();
 							fsync.reply.ok();
+							trace!("fsync end");
 						}
 						Job::Sync(when) => {
+							trace!("sync");
 							let now = std::time::Instant::now();
 							if when >= now {
 								while let Some(()) = jobs.next().await {}
@@ -115,6 +125,7 @@ impl Fs {
 							} else {
 								eprintln!("Skipping Job::Sync (when: {:?}, now: {:?})", when, now);
 							}
+							trace!("sync end");
 						}
 						Job::Destroy => break,
 						job => jobs.push(async {
