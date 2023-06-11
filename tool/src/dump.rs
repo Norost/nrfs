@@ -108,6 +108,7 @@ pub async fn dump(args: Dump) -> Result<(), Box<dyn Error>> {
 	e("compression", &sto.compression);
 	e("used objects", &obj.used_objects);
 	e("used blocks", &alloc.used_blocks);
+	e("total blocks", &alloc.total_blocks);
 
 	Ok(())
 }

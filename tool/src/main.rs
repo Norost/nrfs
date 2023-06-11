@@ -4,6 +4,7 @@
 mod dump;
 mod extract_key;
 mod make;
+mod resize;
 
 use clap::{builder::PossibleValue, Parser};
 
@@ -17,6 +18,7 @@ enum Command {
 	Make(make::Make),
 	ExtractKey(extract_key::ExtractKey),
 	Dump(dump::Dump),
+	Resize(resize::Resize),
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -57,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			Command::Make(args) => make::make(args).await,
 			Command::ExtractKey(args) => extract_key::extract_key(args).await,
 			Command::Dump(args) => dump::dump(args).await,
+			Command::Resize(args) => resize::resize(args).await,
 		}
 	};
 	futures_executor::block_on(fut)

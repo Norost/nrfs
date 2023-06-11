@@ -234,6 +234,11 @@ impl<D: Dev> Nrfs<D> {
 		Item::new(self, key)
 	}
 
+	pub async fn set_block_count(&self, blocks: u64) -> Result<(), Error<D>> {
+		self.storage.set_block_count(blocks).await?;
+		Ok(())
+	}
+
 	pub fn resource(&self) -> &nros::StdResource {
 		self.storage.resource()
 	}

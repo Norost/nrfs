@@ -23,9 +23,9 @@ struct Node<D> {
 	/// The device itself.
 	dev: D,
 	/// The offset of the blocks of this device in the chain.
-	block_offset: u64,
+	block_offset: Cell<u64>,
 	/// The amount of blocks covered by this device.
-	block_count: u64,
+	block_count: Cell<u64>,
 }
 
 /// Wrapper around a set of devices.
@@ -41,7 +41,7 @@ pub(crate) struct DevSet<D: Dev, R: Resource> {
 	/// The default compression to use for records.
 	compression: Compression,
 	/// The total amount of blocks covered in each chain.
-	block_count: u64,
+	block_count: Cell<u64>,
 	/// The unique identifier of this filesystem.
 	uid: [u8; 16],
 
@@ -110,7 +110,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 					.map(|dev| {
 						let block_count = remaining_blocks.min(calc_blocks(&dev));
 						remaining_blocks -= block_count;
-						Node { block_count, dev, block_offset: 0 }
+						Node { block_count: block_count.into(), dev, block_offset: 0.into() }
 					})
 					.collect::<Box<_>>()
 			})
@@ -142,8 +142,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		for chain in devices.iter_mut() {
 			let mut block_offset = 0;
 			for node in chain.iter_mut() {
-				node.block_offset = block_offset;
-				block_offset += node.block_count;
+				node.block_offset.set(block_offset);
+				block_offset += node.block_count.get();
 			}
 		}
 
@@ -169,7 +169,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			block_size: config.block_size,
 			max_record_size: config.max_record_size,
 			compression: config.compression,
-			block_count,
+			block_count: block_count.into(),
 
 			magic: config.magic,
 			uid,
@@ -317,8 +317,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 					.into_iter()
 					.map(|(i, block_offset, block_count)| Node {
 						dev: devices[i].take().unwrap(),
-						block_offset,
-						block_count,
+						block_offset: block_offset.into(),
+						block_count: block_count.into(),
 					})
 					.collect()
 			})
@@ -333,7 +333,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			max_record_size: hc.max_record_size(),
 			compression: hc.compression_algorithm().unwrap(),
 			uid: header.uid,
-			block_count: info.total_block_count.into(),
+			block_count: Cell::new(info.total_block_count.into()),
 
 			object_list_root: info.object_list_root.into(),
 			object_bitmap_root: info.object_bitmap_root.into(),
@@ -419,7 +419,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 		node: &Node<D>,
 		header: <D::Allocator as Allocator>::Buf,
 	) -> Result<(), D::Error> {
-		let lba = if tail { 0 } else { node.block_count + 1 };
+		let lba = if tail { 0 } else { node.block_count.get() + 1 };
 		self.write_dev(&node.dev, lba, header).await?;
 		node.dev.fence().await
 	}
@@ -448,7 +448,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 		let lba_end =
 			lba.saturating_add(u64::try_from(size >> self.block_size().to_raw()).unwrap());
-		assert!(lba_end <= self.block_count, "read is out of bounds");
+		assert!(lba_end <= self.block_count.get(), "read is out of bounds");
 
 		// TODO balance loads
 		for (i, chain) in self.devices.iter().enumerate() {
@@ -459,14 +459,14 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 			// Do a binary search for the start device.
 			let node_i = chain
-				.binary_search_by_key(&lba, |node| node.block_offset)
+				.binary_search_by_key(&lba, |node| node.block_offset.get())
 				// if offset == lba, then we need that dev
 				// if offset < lba, then we want the previous dev.
 				.map_or_else(|i| i - 1, |i| i);
 			let node = &chain[node_i];
 
-			let node_block_end = node.block_offset + node.block_count;
-			let node_lba = lba - node.block_offset + 1;
+			let node_block_end = node.block_offset.get() + node.block_count.get();
+			let node_lba = lba - node.block_offset.get() + 1;
 
 			// Check if the buffer range falls entirely within the device's range.
 			// If not, split the buffer in two and perform two operations.
@@ -524,7 +524,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 		let lba_end = lba
 			.saturating_add(u64::try_from(data.get().len() >> self.block_size().to_raw()).unwrap());
-		assert!(lba_end <= self.block_count, "write is out of bounds");
+		assert!(lba_end <= self.block_count.get(), "write is out of bounds");
 
 		// Write to all mirrors
 		self.devices
@@ -534,7 +534,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.map(|chain| {
 				// Do a binary search for the start device.
 				let node_i = chain
-					.binary_search_by_key(&lba, |node| node.block_offset)
+					.binary_search_by_key(&lba, |node| node.block_offset.get())
 					// if offset == lba, then we need that dev
 					// if offset < lba, then we want the previous dev.
 					.map_or_else(|i| i - 1, |i| i);
@@ -544,8 +544,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 				// If not, split the buffer in two and perform two operations.
 				let data = &data;
 				async move {
-					let node_lba_end = node.block_offset + node.block_count;
-					let node_lba = lba - node.block_offset + 1;
+					let node_lba_end = node.block_offset.get() + node.block_count.get();
+					let node_lba = lba - node.block_offset.get() + 1;
 					if lba_end <= node_lba_end {
 						// No splitting necessary - yay
 						self.write_dev(&node.dev, node_lba, data.0.clone()).await
@@ -584,7 +584,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 	/// Discard a region of data (TRIM).
 	pub async fn discard(&self, lba: u64, blocks: u64) -> Result<(), Error<D>> {
 		let lba_end = lba.saturating_add(blocks);
-		assert!(lba_end <= self.block_count, "write is out of bounds");
+		assert!(lba_end <= self.block_count.get(), "write is out of bounds");
 
 		// Discard on all mirrors
 		self.devices
@@ -592,7 +592,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			.map(|chain| {
 				// Do a binary search for the start device.
 				let node_i = chain
-					.binary_search_by_key(&lba, |node| node.block_offset)
+					.binary_search_by_key(&lba, |node| node.block_offset.get())
 					// if offset == lba, then we need that dev
 					// if offset < lba, then we want the previous dev.
 					.map_or_else(|i| i - 1, |i| i);
@@ -601,8 +601,8 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 				// Check if the discard range falls entirely within the device's range.
 				// If not, split the range in two and perform two operations.
 				async move {
-					let node_lba_end = node.block_offset + node.block_count;
-					let node_lba = lba - node.block_offset + 1;
+					let node_lba_end = node.block_offset.get() + node.block_count.get();
+					let node_lba = lba - node.block_offset.get() + 1;
 					if lba_end <= node_lba_end {
 						// No splitting necessary - yay
 						self.discard_dev(&node.dev, node_lba, blocks).await
@@ -656,9 +656,9 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 		let info = FsInfo {
 			configuration: conf,
-			lba_offset: node.block_offset.into(),
-			block_count: node.block_count.into(),
-			total_block_count: self.block_count.into(),
+			lba_offset: node.block_offset.get().into(),
+			block_count: node.block_count.get().into(),
+			total_block_count: self.block_count.get().into(),
 			key1: self.key1,
 			key2: self.key2,
 
@@ -731,7 +731,21 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 	/// The total amount of blocks addressable by this device set.
 	pub fn block_count(&self) -> u64 {
-		self.block_count
+		self.block_count.get()
+	}
+
+	/// Set the total amount of addressable blocks.
+	///
+	/// Care must be taken not to discard used blocks.
+	pub fn set_block_count(&self, block_count: u64) -> Result<(), OutOfRange> {
+		assert_eq!(self.devices.len(), 1, "todo: support mirrored chains");
+		assert_eq!(self.devices[0].len(), 1, "todo: support multidev chains");
+		if self.devices[0][0].dev.block_count() < block_count {
+			return Err(OutOfRange);
+		}
+		self.block_count.set(block_count);
+		self.devices[0][0].block_count.set(block_count);
+		Ok(())
 	}
 
 	/// Get a cipher instance.
@@ -865,3 +879,6 @@ impl<D: Dev, R: Resource> fmt::Debug for DevSet<D, R> {
 		f.debug_struct(stringify!(DevSet)).finish_non_exhaustive()
 	}
 }
+
+#[derive(Clone, Debug)]
+pub struct OutOfRange;

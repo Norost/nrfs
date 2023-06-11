@@ -341,6 +341,12 @@ impl<D: Dev, R: Resource> Store<D, R> {
 		self.devices.set_key_deriver(kdf)
 	}
 
+	pub async fn set_block_count(&self, blocks: u64) -> Result<(), Error<D>> {
+		self.devices.set_block_count(blocks).unwrap();
+		self.dirty.set(true);
+		Ok(())
+	}
+
 	pub fn resource(&self) -> &R {
 		&self.devices.resource
 	}

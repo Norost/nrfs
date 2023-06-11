@@ -340,6 +340,11 @@ impl<D: Dev, R: Resource> Cache<D, R> {
 		self.max_rec_size().to_raw() - RECORDREF_SIZE_P2
 	}
 
+	pub async fn set_block_count(&self, blocks: u64) -> Result<(), Error<D>> {
+		self.store.set_block_count(blocks).await?;
+		Ok(())
+	}
+
 	pub fn resource(&self) -> &R {
 		self.store.resource()
 	}
