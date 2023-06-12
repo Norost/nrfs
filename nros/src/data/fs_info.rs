@@ -16,8 +16,7 @@ pub(crate) struct FsHeader {
 	pub cipher: u8,
 	pub kdf: u8,
 	pub kdf_parameters: [u8; 8],
-	pub key_hash: [u8; 2],
-	pub _reserved: [u8; 6],
+	pub _reserved: [u8; 8],
 	pub nonce: u64le,
 	pub uid: [u8; 16],
 	pub hash: [u8; 16],
@@ -78,17 +77,6 @@ impl FsHeader {
 		KeyDerivation::from_raw(self.kdf, &self.kdf_parameters).ok_or(self.kdf)
 	}
 
-	/// Verify the key.
-	///
-	/// Returns `true` if the key *may* be able to decrypt the header.
-	pub fn verify_key(&self, key: &[u8; 32]) -> bool {
-		use poly1305::universal_hash::KeyInit;
-		let hasher = poly1305::Poly1305::new_from_slice(key).unwrap();
-		let hash = hasher.compute_unpadded(&[0; 16]);
-		let &[h0, h1, ..] = hash.as_slice() else { unreachable!() };
-		u16::from_ne_bytes([h0, h1]) == u16::from_ne_bytes(self.key_hash)
-	}
-
 	/// Encrypt filesystem info.
 	///
 	/// # Panics
@@ -113,14 +101,6 @@ impl FsHeader {
 		let cipher = Cipher { ty: self.cipher().unwrap(), key1: *key, key2: [0; 32] };
 		cipher.decrypt(&nonce(self.nonce, &self.uid), &self.hash, data)?;
 		Ok(FsInfo::from_raw_slice(data).expect("data too small"))
-	}
-
-	pub fn hash_key(key: &[u8; 32]) -> [u8; 2] {
-		use poly1305::universal_hash::KeyInit;
-		let hash = poly1305::Poly1305::new_from_slice(key)
-			.unwrap()
-			.compute_unpadded(&[0; 16]);
-		hash[..2].try_into().unwrap()
 	}
 }
 

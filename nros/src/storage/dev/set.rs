@@ -60,7 +60,6 @@ pub(crate) struct DevSet<D: Dev, R: Resource> {
 	/// Key to encrypt the header with.
 	header_key: Cell<[u8; 32]>,
 	key_derivation: Cell<KeyDerivation>,
-	key_hash: [u8; 2],
 
 	cipher: CipherType,
 	nonce: Cell<u64>,
@@ -162,8 +161,6 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			}
 		};
 
-		let key_hash = FsHeader::hash_key(&header_key);
-
 		Ok(Self {
 			devices,
 			block_size: config.block_size,
@@ -184,7 +181,6 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 			header_key: header_key.into(),
 			key_derivation: key_derivation.into(),
-			key_hash,
 
 			key1,
 			key2,
@@ -234,17 +230,13 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 						KeyDerivation::Argon2id { p, t, m } => {
 							match (config.retrieve_key)(true).unwrap() {
 								KeyPassword::Key(k) => k,
-								KeyPassword::Password(pwd) => loop {
-									let key = key_derivation::argon2id(&pwd, &header.uid, m, t, p);
-									if header.verify_key(&key) {
-										break key;
-									}
-								},
+								KeyPassword::Password(pwd) => {
+									key_derivation::argon2id(&pwd, &header.uid, m, t, p)
+								}
 							}
 						}
 					},
 				};
-				assert!(header.verify_key(&key), "key doesn't match");
 				header_key = Some(key);
 				header.decrypt(&key, info).ok()?;
 				Some(buf)
@@ -341,7 +333,6 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 
 			cipher: header.cipher().unwrap(),
 			header_key: header_key.into(),
-			key_hash: FsHeader::hash_key(&header_key),
 
 			key1: info.key1,
 			key2: info.key2,
@@ -676,8 +667,7 @@ impl<D: Dev, R: Resource> DevSet<D, R> {
 			block_size: self.block_size.to_raw(),
 			kdf,
 			kdf_parameters,
-			key_hash: self.key_hash,
-			_reserved: [0; 6],
+			_reserved: [0; 8],
 			uid: self.uid,
 			nonce: self.nonce.get().into(),
 			hash: [0; 16],
