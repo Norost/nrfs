@@ -142,6 +142,9 @@ A block with a filesystem header & info is placed at the start and end of a volu
   |  1 | Poly1305 | XChaCha12  |
   +----+----------+------------+
 
+  * Poly1305+XChaCha12 is based on the construction specified in RFC 7539.
+    No AAD is used.
+
 * KDF: The key derivation function to use to get the key necessary
   to decrypt the header.
 
