@@ -152,6 +152,7 @@ impl Fs {
 								RmDir rmdir
 								StatFs statfs
 								IoCtl ioctl
+								MkNod mknod
 							}
 						}),
 					}
@@ -171,7 +172,7 @@ impl Fs {
 		let mtime = attr.modified.time;
 		let uid = attr.uid.unwrap_or(self.default_uid);
 		let gid = attr.gid.unwrap_or(self.default_gid);
-		let perm = attr.mode.unwrap_or(self.default_mode);
+		let perm = attr.mode.unwrap_or(self.default_mode) & 0o777;
 
 		let mtime = mtime.max(i64::MIN.into()).min(i64::MAX.into());
 		let mtime = i64::try_from(mtime).unwrap();

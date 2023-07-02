@@ -242,4 +242,21 @@ Other bits are reserved.
               0             3 Global RWX
               3             3 Group RWX
               6             3 User RWX
+              9             3 File type
   ============= ============= =====
+
+.. table:: UNIX file types
+
+   ===== ====
+   Value Type
+   ===== ====
+       0 File, directory or symlink
+       1 Block
+       2 Character
+       3 Named pipe
+       4 Socket
+       5 Door
+   ===== ====
+
+TODO: If file type is block or character major and minor number are necessary
+Should it be put in the file or added as attributes?

@@ -10,13 +10,13 @@ impl Fs {
 		let item = self.fs.item(*key.key());
 
 		let len = item.len().await.unwrap();
+		let attrs = get_attrs(&item).await;
 		let ty = match key {
 			Key::Dir(_) => FileType::Directory,
-			Key::File(_) => FileType::RegularFile,
 			Key::Sym(_) => FileType::Symlink,
+			Key::File(_) => getty(attrs.mode.unwrap_or(0)).unwrap_or(FileType::RegularFile),
 		};
 
-		let attrs = get_attrs(&item).await;
 		job.reply.attr(&TTL, &self.attr(job.ino, ty, len, attrs));
 	}
 }

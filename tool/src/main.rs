@@ -1,4 +1,4 @@
-#![forbid(unused_must_use, rust_2018_idioms)]
+#![deny(unused_must_use, rust_2018_idioms)]
 #![feature(const_option, iterator_try_collect)]
 
 mod dump;
@@ -51,6 +51,17 @@ impl clap::ValueEnum for Encryption {
 			Self::XChacha12Poly1305 => PossibleValue::new("xchacha12poly1305"),
 		})
 	}
+}
+
+#[cfg(unix)]
+mod unix {
+	pub const TY_BUILTIN: u16 = 0 << 9;
+	pub const TY_BLOCK: u16 = 1 << 9;
+	pub const TY_CHAR: u16 = 2 << 9;
+	pub const TY_PIPE: u16 = 3 << 9;
+	pub const TY_SOCK: u16 = 4 << 9;
+	#[allow(dead_code)]
+	pub const TY_DOOR: u16 = 5 << 9;
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

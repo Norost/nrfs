@@ -1,3 +1,5 @@
+use crate::unix;
+
 use {
 	nrfs::{ItemTy, Nrfs},
 	std::{
@@ -139,11 +141,20 @@ async fn list_files(
 				b"nrfs.uid" | b"nrfs.gid" => print!("{}", decode_u(&v)),
 				b"nrfs.unixmode" => {
 					let u = decode_u(&v);
+					let ty = match (u & 0o7_000) as u16 {
+						unix::TY_BUILTIN => '-',
+						unix::TY_CHAR => 'c',
+						unix::TY_BLOCK => 'b',
+						unix::TY_PIPE => 'p',
+						unix::TY_SOCK => 's',
+						unix::TY_DOOR => 'D',
+						_ => '?',
+					};
 					let mut s = [0; 9];
 					for (i, (c, l)) in s.iter_mut().zip(b"rwxrwxrwx").rev().enumerate() {
 						*c = [b'-', *l][usize::from(u & 1 << i != 0)];
 					}
-					print!("{}", std::str::from_utf8(&s).unwrap());
+					print!("{}{}", ty, std::str::from_utf8(&s).unwrap());
 				}
 				_ => print!("{:?}", bstr::BStr::new(&v)),
 			}

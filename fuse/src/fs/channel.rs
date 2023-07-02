@@ -330,6 +330,28 @@ impl Filesystem for FsChannel {
 		}))
 	}
 
+	fn mknod(
+		&mut self,
+		req: &Request<'_>,
+		parent: u64,
+		name: &OsStr,
+		mode: u32,
+		umask: u32,
+		rdev: u32,
+		reply: ReplyEntry,
+	) {
+		self.send(Job::MkNod(MkNod {
+			uid: req.uid(),
+			gid: req.gid(),
+			parent,
+			name: name.as_bytes().into(),
+			mode,
+			umask,
+			rdev,
+			reply,
+		}))
+	}
+
 	fn destroy(&mut self) {
 		self.send(Job::Destroy);
 	}

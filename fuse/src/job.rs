@@ -31,6 +31,7 @@ pub enum Job {
 	FSync(FSync),
 	StatFs(StatFs),
 	IoCtl(IoCtl),
+	MkNod(MkNod),
 	Destroy,
 	Sync(Instant),
 }
@@ -204,4 +205,16 @@ pub struct IoCtl {
 	pub in_data: Box<[u8]>,
 	pub out_size: u32,
 	pub reply: ReplyIoctl,
+}
+
+#[derive(Debug)]
+pub struct MkNod {
+	pub uid: u32,
+	pub gid: u32,
+	pub parent: u64,
+	pub name: Box<[u8]>,
+	pub mode: u32,
+	pub umask: u32,
+	pub rdev: u32,
+	pub reply: ReplyEntry,
 }

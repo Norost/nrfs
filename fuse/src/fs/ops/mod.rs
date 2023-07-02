@@ -8,6 +8,7 @@ mod ioctl;
 mod listxattr;
 mod lookup;
 mod mkdir;
+mod mknod;
 mod read;
 mod readdir;
 mod readlink;
@@ -39,6 +40,14 @@ use {
 /// [1]: https://sourceforge.net/p/fuse/mailman/fuse-devel/thread/CAOw_e7ZGpmYuFpL6ajQV%3DyRFgw7tdo70BU%3D1CW-jfJABDgPG8w%40mail.gmail.com/
 /// [2]: https://x.cygwin.com/ml/cygwin/2006-01/msg00982.html
 const NO_INO: u64 = u64::MAX;
+
+const TY_BUILTIN: u16 = 0 << 9;
+const TY_BLOCK: u16 = 1 << 9;
+const TY_CHAR: u16 = 2 << 9;
+const TY_PIPE: u16 = 3 << 9;
+const TY_SOCK: u16 = 4 << 9;
+#[allow(dead_code)]
+const TY_DOOR: u16 = 5 << 9;
 
 pub(super) struct Attrs {
 	pub modified: nrfs::Modified,
@@ -142,4 +151,15 @@ fn encode_u(mut b: &[u8]) -> &[u8] {
 		b = c;
 	}
 	b
+}
+
+fn getty(mode: u16) -> Option<FileType> {
+	Some(match mode & 0o7_000 {
+		TY_BUILTIN => FileType::RegularFile,
+		TY_CHAR => FileType::CharDevice,
+		TY_BLOCK => FileType::BlockDevice,
+		TY_PIPE => FileType::NamedPipe,
+		TY_SOCK => FileType::Socket,
+		_ => return None,
+	})
 }

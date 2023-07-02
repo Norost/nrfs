@@ -1,6 +1,6 @@
-use std::io::Read;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::{io::Read, os::unix::fs::FileTypeExt};
 
 use {
 	crate::{Compression, Encryption},
@@ -308,6 +308,19 @@ async fn setattr(
 			.await??;
 		let mode = meta.permissions().mode();
 		let mode = (mode & 0o777) as u16;
+		let mode = mode
+			| if meta.file_type().is_fifo() {
+				crate::unix::TY_PIPE
+			} else if meta.file_type().is_socket() {
+				crate::unix::TY_SOCK
+			} else if meta.file_type().is_block_device() {
+				crate::unix::TY_BLOCK
+			} else if meta.file_type().is_char_device() {
+				crate::unix::TY_CHAR
+			} else {
+				// Assume file, dir or symlink
+				crate::unix::TY_BUILTIN
+			};
 		item.set_attr(b"nrfs.unixmode".into(), &mode.to_le_bytes())
 			.await??;
 	}
