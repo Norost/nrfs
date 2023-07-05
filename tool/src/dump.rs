@@ -126,10 +126,13 @@ async fn list_files(
 		let item = fs.item(data.key);
 
 		let m = item.modified().await?;
-		let secs = m.time / 1_000_000;
-		let micros = m.time.rem_euclid(1_000_000) as u32;
-		let t = chrono::NaiveDateTime::from_timestamp_opt(secs, micros * 1_000).unwrap();
-		print!("[{:<26},{:>8}] ", format!("{}", t), m.gen);
+		let fmt_time = |t: i64| {
+			let secs = t / 1_000_000;
+			let micros = t.rem_euclid(1_000_000) as u32;
+			let t = chrono::NaiveDateTime::from_timestamp_opt(secs, micros * 1_000).unwrap();
+			format!("{}", t)
+		};
+		print!("[{:<26},{:}] ", fmt_time(m.time), fmt_time(m.gen));
 
 		let mut first = true;
 		for k in item.attr_keys().await? {

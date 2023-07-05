@@ -146,6 +146,12 @@ An item describes a single object.
     The generation attribute can be used by backup tool to skip directories
     with no modified descendants.
 
+    To ensure consistency between filesystems, it is recommended to use the
+    mtime stamp rounded down to some interval.
+    For example, if a file has an mtime of 13-09-2022T11:53:33 and an interval
+    of 15 minutes is used, then the generation field has the value
+    13-09-2022T11:45:00.
+
 
 Item attributes
 ~~~~~~~~~~~~~~~

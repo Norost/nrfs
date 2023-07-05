@@ -231,7 +231,7 @@ impl<'a, D: Dev> Item<'a, D> {
 		}
 		Ok(Modified {
 			time: i64::from_le_bytes(buf[..8].try_into().unwrap()),
-			gen: u64::from_le_bytes(buf[8..].try_into().unwrap()),
+			gen: i64::from_le_bytes(buf[8..].try_into().unwrap()),
 		})
 	}
 
@@ -262,7 +262,7 @@ impl<'a, D: Dev> Item<'a, D> {
 		}
 	}
 
-	pub async fn set_modified_gen(&self, gen: u64) -> Result<(), Error<D>> {
+	pub async fn set_modified_gen(&self, gen: i64) -> Result<(), Error<D>> {
 		if self.key.dir == u64::MAX {
 			self.fs.storage.header_data_mut()[HDR_ROOT_OFFT..][(MODIFIED_OFFT + 8).into()..][..8]
 				.copy_from_slice(&gen.to_le_bytes());
@@ -367,7 +367,7 @@ impl core::error::Error for SetAttrError {}
 
 pub struct Modified {
 	pub time: i64,
-	pub gen: u64,
+	pub gen: i64,
 }
 
 fn attr_next<'a>(attr: &mut &'a [u8]) -> Option<(nrkv::Tag, &'a [u8])> {

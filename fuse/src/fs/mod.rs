@@ -33,9 +33,11 @@ pub struct Fs {
 	default_uid: libc::uid_t,
 	default_gid: libc::gid_t,
 	default_mode: u16,
-	/// The current modification generation.
-	generation: Cell<u64>,
 	ino_locks: LockSet<u64>,
+	/// Interval between generation updates.
+	///
+	/// It is a `ì64` for convenience, but it must always be positive!
+	gen_interval: Cell<i64>,
 }
 
 impl Fs {
@@ -76,8 +78,8 @@ impl Fs {
 				default_uid: unsafe { libc::getuid() },
 				default_gid: unsafe { libc::getgid() },
 				default_mode: permissions,
-				generation: m.gen.into(),
 				ino_locks: Default::default(),
+				gen_interval: (15 * 60 * 1_000_000).into(),
 			},
 			FsChannel { channel: send },
 		)
@@ -216,18 +218,19 @@ impl Fs {
 	}
 
 	async fn update_gen(&self, mut ino: u64, mut lock: LockSetExclusiveGuard<'_, u64>) {
+		let cur_gen = self.gen();
 		loop {
 			let mut sto = self.ino();
 			let Some(inode::Get::Key(key, parent, gen)) = sto.get(ino)
 				else { unreachable!() };
-			if *gen >= self.generation.get() {
+			if *gen >= cur_gen {
 				break;
 			}
-			*gen = self.generation.get();
+			*gen = cur_gen;
 			drop(sto);
 			self.fs
 				.item(*key.key())
-				.set_modified_gen(self.generation.get())
+				.set_modified_gen(cur_gen)
 				.await
 				.unwrap();
 			if ino == 1 {
@@ -239,13 +242,10 @@ impl Fs {
 		}
 	}
 
-	fn gen(&self) -> u64 {
-		self.generation.get()
-	}
-
-	fn next_gen(&self) -> u64 {
-		self.generation.set(self.generation.get() + 1);
-		self.generation.get()
+	/// Get the current generation, based on current time.
+	fn gen(&self) -> i64 {
+		let t = mtime_now();
+		t - t.rem_euclid(self.gen_interval.get())
 	}
 
 	async fn lock(&self, ino: u64) -> LockSetInclusiveGuard<'_, u64> {

@@ -37,7 +37,7 @@ struct InodeData {
 	key: Key,
 	reference_count: u64,
 	parent_ino: u64,
-	generation: u64,
+	generation: i64,
 }
 
 impl InodeStore {
@@ -55,7 +55,7 @@ impl InodeStore {
 	///
 	/// If the entry was already present,
 	/// the reference count is increased.
-	pub fn add(&mut self, key: Key, parent_ino: u64, generation: u64) -> u64 {
+	pub fn add(&mut self, key: Key, parent_ino: u64, generation: i64) -> u64 {
 		match self.rev_map.entry(*key.key()) {
 			Entry::Occupied(e) => {
 				self.map
@@ -134,6 +134,6 @@ impl InodeStore {
 }
 
 pub enum Get<'a> {
-	Key(Key, u64, &'a mut u64),
+	Key(Key, u64, &'a mut i64),
 	Stale,
 }
