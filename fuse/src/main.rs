@@ -64,6 +64,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 	let mut opts = vec![
 		MountOption::FSName("nrfs".into()),
 		MountOption::DefaultPermissions,
+		MountOption::CUSTOM("auto_cache".into()),
+		MountOption::CUSTOM("kernel_cache".into()),
 	];
 
 	if unsafe { libc::getuid() } == 0 {

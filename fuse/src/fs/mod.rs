@@ -19,7 +19,8 @@ use {
 	util::task::lock_set::{LockSet, LockSetExclusiveGuard, LockSetInclusiveGuard},
 };
 
-const TTL: Duration = Duration::MAX;
+//const TTL: Duration = Duration::MAX;
+const TTL: Duration = Duration::from_secs(3600);
 
 /// Filesystem wrapper.
 #[derive(Debug)]
